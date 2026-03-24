@@ -31,9 +31,12 @@ PAPER_TRADES_CSV = Path(__file__).parent / "results" / "paper_trades.csv"
 CSV_COLUMNS = [
     "logged_at", "decision_time", "contract_ticker", "close_ts",
     "spot", "strike", "offset_pct", "p_market", "p_market_source",
-    "p_yes_model", "z_score", "vol_60m", "structure_bias", "confirmation_bias",
+    "p_yes_model", "z_score", "vol_60m", "vol_60m_model", "vol_implied_kalshi", "vol_ratio", "vol_eff",
+    "structure_bias", "confirmation_bias", "confirmation_score",
     "ema_alignment", "rsi_value", "rsi_regime", "raw_edge", "net_edge",
-    "decision", "side", "kelly_fraction", "bet_fraction", "bet_amount", "bankroll",
+    "decision", "side", "neutral_gate", "pure_edge_gate",
+    "contracts_scanned", "tau_minutes", "gate_blocked",
+    "kelly_fraction", "bet_fraction", "bet_amount", "bankroll",
     "resolved_yes", "would_win", "would_pnl",
 ]
 
@@ -44,7 +47,7 @@ def fetch_market(ticker: str, auth: KalshiAuth) -> dict:
 
 
 def is_settled(market: dict) -> bool:
-    return market.get("status") in ("settled", "resolved")
+    return market.get("status") in ("settled", "resolved", "finalized", "determined")
 
 
 def parse_resolution(market: dict) -> bool:
@@ -112,7 +115,7 @@ def main() -> None:
         if not ticker:
             skipped += 1
             continue
-        if row.get("resolved_yes", "").strip():
+        if (row.get("resolved_yes") or "").strip():
             skipped += 1
             continue
         if row.get("decision", "").strip() != "trade":
@@ -152,8 +155,8 @@ def main() -> None:
 
         row["resolved_yes"] = str(resolved_yes)
 
-        # Compute would_win only for trade rows
-        if row.get("decision", "").strip() == "trade":
+        # Compute would_win only for trade rows with a valid bet_amount
+        if row.get("decision", "").strip() == "trade" and (row.get("bet_amount") or "").strip():
             side = row.get("side", "yes")
             if side == "yes":
                 would_win = resolved_yes

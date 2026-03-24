@@ -78,7 +78,7 @@ def simulate_p_market(
 KALSHI_RAKE = 0.07        # Kalshi charges 7% of potential profit × contract price
 DEFAULT_SLIPPAGE = 0.005  # 0.5% estimated slippage
 DEFAULT_SPREAD = 0.01     # bid-ask spread cost (~$0.01 wide on Kalshi)
-MIN_NET_EDGE = 0.03       # minimum 3% net edge required to qualify
+MIN_NET_EDGE = 0.01       # minimum 1% net edge required to qualify
 
 
 def kalshi_fee(p_market: float) -> float:

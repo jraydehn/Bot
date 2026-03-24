@@ -21,6 +21,8 @@ class ConfirmationResult:
     """Output of the confirmation indicators module."""
 
     confirmation_bias: int    # +1 bullish, -1 bearish, 0 neutral
+    confirmation_score: int   # sum of 3 indicator scores, range -3 to +3
+    no_score: int             # same as confirmation_score (3-indicator model)
     ema_alignment: str        # "bullish", "bearish", or "neutral"
     rsi_regime: str           # "bullish", "bearish", or "neutral"
     rsi_value: float          # current RSI reading
@@ -58,14 +60,14 @@ def _compute_rsi(series: pd.Series, period: int) -> pd.Series:
     return rsi
 
 
-def compute_confirmation(df: pd.DataFrame) -> ConfirmationResult:
+def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> ConfirmationResult:
     """
     Compute EMA alignment, RSI regime, and volume confirmation from 1-hour bars.
 
     EMA Alignment: 20-EMA must have been strictly above (or below) 50-EMA
     for at least the last 3 consecutive candles.
 
-    RSI Regime: RSI(21) >= 55 is bullish, <= 45 is bearish, 45–55 is neutral.
+    RSI Regime: RSI(21) >= 55 is bullish, <= 45 is bearish, 45-55 is neutral.
 
     Volume Confirmation: latest candle volume must strictly exceed its
     20-period simple moving average.
@@ -73,12 +75,16 @@ def compute_confirmation(df: pd.DataFrame) -> ConfirmationResult:
     Confirmation bias is +1 when EMA is bullish, RSI is not bearish, and volume
     confirms. It is -1 when EMA is bearish and RSI is not bullish — volume is not
     required for bearish confirmation, as low volume in a bearish structure reflects
-    absence of buying pressure and supports NO bets. Neutral RSI (45–55) does not
+    absence of buying pressure and supports NO bets. Neutral RSI (45-55) does not
     block either direction.
+
+    confirmation_score = EMA(±1) + RSI(±1) + Vol(±1), range -3 to +3.
+    no_score is identical to confirmation_score in this 3-indicator model.
 
     Args:
         df: 1-hour OHLCV DataFrame. Must have at least 60 candles.
             Required columns: open, high, low, close, volume (case-insensitive).
+        hist_1m: Unused in this model; accepted for API compatibility.
 
     Returns:
         ConfirmationResult dataclass with all indicator values and combined bias.
@@ -97,14 +103,12 @@ def compute_confirmation(df: pd.DataFrame) -> ConfirmationResult:
     volume = df["volume"]
 
     # --- EMA Alignment ---
-    # Exponential moving averages on closing prices
     ema_20 = close.ewm(span=EMA_FAST, adjust=False).mean()
     ema_50 = close.ewm(span=EMA_SLOW, adjust=False).mean()
 
     ema_20_current = float(ema_20.iloc[-1])
     ema_50_current = float(ema_50.iloc[-1])
 
-    # Check the last EMA_CONFIRM_BARS candles for a consistent spread
     last_ema20 = ema_20.iloc[-EMA_CONFIRM_BARS:].values
     last_ema50 = ema_50.iloc[-EMA_CONFIRM_BARS:].values
 
@@ -127,30 +131,38 @@ def compute_confirmation(df: pd.DataFrame) -> ConfirmationResult:
         rsi_regime = "neutral"
 
     # --- Volume Confirmation ---
-    # Volume SMA: baseline to distinguish high-conviction candles
     vol_sma = volume.rolling(window=VOLUME_MA_PERIOD).mean()
     volume_confirmed = bool(float(volume.iloc[-1]) > float(vol_sma.iloc[-1]))
+
+    # --- Score each indicator (-1 / 0 / +1) ---
+    ema_score = 1 if ema_alignment == "bullish" else (-1 if ema_alignment == "bearish" else 0)
+    rsi_score  = 1 if rsi_regime == "bullish" else (-1 if rsi_regime == "bearish" else 0)
+    vol_score  = 1 if volume_confirmed else -1
+
+    confirmation_score = ema_score + rsi_score + vol_score  # range -3 to +3
+    no_score = confirmation_score                            # same model for both directions
 
     # --- Combine into confirmation_bias ---
     if ema_alignment == "bullish" and rsi_regime != "bearish" and volume_confirmed:
         confirmation_bias = +1
-        reason = (
-            f"Bullish: EMA bullish + RSI not bearish + volume confirmed → confirmed. "
+        label = "Bullish"
+        detail = (
+            f"EMA bullish + RSI not bearish + volume confirmed → confirmed. "
             f"20-EMA ({ema_20_current:.2f}) above 50-EMA ({ema_50_current:.2f}) "
             f"for last {EMA_CONFIRM_BARS} bars; RSI={rsi_value:.1f} ({rsi_regime})."
         )
-    # Volume not required for bearish confirmation — low volume in bearish structure
-    # indicates absence of buying pressure, which supports NO bets.
     elif ema_alignment == "bearish" and rsi_regime != "bullish":
         confirmation_bias = -1
-        reason = (
-            f"Bearish: EMA bearish + RSI not bullish → confirmed (volume not required "
+        label = "Bearish"
+        detail = (
+            f"EMA bearish + RSI not bullish → confirmed (volume not required "
             f"for NO trades). 20-EMA ({ema_20_current:.2f}) below 50-EMA "
             f"({ema_50_current:.2f}) for last {EMA_CONFIRM_BARS} bars; "
             f"RSI={rsi_value:.1f} ({rsi_regime})."
         )
     else:
         confirmation_bias = 0
+        label = "Neutral"
         parts = []
         if ema_alignment == "neutral":
             parts.append("EMA alignment is neutral (crossed within last 3 bars)")
@@ -160,10 +172,21 @@ def compute_confirmation(df: pd.DataFrame) -> ConfirmationResult:
             parts.append(f"EMA bearish but RSI={rsi_value:.1f} is not bearish")
         if not volume_confirmed:
             parts.append("volume is below 20-period average")
-        reason = "Neutral: " + ("; ".join(parts) if parts else "mixed signals") + "."
+        detail = ("; ".join(parts) if parts else "mixed signals") + "."
+
+    reason = (
+        "{}: score={:+d}/3 (EMA={:+d}, RSI={:+d}, Vol={:+d}) → {}. "
+        "20-EMA ({:.2f}) vs 50-EMA ({:.2f}); RSI={:.1f} ({}).".format(
+            label, confirmation_score,
+            ema_score, rsi_score, vol_score, detail,
+            ema_20_current, ema_50_current, rsi_value, rsi_regime,
+        )
+    )
 
     return ConfirmationResult(
         confirmation_bias=confirmation_bias,
+        confirmation_score=confirmation_score,
+        no_score=no_score,
         ema_alignment=ema_alignment,
         rsi_regime=rsi_regime,
         rsi_value=rsi_value,

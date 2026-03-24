@@ -117,6 +117,23 @@ Side is determined by signals, not by comparing `p_model` vs `p_market`:
 
 All edits auto-commit and push to `https://github.com/jraydehn/Bot.git` via a PostToolUse hook.
 
+## Version Control
+
+Beyond the auto-save hook, **commit meaningful checkpoints manually** with descriptive messages whenever:
+- A model change is complete (new indicator, revised threshold, new gate logic)
+- A bug is fixed
+- Before and after any experimental change that could be reverted
+- A branch is ready to compare against another
+
+Use clean commit messages that describe *what changed and why*, not just "auto-save". Example:
+```bash
+git add decision.py confirmation_indicators.py
+git commit -m "raise Gate P YES floor to 25% for score 2-3 (max losing edge was 24.2%)"
+git push
+```
+
+This ensures any model state can be recovered exactly, and branches can be compared or cherry-picked without guesswork.
+
 ## Live Monitor Safeguards
 
 `live_monitor.py` includes session-level drawdown limits:

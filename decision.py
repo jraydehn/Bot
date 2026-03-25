@@ -10,46 +10,33 @@ from pricing_comparison import evaluate_edge, kalshi_fee, DEFAULT_SLIPPAGE, DEFA
 from kelly_sizing import compute_kelly_size
 
 # Gate 3 tiered minimum net edge thresholds.
-# Both YES and NO use the same 3-indicator score (-3 to +3).
-# Three structure tiers: confirmed, neutral, opposing.
+# Separate tiers for YES (7-indicator confirmation_score) and NO (3-indicator no_score).
+# Neutral structure adds a premium to each tier (missing structural confirmation).
+# Gate P thresholds are intentionally higher — Gate P fires without structure/confirmation.
 #
-# YES tiers (confirmation_score):
-#   Confirmed structure (+1):  score>=3 → 2%,  score>=2 → 4%
-#   Neutral structure (0):     score>=3 → 4%,  score>=2 → 6%
-#   Opposing structure (-1):   score>=3 → 10%, score>=2 → 15%  (data collection tier)
-YES_GATE3_TIERS          = [(3, 0.02), (2, 0.04)]
-YES_NEUTRAL_GATE3_TIERS  = [(3, 0.04), (2, 0.06)]
-YES_OPPOSING_GATE3_TIERS = [(3, 0.15), (2, 0.20)]
+# YES tiers (confirmation_score, range 2–9 when Gate 2 passes):
+#   Confirmed structure (+1):   score>=7 → 2%,  score>=4 → 4%,  score>=2 → 6%
+#   Neutral structure (0):      score>=7 → 4%,  score>=4 → 6%,  score>=2 → 10%
+YES_GATE3_TIERS = [(7, 0.02), (4, 0.04), (2, 0.06)]
+YES_NEUTRAL_GATE3_TIERS = [(7, 0.04), (4, 0.06), (2, 0.10)]
 #
-# NO tiers (no_score, Gate 2 requires no_score<=1):
-#   Confirmed structure (-1):  no_score<=-3→2%,  <=-2→4%,  <=0→6%,  <=1→8%
-#   Neutral structure (0):     no_score<=-3→4%,  <=-2→6%,  <=0→10%, <=1→12%
-#   Opposing structure (+1):   no_score<=-3→10%, <=-2→15%, <=0→20%, <=1→25%
-NO_GATE3_TIERS          = [(-3, 0.02), (-2, 0.04), (0, 0.06), (1, 0.08)]
-NO_NEUTRAL_GATE3_TIERS  = [(-3, 0.04), (-2, 0.06), (0, 0.10), (1, 0.12)]
-NO_OPPOSING_GATE3_TIERS = [(-3, 0.10), (-2, 0.12), (0, 0.15), (1, 0.18)]
+# NO tiers (no_score, range -3 to 0 when Gate 2 passes — Gate 2 requires no_score<=0):
+#   Confirmed structure (-1):   no_score<=-3 → 2%,  no_score<=-2 → 4%,  no_score<=0 → 6%
+#   Neutral structure (0):      no_score<=-3 → 4%,  no_score<=-2 → 6%,  no_score<=0 → 10%
+NO_GATE3_TIERS = [(-3, 0.02), (-2, 0.04), (0, 0.06)]
+NO_NEUTRAL_GATE3_TIERS = [(-3, 0.04), (-2, 0.06), (0, 0.10)]
 
 
-def _yes_gate3_threshold(score: int, neutral: bool, opposing: bool) -> float:
-    if opposing:
-        tiers = YES_OPPOSING_GATE3_TIERS
-    elif neutral:
-        tiers = YES_NEUTRAL_GATE3_TIERS
-    else:
-        tiers = YES_GATE3_TIERS
+def _yes_gate3_threshold(score: int, neutral: bool) -> float:
+    tiers = YES_NEUTRAL_GATE3_TIERS if neutral else YES_GATE3_TIERS
     for min_score, threshold in tiers:
         if score >= min_score:
             return threshold
     return float("inf")
 
 
-def _no_gate3_threshold(score: int, neutral: bool, opposing: bool) -> float:
-    if opposing:
-        tiers = NO_OPPOSING_GATE3_TIERS
-    elif neutral:
-        tiers = NO_NEUTRAL_GATE3_TIERS
-    else:
-        tiers = NO_GATE3_TIERS
+def _no_gate3_threshold(score: int, neutral: bool) -> float:
+    tiers = NO_NEUTRAL_GATE3_TIERS if neutral else NO_GATE3_TIERS
     for max_score, threshold in tiers:
         if score <= max_score:
             return threshold
@@ -84,28 +71,25 @@ def _pure_edge_override(
     yes_net = (p_model - p_market) - fee - slippage - spread
     no_net  = (p_market - p_model) - fee - slippage - spread
 
-    # Tiered edge requirements — both directions use the same 3-indicator score (-3 to +3).
+    # Tiered edge requirements — each direction has its own model and sliding threshold.
     #
-    # YES (confirmation_score -3 to +3):
-    #   score >= 3 (all 3 bullish)       → edge >= 6%
-    #   score >= 2 (2 of 3 bullish)      → edge >= 8%
-    #   score >= 1 (1 of 3 bullish)      → edge >= 10%
-    #   score <= 0 (neutral/bearish)     → edge >= 25%  (universal floor)
+    # YES (7-indicator momentum model, confirmation_score -9 to +9):
+    #   score >= 7 (both mom + most hourly bullish) → edge >= 6%
+    #   score >= 4 (both mom positive, hourly mixed) → edge >= 8%
+    #   score <  2 (weak/negative confirmation)     → edge >= 25%  (universal floor)
     #
-    # NO (no_score -3 to +3):
-    #   no_score <= -2 (majority bearish) → edge >= 6%
-    #   no_score <=  0 (neutral/mixed)   → edge >= 8%
-    #   no_score <=  1 (slightly bullish) → edge >= 10%
-    #   no_score <=  2 (mostly bullish)  → edge >= 15%
-    #   no_score  =  3 (strongly bullish) → edge >= 25%  (universal floor)
-    if confirmation_score >= 3:
+    # NO (3-indicator model, no_score -3 to +3):
+    #   no_score <= -2 (EMA+RSI+Vol all bearish)    → edge >= 6%
+    #   no_score <=  0 (neutral/mixed)              → edge >= 8%
+    #   no_score <=  1 (slightly bullish)           → edge >= 10%
+    #   no_score <=  2 (mostly bullish)             → edge >= 15%
+    #   no_score  =  3 (strongly bullish)           → edge >= 25%  (universal floor)
+    if confirmation_score >= 7:
         yes_min = 0.06
-    elif confirmation_score >= 2:
+    elif confirmation_score >= 4:
         yes_min = PURE_EDGE_MIN_NET_EDGE  # 8%
-    elif confirmation_score >= 1:
-        yes_min = 0.10
     else:
-        yes_min = 0.25  # universal floor
+        yes_min = 0.25  # universal floor — any score qualifies at 25%+ net edge
 
     if no_score <= -2:
         no_min = 0.06
@@ -193,12 +177,16 @@ def evaluate_trade(
 
     Gates are evaluated in this order — if any gate fails, the function
     returns immediately with decision="no_trade":
-        1. Market structure bias must not oppose the proposed trade direction.
-           - YES trades: structure_bias == -1 hard-blocks. structure_bias == 0 or +1
-                         allowed (neutral applies higher thresholds at Gate 3).
-           - NO trades:  structure_bias == +1 hard-blocks. structure_bias == 0 or -1
-                         allowed (neutral applies higher thresholds at Gate 3).
-           Gate P can override a Gate 1 hard-block if the edge is large enough.
+        1. Market structure bias must support the proposed trade direction.
+           - YES trades: structure_bias must be +1 (bullish). Neutral (0) blocks YES
+                         via the normal gate path — confirmed structure is required
+                         because lagging indicators (EMA/RSI) reflect prior momentum,
+                         not immediate direction in a ranging market.
+                         Neutral-structure YES can still fire through Gate P if the
+                         edge is large enough relative to confirmation_score.
+           - NO trades:  structure_bias must be -1 (bearish, standard threshold)
+                         OR 0 (neutral, higher edge threshold applied at Gate 3).
+                         structure_bias = +1 always blocks a NO trade.
         2. Confirmation indicators bias must align with the proposed trade direction.
         3. Net edge (after fees and slippage) must exceed the tiered minimum threshold.
            Thresholds scale with confirmation strength (confirmation_score for YES,
@@ -264,8 +252,8 @@ def evaluate_trade(
         )
     elif structure_opposes:
         reasons.append(
-            f"Gate 1 PASSED (opposing structure): structure_bias={structure_bias} opposes "
-            f"{side.upper()} trade — elevated edge threshold applied at Gate 3."
+            f"Gate 1 PASSED (against structure): structure_bias={structure_bias} opposes "
+            f"{side.upper()} trade — neutral/higher thresholds applied at Gate 3."
         )
     else:
         reasons.append(
@@ -275,15 +263,18 @@ def evaluate_trade(
         )
 
     # --- Gate 2: Confirmation indicators ---
-    # Both YES and NO use the same 3-indicator score (EMA + RSI + directional vol).
-    # YES: confirmation_bias == +1 required (score >= 2).
-    # NO:  no_score <= 1 passes (at most one bullish indicator); >= 2 blocked.
+    # NO trades use no_score (3-indicator: EMA+RSI+Vol) — the original working model.
+    #   no_score <= 0 passes (neutral or bearish); no_score > 0 blocked (net bullish).
+    #   Scores -1 to 0 are allowed but face a higher Gate 3 edge requirement (8%).
+    # YES trades use confirmation_bias (7-indicator: adds MACD, VWAP, momentum).
+    # Momentum scores are intentionally excluded from NO direction to prevent
+    # short-term bounces from overriding a broader bearish structure signal.
     if side == "no":
-        gate2_passes = no_score <= 1
-        bias_label = f"no_score={no_score:+d}"
+        gate2_passes = no_score <= 0
+        bias_label = f"no_score={no_score:+d} (3-indicator)"
     else:
         gate2_passes = confirmation_bias == required_bias
-        bias_label = f"confirmation_bias={confirmation_bias}"
+        bias_label = f"confirmation_bias={confirmation_bias} (7-indicator)"
 
     if not gate2_passes:
         reasons.append(
@@ -313,13 +304,11 @@ def evaluate_trade(
     #   NO:  tiered by no_score (3-indicator, range -3 to -2 at this point)
     # Neutral structure adds a premium to each tier.
     if side == "yes":
-        effective_min_edge = _yes_gate3_threshold(confirmation_score, neutral_trade, structure_opposes)
-        struct_label = "opposing" if structure_opposes else ("neutral" if neutral_trade else "confirmed")
-        tier_label = f"YES score={confirmation_score:+d} ({struct_label} structure)"
+        effective_min_edge = _yes_gate3_threshold(confirmation_score, neutral_trade)
+        tier_label = f"YES score={confirmation_score:+d} ({'neutral' if neutral_trade else 'confirmed'} structure)"
     else:
-        effective_min_edge = _no_gate3_threshold(no_score, neutral_trade, structure_opposes)
-        struct_label = "opposing" if structure_opposes else ("neutral" if neutral_trade else "confirmed")
-        tier_label = f"NO no_score={no_score:+d} ({struct_label} structure)"
+        effective_min_edge = _no_gate3_threshold(no_score, neutral_trade)
+        tier_label = f"NO no_score={no_score:+d} ({'neutral' if neutral_trade else 'confirmed'} structure)"
 
     p_edge, p_ref = (p_model, p_market) if side == "yes" else (p_market, p_model)
     pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=effective_min_edge)

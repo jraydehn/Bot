@@ -50,7 +50,7 @@ def get_csv_path(asset: str = "BTC") -> Path:
     if asset == "BTC":
         return PAPER_TRADES_CSV  # keep existing BTC file unchanged
     return Path(__file__).parent / "results" / f"paper_trades_{asset.lower()}.csv"
-DEFAULT_BANKROLL  = 10_000.0
+DEFAULT_BANKROLL  = 1_000.0
 
 CSV_COLUMNS = [
     "logged_at",

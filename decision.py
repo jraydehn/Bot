@@ -19,11 +19,11 @@ from kelly_sizing import compute_kelly_size
 YES_GATE3_TIERS = [(3, 0.02), (2, 0.04)]
 YES_NEUTRAL_GATE3_TIERS = [(3, 0.04), (2, 0.06)]
 #
-# NO tiers (no_score, range -3 to 0 when Gate 2 passes — Gate 2 requires no_score<=0):
-#   Confirmed structure (-1):   no_score<=-3 → 2%,  no_score<=-2 → 4%,  no_score<=0 → 6%
-#   Neutral structure (0):      no_score<=-3 → 4%,  no_score<=-2 → 6%,  no_score<=0 → 10%
-NO_GATE3_TIERS = [(-3, 0.02), (-2, 0.04), (0, 0.06)]
-NO_NEUTRAL_GATE3_TIERS = [(-3, 0.04), (-2, 0.06), (0, 0.10)]
+# NO tiers (no_score, range -3 to +1 when Gate 2 passes — Gate 2 requires no_score<=1):
+#   Confirmed structure (-1):   no_score<=-3 → 2%,  no_score<=-2 → 4%,  no_score<=0 → 6%,  no_score<=1 → 8%
+#   Neutral structure (0):      no_score<=-3 → 4%,  no_score<=-2 → 6%,  no_score<=0 → 10%, no_score<=1 → 12%
+NO_GATE3_TIERS = [(-3, 0.02), (-2, 0.04), (0, 0.06), (1, 0.08)]
+NO_NEUTRAL_GATE3_TIERS = [(-3, 0.04), (-2, 0.06), (0, 0.10), (1, 0.12)]
 
 
 def _yes_gate3_threshold(score: int, neutral: bool) -> float:
@@ -267,9 +267,9 @@ def evaluate_trade(
     # --- Gate 2: Confirmation indicators ---
     # Both YES and NO use the same 3-indicator score (EMA + RSI + directional vol).
     # YES: confirmation_bias == +1 required (score >= 2).
-    # NO:  no_score <= 0 passes (neutral or bearish); > 0 blocked (net bullish signals).
+    # NO:  no_score <= 1 passes (at most one bullish indicator); >= 2 blocked.
     if side == "no":
-        gate2_passes = no_score <= 0
+        gate2_passes = no_score <= 1
         bias_label = f"no_score={no_score:+d}"
     else:
         gate2_passes = confirmation_bias == required_bias

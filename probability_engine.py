@@ -73,3 +73,54 @@ def estimate_probability(
         sigma_to_expiry=sigma_tau,
         expected_move_pct=expected_move_pct,
     )
+
+
+# Fraction of realized vol in the blend (0 = all implied, 1 = all realized).
+# At 0.3, the model uses 30% realized vol + 70% market-implied vol.
+REALIZED_VOL_WEIGHT = 0.6
+
+
+def blend_vol(
+    vol_realized: float,
+    vol_implied: float,
+    weight: float = REALIZED_VOL_WEIGHT,
+) -> float:
+    """
+    Linear blend of realized and market-implied per-minute volatility.
+    Falls back to realized vol if implied is unavailable (NaN or non-positive).
+
+    Args:
+        vol_realized: Realized per-minute vol from compute_realized_volatility().
+        vol_implied:  Implied per-minute vol from implied_vol_from_price().
+        weight:       Weight on realized vol (1-weight goes to implied).
+    """
+    if not (vol_implied > 0):   # handles NaN, inf, and non-positive
+        return vol_realized
+    return weight * vol_realized + (1.0 - weight) * vol_implied
+
+
+def implied_vol_from_price(
+    p_market: float,
+    S: float,
+    K: float,
+    tau: float,
+) -> float:
+    """
+    Back-calculate per-minute volatility implied by the Kalshi market price,
+    using the inverse of the log-normal model in estimate_probability().
+
+    p_market = 1 - norm.cdf(log(K/S) / (sigma_min * sqrt(tau)))
+    => sigma_min = log(K/S) / (norm.ppf(1 - p_market) * sqrt(tau))
+
+    Returns float('nan') if the inputs are degenerate (e.g. ITM strike,
+    extreme probabilities, or non-positive tau).
+    """
+    try:
+        if not (0 < p_market < 1) or K <= S or tau <= 0:
+            return float("nan")
+        z_implied = norm.ppf(1.0 - p_market)
+        if z_implied <= 0:
+            return float("nan")
+        return math.log(K / S) / (z_implied * math.sqrt(tau))
+    except Exception:
+        return float("nan")

@@ -15,6 +15,9 @@
 
 set -euo pipefail
 
+export KALSHI_KEY_ID=25b3db1f-83bd-436f-b97a-bb74dabcfdfe
+export KALSHI_KEY_PATH=~/kalshi_key_fixed.pem
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="$DIR/results/cron.log"
 

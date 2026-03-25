@@ -13,6 +13,7 @@ Run this once after each contract expires (e.g. hourly, offset by 10 minutes):
 Requires KALSHI_KEY_ID and KALSHI_KEY_PATH env vars.
 """
 
+import argparse
 import csv
 import os
 import sys
@@ -31,9 +32,12 @@ PAPER_TRADES_CSV = Path(__file__).parent / "results" / "paper_trades.csv"
 CSV_COLUMNS = [
     "logged_at", "decision_time", "contract_ticker", "close_ts",
     "spot", "strike", "offset_pct", "p_market", "p_market_source",
-    "p_yes_model", "z_score", "vol_60m", "structure_bias", "confirmation_bias",
+    "p_yes_model", "z_score", "vol_60m", "vol_60m_model", "vol_implied_kalshi", "vol_ratio", "vol_eff",
+    "structure_bias", "confirmation_bias", "confirmation_score",
     "ema_alignment", "rsi_value", "rsi_regime", "raw_edge", "net_edge",
-    "decision", "side", "kelly_fraction", "bet_fraction", "bet_amount", "bankroll",
+    "decision", "side", "neutral_gate", "pure_edge_gate",
+    "contracts_scanned", "tau_minutes", "gate_blocked",
+    "kelly_fraction", "bet_fraction", "bet_amount", "bankroll",
     "resolved_yes", "would_win", "would_pnl",
 ]
 
@@ -44,7 +48,7 @@ def fetch_market(ticker: str, auth: KalshiAuth) -> dict:
 
 
 def is_settled(market: dict) -> bool:
-    return market.get("status") in ("settled", "resolved")
+    return market.get("status") in ("settled", "resolved", "finalized", "determined")
 
 
 def parse_resolution(market: dict) -> bool:
@@ -88,9 +92,10 @@ def compute_pnl(row: dict, resolved_yes: bool) -> float:
             return round(-bet, 2)
 
 
-def main() -> None:
-    if not PAPER_TRADES_CSV.exists():
-        print("No paper_trades.csv found. Run paper_trade_runner.py first.")
+def main(csv_path: Path = None) -> None:
+    target = csv_path or PAPER_TRADES_CSV
+    if not target.exists():
+        print(f"No trades CSV found at {target}. Run paper_trade_runner.py first.")
         return
 
     auth = load_auth()
@@ -99,7 +104,7 @@ def main() -> None:
         sys.exit(1)
 
     # Read all rows
-    with open(PAPER_TRADES_CSV, newline="") as f:
+    with open(target, newline="") as f:
         rows = list(csv.DictReader(f))
 
     updated = 0
@@ -112,7 +117,7 @@ def main() -> None:
         if not ticker:
             skipped += 1
             continue
-        if row.get("resolved_yes", "").strip():
+        if (row.get("resolved_yes") or "").strip():
             skipped += 1
             continue
         if row.get("decision", "").strip() != "trade":
@@ -152,8 +157,8 @@ def main() -> None:
 
         row["resolved_yes"] = str(resolved_yes)
 
-        # Compute would_win only for trade rows
-        if row.get("decision", "").strip() == "trade":
+        # Compute would_win only for trade rows with a valid bet_amount
+        if row.get("decision", "").strip() == "trade" and (row.get("bet_amount") or "").strip():
             side = row.get("side", "yes")
             if side == "yes":
                 would_win = resolved_yes
@@ -172,14 +177,29 @@ def main() -> None:
 
     # Write all rows back
     if updated > 0:
-        with open(PAPER_TRADES_CSV, "w", newline="") as f:
+        with open(target, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
             writer.writeheader()
             writer.writerows(rows)
-        print(f"\n  Updated {updated} rows in {PAPER_TRADES_CSV}")
+        print(f"\n  Updated {updated} rows in {target}")
     else:
         print(f"\n  No rows updated (skipped={skipped}).")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Outcome checker")
+    parser.add_argument("--asset", type=str, default=None,
+                        help="Asset CSV to check: BTC, ETH, SOL (default: all)")
+    args = parser.parse_args()
+
+    if args.asset:
+        from paper_trade_runner import get_csv_path
+        main(get_csv_path(args.asset.upper()))
+    else:
+        # Process all known asset CSVs
+        from paper_trade_runner import get_csv_path
+        for asset in ("BTC", "ETH", "SOL"):
+            p = get_csv_path(asset)
+            if p.exists():
+                print(f"\n--- {asset} ---")
+                main(p)

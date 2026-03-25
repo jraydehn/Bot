@@ -20,13 +20,18 @@ EMA_CONFIRM_BARS = 3     # consecutive bars the EMA spread must hold to confirm
 class ConfirmationResult:
     """Output of the confirmation indicators module."""
 
-    confirmation_bias: int    # +1 bullish, -1 bearish, 0 neutral
+    confirmation_bias: int    # +1 bullish, -1 bearish, 0 neutral — from 7-indicator score (YES direction)
+    no_bias: int              # +1 bullish, -1 bearish, 0 neutral — from 3-indicator no_score (NO direction)
+    confirmation_score: int   # sum of up to 7 indicator scores, range -9 to +9
+    no_score: int             # 3-indicator score for NO direction (EMA+RSI+Vol, -3 to +3)
     ema_alignment: str        # "bullish", "bearish", or "neutral"
     rsi_regime: str           # "bullish", "bearish", or "neutral"
     rsi_value: float          # current RSI reading
     volume_confirmed: bool    # True if latest volume exceeds its 20-period average
     ema_20_current: float     # current value of the 20-period EMA
     ema_50_current: float     # current value of the 50-period EMA
+    mom_15m_score: int        # +1 if 15-min price change > 0, -1 if < 0, 0 if unavailable
+    mom_60m_score: int        # +1 if 60-min price change > 0, -1 if < 0, 0 if unavailable
     reason: str               # plain-English explanation of the classification
 
 
@@ -58,7 +63,7 @@ def _compute_rsi(series: pd.Series, period: int) -> pd.Series:
     return rsi
 
 
-def compute_confirmation(df: pd.DataFrame) -> ConfirmationResult:
+def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> ConfirmationResult:
     """
     Compute EMA alignment, RSI regime, and volume confirmation from 1-hour bars.
 
@@ -79,6 +84,8 @@ def compute_confirmation(df: pd.DataFrame) -> ConfirmationResult:
     Args:
         df: 1-hour OHLCV DataFrame. Must have at least 60 candles.
             Required columns: open, high, low, close, volume (case-insensitive).
+        hist_1m: Optional 1-minute OHLCV DataFrame with at least 62 candles.
+            If provided, adds 15-minute and 60-minute price momentum scores.
 
     Returns:
         ConfirmationResult dataclass with all indicator values and combined bias.
@@ -104,13 +111,25 @@ def compute_confirmation(df: pd.DataFrame) -> ConfirmationResult:
     ema_20_current = float(ema_20.iloc[-1])
     ema_50_current = float(ema_50.iloc[-1])
 
-    # Check the last EMA_CONFIRM_BARS candles for a consistent spread
-    last_ema20 = ema_20.iloc[-EMA_CONFIRM_BARS:].values
-    last_ema50 = ema_50.iloc[-EMA_CONFIRM_BARS:].values
+    # Check the last EMA_CONFIRM_BARS candles for a consistent spread.
+    # Three conditions determine alignment:
+    #   Bullish: EMA-20 > EMA-50 (golden cross) AND price > EMA-20 (above both)
+    #   Bearish: EMA-20 < EMA-50 (death cross) OR price < EMA-50 (below both EMAs)
+    #   Neutral: golden cross but price trapped between the two EMAs
+    # Price below both EMAs is bearish regardless of crossover status — both EMAs
+    # act as overhead resistance when price is underneath them.
+    last_ema20  = ema_20.iloc[-EMA_CONFIRM_BARS:].values
+    last_ema50  = ema_50.iloc[-EMA_CONFIRM_BARS:].values
+    last_close  = close.iloc[-EMA_CONFIRM_BARS:].values
 
-    if all(last_ema20 > last_ema50):
+    golden_cross  = all(last_ema20 > last_ema50)
+    death_cross   = all(last_ema20 < last_ema50)
+    price_above   = all(last_close > last_ema20)   # price above faster EMA (above both)
+    price_below   = all(last_close < last_ema50)   # price below slower EMA (below both)
+
+    if golden_cross and price_above:
         ema_alignment = "bullish"
-    elif all(last_ema20 < last_ema50):
+    elif death_cross or price_below:
         ema_alignment = "bearish"
     else:
         ema_alignment = "neutral"
@@ -127,48 +146,115 @@ def compute_confirmation(df: pd.DataFrame) -> ConfirmationResult:
         rsi_regime = "neutral"
 
     # --- Volume Confirmation ---
-    # Volume SMA: baseline to distinguish high-conviction candles
+    # Directional volume: high volume on an up candle = bullish, high volume on a down
+    # candle = bearish, low volume either way = neutral (0). This correctly handles
+    # selling pressure (high volume + price down) as bearish rather than penalizing
+    # any high-volume candle regardless of direction.
     vol_sma = volume.rolling(window=VOLUME_MA_PERIOD).mean()
-    volume_confirmed = bool(float(volume.iloc[-1]) > float(vol_sma.iloc[-1]))
+    high_vol = bool(float(volume.iloc[-1]) > float(vol_sma.iloc[-1]))
+    price_up = bool(float(close.iloc[-1]) > float(close.iloc[-2]))
+    volume_confirmed = high_vol  # kept for display: True if volume above average
 
-    # --- Combine into confirmation_bias ---
-    if ema_alignment == "bullish" and rsi_regime != "bearish" and volume_confirmed:
+    # --- MACD (12, 26, 9) ---
+    ema_12 = close.ewm(span=12, adjust=False).mean()
+    ema_26 = close.ewm(span=26, adjust=False).mean()
+    macd_line = ema_12 - ema_26
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    macd_score = 1 if float(macd_line.iloc[-1]) > float(signal_line.iloc[-1]) else -1
+
+    # --- Rolling VWAP (24-period) ---
+    if all(c in df.columns for c in ["high", "low"]):
+        typical_price = (df["high"] + df["low"] + close) / 3
+        tp_x_vol = typical_price * volume
+        vwap = tp_x_vol.rolling(24).sum() / volume.rolling(24).sum()
+        vwap_score = 1 if float(close.iloc[-1]) > float(vwap.iloc[-1]) else -1
+    else:
+        vwap_score = 0
+
+    # --- Score each indicator ---
+    ema_score = 1 if ema_alignment == "bullish" else (-1 if ema_alignment == "bearish" else 0)
+    rsi_score  = 1 if rsi_regime == "bullish" else (-1 if rsi_regime == "bearish" else 0)
+    if high_vol and price_up:
+        vol_score = 1
+    elif high_vol and not price_up:
+        vol_score = -1
+    else:
+        vol_score = 0  # low volume = neutral signal
+
+    # --- Short-term 1m momentum scores (if hist_1m provided) ---
+    # Weight 2 (vs weight 1 for hourly indicators) so that falling short-term momentum
+    # overrides a bullish hourly signal in Gate P. Retroactive analysis showed that
+    # chg_15m > 0 AND chg_60m > 0 is the strongest predictor of Gate P YES wins.
+    mom_15m_score = 0
+    mom_60m_score = 0
+    if hist_1m is not None and len(hist_1m) >= 62:
+        hist_1m_c = hist_1m.copy()
+        hist_1m_c.columns = hist_1m_c.columns.str.lower()
+        c1m = hist_1m_c["close"]
+        last_close_1m = float(c1m.iloc[-1])
+        close_15_ago  = float(c1m.iloc[-16])   # ~15 min ago
+        close_60_ago  = float(c1m.iloc[-61])   # ~60 min ago
+        mom_15m = (last_close_1m - close_15_ago) / close_15_ago
+        mom_60m = (last_close_1m - close_60_ago) / close_60_ago
+        mom_15m_score = 2 if mom_15m > 0 else -2
+        mom_60m_score = 2 if mom_60m > 0 else -2
+
+    # --- 3-indicator score for NO direction (original model, unchanged) ---
+    # EMA + RSI + Vol only — these were the working NO indicators from the baseline model.
+    # Momentum scores are intentionally excluded from NO direction to avoid short-term
+    # bounces flipping the NO signal during a broader bearish structure.
+    no_score = ema_score + rsi_score + vol_score  # range -3 to +3
+
+    if no_score >= 2:
+        no_bias = +1
+    elif no_score <= -2:
+        no_bias = -1
+    else:
+        no_bias = 0
+
+    # --- 7-indicator score for YES direction (MACD, VWAP, momentum added) ---
+    # Hourly indicators: -5 to +5; momentum (weight 2 each): -4 to +4 → total -9 to +9
+    confirmation_score = ema_score + rsi_score + vol_score + macd_score + vwap_score + mom_15m_score + mom_60m_score
+    max_score = 5 + (4 if mom_15m_score != 0 or mom_60m_score != 0 else 0)
+
+    # --- confirmation_bias: YES direction uses full 7-indicator score ---
+    if confirmation_score >= 2:
         confirmation_bias = +1
-        reason = (
-            f"Bullish: EMA bullish + RSI not bearish + volume confirmed → confirmed. "
-            f"20-EMA ({ema_20_current:.2f}) above 50-EMA ({ema_50_current:.2f}) "
-            f"for last {EMA_CONFIRM_BARS} bars; RSI={rsi_value:.1f} ({rsi_regime})."
-        )
-    # Volume not required for bearish confirmation — low volume in bearish structure
-    # indicates absence of buying pressure, which supports NO bets.
-    elif ema_alignment == "bearish" and rsi_regime != "bullish":
+        label = "Bullish"
+    elif confirmation_score <= -2:
         confirmation_bias = -1
-        reason = (
-            f"Bearish: EMA bearish + RSI not bullish → confirmed (volume not required "
-            f"for NO trades). 20-EMA ({ema_20_current:.2f}) below 50-EMA "
-            f"({ema_50_current:.2f}) for last {EMA_CONFIRM_BARS} bars; "
-            f"RSI={rsi_value:.1f} ({rsi_regime})."
-        )
+        label = "Bearish"
     else:
         confirmation_bias = 0
-        parts = []
-        if ema_alignment == "neutral":
-            parts.append("EMA alignment is neutral (crossed within last 3 bars)")
-        elif ema_alignment == "bullish" and rsi_regime != "bullish":
-            parts.append(f"EMA bullish but RSI={rsi_value:.1f} is not bullish")
-        elif ema_alignment == "bearish" and rsi_regime != "bearish":
-            parts.append(f"EMA bearish but RSI={rsi_value:.1f} is not bearish")
-        if not volume_confirmed:
-            parts.append("volume is below 20-period average")
-        reason = "Neutral: " + ("; ".join(parts) if parts else "mixed signals") + "."
+        label = "Neutral"
+
+    mom_str = ""
+    if mom_15m_score != 0 or mom_60m_score != 0:
+        mom_str = ", Mom15m={:+d}, Mom60m={:+d}".format(mom_15m_score, mom_60m_score)
+    tag = "confirmed" if confirmation_bias != 0 else "mixed signals"
+    reason = (
+        "{}: score={:+d}/{} (EMA={:+d}, RSI={:+d}, Vol={:+d}, MACD={:+d}, VWAP={:+d}{}) → {} (YES bias). "
+        "NO bias from 3-indicator no_score={:+d} (no_bias={:+d}). "
+        "20-EMA ({:.2f}) vs 50-EMA ({:.2f}); RSI={:.1f} ({}).".format(
+            label, confirmation_score, max_score,
+            ema_score, rsi_score, vol_score, macd_score, vwap_score, mom_str, tag,
+            no_score, no_bias,
+            ema_20_current, ema_50_current, rsi_value, rsi_regime
+        )
+    )
 
     return ConfirmationResult(
         confirmation_bias=confirmation_bias,
+        no_bias=no_bias,
+        confirmation_score=confirmation_score,
+        no_score=no_score,
         ema_alignment=ema_alignment,
         rsi_regime=rsi_regime,
         rsi_value=rsi_value,
         volume_confirmed=volume_confirmed,
         ema_20_current=ema_20_current,
         ema_50_current=ema_50_current,
+        mom_15m_score=mom_15m_score,
+        mom_60m_score=mom_60m_score,
         reason=reason,
     )

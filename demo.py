@@ -12,7 +12,7 @@ import pandas as pd
 from market_data import compute_realized_volatility
 from probability_engine import estimate_probability
 from pricing_comparison import evaluate_edge
-from market_structure import detect_market_structure
+from market_structure import detect_market_structure, resample_to_15min
 from confirmation_indicators import compute_confirmation
 from kelly_sizing import compute_kelly_size
 from decision import evaluate_trade
@@ -23,42 +23,54 @@ from decision import evaluate_trade
 # ---------------------------------------------------------------------------
 
 def make_ohlcv_1min(
-    n: int = 200,
+    n: int = 2000,
     start_price: float = 84_000.0,
-    drift: float = 0.00005,
-    vol: float = 0.0008,
+    drift: float = 0.00003,
+    vol: float = 0.0006,
     seed: int = 42,
 ) -> pd.DataFrame:
     """
-    Generate n rows of synthetic 1-minute BTC OHLCV data.
+    Generate n rows of synthetic 1-minute BTC OHLCV data with a DatetimeIndex.
 
-    Uses a simple geometric random walk with a small upward drift so that
-    the bullish scenario is plausible.
+    Uses a geometric random walk plus a deterministic zigzag component so that
+    resampled 15-minute candles produce clear ascending swing highs and lows.
+    2000 minutes → ~133 15-minute bars (well above the 120-candle minimum).
 
     Args:
-        n: Number of 1-minute bars to generate (minimum 120 required by market_data).
+        n: Number of 1-minute bars to generate (default 2000, ≥1800 needed for
+           at least 120 15-minute bars after resampling).
         start_price: Starting BTC price in USD.
-        drift: Per-minute log drift (small positive for mild upward bias).
+        drift: Per-minute log drift.
         vol: Per-minute log volatility.
         seed: Random seed for reproducibility.
 
     Returns:
-        DataFrame with columns: open, high, low, close, volume.
+        DataFrame with columns: open, high, low, close, volume and a UTC DatetimeIndex.
+        The DatetimeIndex is required for resample_to_15min().
     """
     rng = np.random.default_rng(seed)
     log_returns = rng.normal(drift, vol, n)
-    closes = start_price * np.exp(np.cumsum(log_returns))
-    closes = np.insert(closes, 0, start_price)[:-1]  # shift so index 0 = start_price
+    closes_rw = start_price * np.exp(np.cumsum(log_returns))
+    closes_rw = np.insert(closes_rw, 0, start_price)[:-1]  # shift so index 0 = start_price
 
-    # Synthesise OHLC from close with small intra-bar noise
-    noise = rng.uniform(0.0005, 0.002, n)
+    # Superimpose a deterministic triangle-wave zigzag (±1.5%, 600-min cycle =
+    # 40 15-min bars per cycle) so swing pivots survive resampling.
+    t = np.arange(n)
+    zigzag_period = 600
+    triangle = closes_rw * 0.015 * (
+        2 * np.abs((t % zigzag_period) / zigzag_period - 0.5) - 0.5
+    )
+    closes = closes_rw + triangle
+
+    noise = rng.uniform(0.0003, 0.001, n)
     opens = closes * np.exp(rng.normal(0, vol * 0.3, n))
     highs = np.maximum(opens, closes) * (1 + noise)
-    lows = np.minimum(opens, closes) * (1 - noise)
-    volume = rng.uniform(5, 50, n) * 1e6  # realistic BTC volume in USD
+    lows  = np.minimum(opens, closes) * (1 - noise)
+    volume = rng.uniform(5, 50, n) * 1e6
 
+    idx = pd.date_range("2026-01-01", periods=n, freq="1min", tz="UTC")
     return pd.DataFrame({"open": opens, "high": highs, "low": lows,
-                         "close": closes, "volume": volume})
+                         "close": closes, "volume": volume}, index=idx)
 
 
 def make_ohlcv_1h(
@@ -100,41 +112,6 @@ def make_ohlcv_1h(
                          "close": closes, "volume": volume})
 
 
-def make_ohlcv_4h(n: int = 120) -> pd.DataFrame:
-    """
-    Generate n rows of synthetic 4-hour BTC OHLCV data with a deterministic
-    bullish zigzag pattern, guaranteeing ascending swing highs and lows.
-
-    The series is constructed as a sawtooth wave on top of an upward trend,
-    so that pivot detection reliably finds higher highs and higher lows.
-
-    Args:
-        n: Number of 4-hour bars (minimum 90 required by market_structure).
-
-    Returns:
-        DataFrame with columns: open, high, low, close, volume.
-    """
-    rng = np.random.default_rng(77)
-
-    # Build a zigzag: price oscillates in a triangle wave on top of a rising baseline
-    baseline = np.linspace(70_000, 88_000, n)          # steady uptrend
-    zigzag_period = 14                                   # bars per wave cycle
-    t = np.arange(n)
-    # Triangle wave oscillates ±4% of baseline
-    triangle = 0.04 * baseline * (
-        2 * np.abs((t % zigzag_period) / zigzag_period - 0.5) - 0.5
-    )
-    closes = baseline + triangle + rng.normal(0, 100, n)  # tiny noise
-
-    noise = rng.uniform(0.005, 0.012, n)
-    opens = closes * (1 + rng.normal(0, 0.003, n))
-    highs = np.maximum(opens, closes) * (1 + noise)
-    lows = np.minimum(opens, closes) * (1 - noise)
-    volume = rng.uniform(200, 800, n) * 1e6
-
-    return pd.DataFrame({"open": opens, "high": highs, "low": lows,
-                         "close": closes, "volume": volume})
-
 
 # ---------------------------------------------------------------------------
 # Demo runner
@@ -157,9 +134,9 @@ def main() -> None:
     print("=" * 60)
 
     # --- Generate mock data ---
-    df_1min = make_ohlcv_1min()
+    df_1min = make_ohlcv_1min()          # 2000 1-min bars with DatetimeIndex
     df_1h = make_ohlcv_1h()
-    df_4h = make_ohlcv_4h(n=120)
+    df_15m = resample_to_15min(df_1min)  # ~133 15-min bars for market structure
 
     current_price = float(df_1min["close"].iloc[-1])
     strike = current_price * 0.997           # strike is 0.3% BELOW spot (slight ITM)
@@ -215,8 +192,8 @@ def main() -> None:
     # -------------------------------------------------------------------
     # Module 4: Market Structure
     # -------------------------------------------------------------------
-    divider("MODULE 4 — MARKET STRUCTURE (4-hour data)")
-    structure_result = detect_market_structure(df_4h)
+    divider("MODULE 4 — MARKET STRUCTURE (15-minute data)")
+    structure_result = detect_market_structure(df_15m)
     print(f"  structure_bias     : {structure_result.structure_bias:+d}")
     print(f"  swing_highs        : {[f'${h:,.2f}' for h in structure_result.swing_highs]}")
     print(f"  swing_lows         : {[f'${l:,.2f}' for l in structure_result.swing_lows]}")

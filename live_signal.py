@@ -46,14 +46,65 @@ DEFAULT_OFFSET = 0.005
 DEFAULT_BANKROLL = 10_000
 TAU = 60  # 1-hour expiry
 
+# Per-asset configuration: Kalshi series ticker, Binance symbol, and spot price feeds.
+ASSET_CONFIG = {
+    "BTC": {
+        "series_ticker":  "KXBTCD",
+        "binance_symbol": "BTCUSDT",
+        "index_name":     "BRTI",
+        "spot_sources": [
+            ("coinbase", lambda: float(requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot",      timeout=8).json()["data"]["amount"])),
+            ("kraken",   lambda: float(requests.get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD",   timeout=8).json()["result"]["XXBTZUSD"]["c"][0])),
+            ("bitstamp", lambda: float(requests.get("https://www.bitstamp.net/api/v2/ticker/btcusd/",       timeout=8).json()["last"])),
+            ("gemini",   lambda: float(requests.get("https://api.gemini.com/v1/pubticker/btcusd",           timeout=8).json()["last"])),
+        ],
+    },
+    "ETH": {
+        "series_ticker":  "KXETHD",
+        "binance_symbol": "ETHUSDT",
+        "index_name":     "ETHUSD",
+        "spot_sources": [
+            ("coinbase", lambda: float(requests.get("https://api.coinbase.com/v2/prices/ETH-USD/spot",      timeout=8).json()["data"]["amount"])),
+            ("kraken",   lambda: float(requests.get("https://api.kraken.com/0/public/Ticker?pair=XETHZUSD", timeout=8).json()["result"]["XETHZUSD"]["c"][0])),
+            ("bitstamp", lambda: float(requests.get("https://www.bitstamp.net/api/v2/ticker/ethusd/",       timeout=8).json()["last"])),
+            ("gemini",   lambda: float(requests.get("https://api.gemini.com/v1/pubticker/ethusd",           timeout=8).json()["last"])),
+        ],
+    },
+    "SOL": {
+        "series_ticker":  "KXSOLD",
+        "binance_symbol": "SOLUSDT",
+        "index_name":     "SOLUSD",
+        "spot_sources": [
+            ("coinbase", lambda: float(requests.get("https://api.coinbase.com/v2/prices/SOL-USD/spot",      timeout=8).json()["data"]["amount"])),
+            ("kraken",   lambda: float(requests.get("https://api.kraken.com/0/public/Ticker?pair=SOLUSD",   timeout=8).json()["result"]["SOLUSD"]["c"][0])),
+        ],
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
 
 def load_auth() -> Optional[KalshiAuth]:
+    # 1. Environment variables (highest priority)
     key_id   = os.environ.get("KALSHI_KEY_ID", "").strip()
     key_path = os.environ.get("KALSHI_KEY_PATH", "").strip()
+
+    # 2. Fall back to local config file: kalshi_btc/.kalshi_config
+    #    Format (one per line):
+    #      KALSHI_KEY_ID=your-key-id
+    #      KALSHI_KEY_PATH=~/kalshi_key_fixed.pem
+    if not key_id or not key_path:
+        config_file = Path(__file__).parent / ".kalshi_config"
+        if config_file.exists():
+            for line in config_file.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("KALSHI_KEY_ID="):
+                    key_id = line.split("=", 1)[1].strip()
+                elif line.startswith("KALSHI_KEY_PATH="):
+                    key_path = line.split("=", 1)[1].strip()
+
     if not key_id or not key_path:
         return None
     pem = Path(key_path).expanduser().read_text()
@@ -175,24 +226,214 @@ def find_live_contract(auth: KalshiAuth, spot: float) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Fetch live BTC spot price from Binance
+# Fetch all contracts for the nearest expiry (full strike ladder)
 # ---------------------------------------------------------------------------
 
-def fetch_live_spot() -> Optional[float]:
-    """Fetch the current BTC/USDT price from Binance US."""
+def minutes_to_expiry(close_ts: str, min_tau: float = 1.0) -> float:
+    """
+    Return minutes remaining until close_ts (UTC ISO string).
+    Clamps to min_tau so tau is never zero or negative (probability engine requires tau > 0).
+    """
+    if not close_ts:
+        return TAU  # fallback to default if no timestamp
     try:
-        resp = requests.get(
-            "https://api.binance.us/api/v3/ticker/price",
-            params={"symbol": "BTCUSDT"},
-            timeout=10,
-        )
-        if resp.ok:
-            price = float(resp.json()["price"])
-            print(f"  [binance] Live spot: ${price:,.2f}")
-            return price
+        expiry = pd.Timestamp(close_ts).tz_convert("UTC")
+        remaining = (expiry - pd.Timestamp.now(tz="UTC")).total_seconds() / 60
+        return max(remaining, min_tau)
+    except Exception:
+        return TAU
+
+
+def fetch_contracts_for_nearest_expiry(auth: KalshiAuth, spot: float = 0.0, asset: str = "BTC") -> list:
+    """
+    Return all OTM KXBTCD contracts in the nearest future expiry window that have
+    a real two-sided market (both bid > 0 and ask > 0).
+
+    Only contracts with floor_strike > spot are included. The probability engine
+    is calibrated for OTM contracts (strike above spot); ITM contracts produce
+    nonsense probability estimates and false edges.
+
+    Uses yes_bid_dollars / yes_ask_dollars from the market listing endpoint —
+    one API call covers the whole strike ladder, avoiding per-contract roundtrips.
+
+    Returns a list of dicts sorted by floor_strike ascending:
+        {ticker, floor_strike, p_market (mid), bid, ask, close_time}
+    Returns an empty list if auth fails or no liquid OTM contracts exist.
+    """
+    now_ts = int(time.time())
+    now_dt = datetime.now(timezone.utc)
+
+    # Query in two passes: first 4 hours (catches near-term hourly contracts),
+    # then 4-24 hours (catches next daily/weekly if hourly window is empty).
+    # This prevents the 200-result limit from excluding near-term contracts when
+    # many longer-dated contracts are listed first by the API.
+    all_markets = []
+    for window_end in [now_ts + 14400, now_ts + 86400]:
+        cursor = None
+        window_markets = []
+        while True:
+            series = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])["series_ticker"]
+            params = {
+                "series_ticker": series,
+                "min_close_ts":  now_ts,
+                "max_close_ts":  window_end,
+                "limit":         200,
+            }
+            if cursor:
+                params["cursor"] = cursor
+            data = kalshi_get("/markets", params, auth)
+            page = data.get("markets") or []
+            window_markets.extend(page)
+            cursor = data.get("cursor")
+            if not cursor or len(page) < 200:
+                break
+        all_markets.extend(window_markets)
+        # If we found liquid contracts in the near window, don't bother with the far window
+        if window_end == now_ts + 14400 and window_markets:
+            break
+
+    if not all_markets:
+        return []
+
+    # Find the nearest future close_time
+    future_close_times = set()
+    for m in all_markets:
+        ct = m.get("close_time", "")
+        if not ct:
+            continue
+        try:
+            if pd.Timestamp(ct).tz_convert("UTC") > now_dt:
+                future_close_times.add(ct)
+        except Exception:
+            pass
+
+    if not future_close_times:
+        return []
+
+    nearest_expiry = min(future_close_times)
+
+    # Extract liquid contracts at that expiry
+    contracts = []
+    for m in all_markets:
+        if m.get("close_time") != nearest_expiry:
+            continue
+        fs = m.get("floor_strike")
+        if fs is None:
+            continue
+        try:
+            fs = float(fs)
+        except (ValueError, TypeError):
+            continue
+        try:
+            bid = float(m.get("yes_bid_dollars") or 0)
+            ask = float(m.get("yes_ask_dollars") or 0)
+        except (ValueError, TypeError):
+            continue
+        if bid <= 0 or ask <= 0:
+            continue
+        if spot > 0 and fs <= spot:
+            continue   # skip ITM contracts — probability engine is OTM-only
+        contracts.append({
+            "ticker":       m.get("ticker", ""),
+            "floor_strike": fs,
+            "p_market":     (bid + ask) / 2,
+            "bid":          bid,
+            "ask":          ask,
+            "close_time":   nearest_expiry,
+        })
+
+    return sorted(contracts, key=lambda x: x["floor_strike"])
+
+
+# ---------------------------------------------------------------------------
+# Fetch live BTC spot price from BRTI constituent exchanges
+# ---------------------------------------------------------------------------
+
+def fetch_live_spot(asset: str = "BTC") -> Optional[float]:
+    """
+    Fetch the current spot price for the given asset as an average of
+    available exchange feeds. Falls back gracefully if any source is unavailable.
+    """
+    cfg = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])
+    index_name = cfg["index_name"]
+    sources    = cfg["spot_sources"]
+    n_sources  = len(sources)
+
+    prices = {}
+    for name, fetch in sources:
+        try:
+            prices[name] = fetch()
+        except Exception as exc:
+            print(f"  [{index_name.lower()}] {name} unavailable: {exc}")
+
+    if not prices:
+        return None
+
+    avg = sum(prices.values()) / len(prices)
+    detail = "  ".join(f"{k}=${v:,.2f}" for k, v in prices.items())
+    print(f"  [{index_name.lower()}] {detail}")
+    print(f"  [{index_name.lower()}] Average ({index_name} proxy): ${avg:,.2f}  ({len(prices)}/{n_sources} sources)")
+    return avg
+
+
+# ---------------------------------------------------------------------------
+# Fetch recent BTC candles from Binance US
+# ---------------------------------------------------------------------------
+
+def fetch_recent_candles(interval: str = "1m", lookback_bars: int = 70, asset: str = "BTC") -> Optional[pd.DataFrame]:
+    """
+    Fetch the last `lookback_bars` candles at `interval` from Binance US for the given asset.
+    interval: "1m", "1h", "4h", etc.
+    Returns a DataFrame with a UTC DatetimeIndex and OHLCV columns, or None on failure.
+    """
+    symbol = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])["binance_symbol"]
+    try:
+        url = "https://api.binance.us/api/v3/klines"
+        r = requests.get(url, params={"symbol": symbol, "interval": interval,
+                                      "limit": lookback_bars}, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if not data or isinstance(data, dict):
+            return None
+        df = pd.DataFrame(data, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore",
+        ])
+        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        df = df.set_index("open_time").sort_index()
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+        return df[["open", "high", "low", "close", "volume"]]
     except Exception as exc:
-        print(f"  [binance] Could not fetch live spot: {exc}")
-    return None
+        print(f"  [binance] fetch_recent_candles({interval}) failed: {exc}")
+        return None
+
+
+def fetch_recent_1m_candles(lookback_bars: int = 70, asset: str = "BTC") -> Optional[pd.DataFrame]:
+    """Convenience wrapper for 1m candles (used for short-term momentum)."""
+    return fetch_recent_candles("1m", lookback_bars, asset=asset)
+
+
+def extend_with_live_candles(df: pd.DataFrame, interval: str, lookback_bars: int, asset: str = "BTC") -> pd.DataFrame:
+    """
+    Fetch the most recent `lookback_bars` candles for `interval` from Binance US
+    and append any bars that are newer than the last row in `df`.
+
+    Returns the extended DataFrame (original + new rows), sorted by index.
+    Falls back silently to the original `df` if the fetch fails.
+    """
+    fresh = fetch_recent_candles(interval, lookback_bars, asset=asset)
+    if fresh is None:
+        return df
+    # Only keep rows newer than the last parquet timestamp
+    cutoff = df.index[-1]
+    new_rows = fresh[fresh.index > cutoff]
+    if new_rows.empty:
+        return df
+    extended = pd.concat([df, new_rows]).sort_index()
+    print(f"  [binance] Extended {interval} data: +{len(new_rows)} bars "
+          f"(now up to {extended.index[-1].strftime('%Y-%m-%d %H:%M UTC')})")
+    return extended
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 """
-Market structure module for detecting swing highs/lows on 4-hour candles
+Market structure module for detecting swing highs/lows on 15-minute candles
 and classifying the prevailing structural trend bias.
 """
 
@@ -10,6 +10,35 @@ from typing import List
 
 MIN_CANDLES = 90
 PIVOT_LOOKBACK = 3  # candles on each side required to confirm a swing point
+
+
+def resample_to_15min(df_1m: pd.DataFrame) -> pd.DataFrame:
+    """
+    Resample 1-minute OHLCV data to 15-minute candles.
+
+    Aggregation logic:
+        open   = first 1-min open in the 15-min window  (bar open price)
+        high   = max of all 1-min highs in the window   (true bar high)
+        low    = min of all 1-min lows  in the window   (true bar low)
+        close  = last 1-min close in the window         (bar close price)
+        volume = sum of all 1-min volumes               (total activity)
+
+    Each bar's timestamp is the window's open time (label='left').
+    Incomplete bars at the boundary are retained; entirely empty bars
+    (from data gaps) are dropped via dropna(subset=['close']).
+
+    Args:
+        df_1m: 1-minute OHLCV DataFrame with a DatetimeIndex.
+               Required columns: open, high, low, close, volume (case-insensitive).
+
+    Returns:
+        15-minute OHLCV DataFrame with DatetimeIndex.
+    """
+    df = df_1m.copy()
+    df.columns = df.columns.str.lower()
+    return df.resample("15min", closed="left", label="left").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna(subset=["close"])
 
 
 @dataclass
@@ -24,13 +53,13 @@ class StructureResult:
 
 def detect_market_structure(df: pd.DataFrame) -> StructureResult:
     """
-    Detect swing pivot points and classify market structure from 4-hour OHLCV data.
+    Detect swing pivot points and classify market structure from 15-minute OHLCV data.
 
     A swing high is a candle whose high is strictly greater than the highs of
     the 3 candles immediately before it and the 3 candles immediately after it.
     A swing low is symmetric: low strictly less than the 3 candles on each side.
 
-    Only the 3 most recent swing highs and swing lows are used for classification.
+    Only the 2 most recent swing highs and swing lows are used for classification.
 
     Structure classification rules:
         - Bullish (+1): last 2 swing highs strictly ascending AND last 2 swing
@@ -40,7 +69,7 @@ def detect_market_structure(df: pd.DataFrame) -> StructureResult:
         - Neutral (0): anything else, or fewer than 2 swing points detected.
 
     Args:
-        df: 4-hour OHLCV DataFrame. Must have at least 90 candles.
+        df: 4-hour OHLCV DataFrame. Must have at least 90 candles (15 days).
             Required columns: open, high, low, close, volume (case-insensitive).
 
     Returns:
@@ -104,19 +133,19 @@ def detect_market_structure(df: pd.DataFrame) -> StructureResult:
         bias = +1
         reason = (
             "Bullish: 2 of 2 swing highs ascending, 2 of 2 swing lows ascending "
-            "(higher highs and higher lows)."
+            "on 15-min chart (higher highs and higher lows)."
         )
     elif highs_descending and lows_descending:
         bias = -1
         reason = (
             "Bearish: 2 of 2 swing highs descending, 2 of 2 swing lows descending "
-            "(lower highs and lower lows)."
+            "on 15-min chart (lower highs and lower lows)."
         )
     else:
         bias = 0
         reason = (
             "Neutral: swing highs and lows do not form a consistent higher-high/"
-            "higher-low or lower-high/lower-low sequence."
+            "higher-low or lower-high/lower-low sequence on 15-min chart."
         )
 
     return StructureResult(

@@ -28,6 +28,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 
 from evaluate_point import load_data, evaluate_point
+from market_structure import resample_to_15min
 
 DATA_DIR = Path(__file__).parent / "data"
 TAU = 60
@@ -42,34 +43,52 @@ DEFAULT_BANKROLL = 10_000
 def run_backtest(
     df_1m: pd.DataFrame,
     df_1h: pd.DataFrame,
-    df_4h: pd.DataFrame,
+    df_4h: pd.DataFrame = None,  # retained for backward compatibility; unused
     strike_offset: float = DEFAULT_OFFSET,
     p_market: float = None,
     bankroll: float = DEFAULT_BANKROLL,
     start: str = None,
     end: str = None,
+    flat_bet: float = None,
+    structure_df: pd.DataFrame = None,
 ) -> pd.DataFrame:
     """
     Evaluate the model at every complete hourly candle in the dataset.
 
+    Market structure is now derived from 15-minute candles resampled from df_1m.
+    df_4h is accepted but ignored (kept for backward compatibility with callers
+    that pass it positionally, e.g. monte_carlo.py).
+
     A decision point is skipped if:
-      - There are fewer than 120 1m, 60 1h, or 90 4h candles before it.
+      - There are fewer than 120 1m, 60 1h, or 120 15m candles before it.
       - The expiry timestamp (decision + 60 min) has no data.
 
     Args:
         df_1m: Full 1-minute OHLCV history.
         df_1h: Full 1-hour OHLCV history (used for decision timestamps).
-        df_4h: Full 4-hour OHLCV history.
+        df_4h: Ignored. Retained for backward compatibility.
         strike_offset: Offset magnitude for strike above spot (sign ignored).
         p_market: Fixed Kalshi market probability. If None, simulated per-step
             from strike_offset via simulate_p_market() (default behaviour).
         bankroll: Starting capital. Updated after each trade to reflect P&L.
         start: Optional ISO date string to restrict backtest window start.
         end: Optional ISO date string to restrict backtest window end.
+        flat_bet: If set, override Kelly sizing and bet this fixed dollar amount
+            on every trade. Useful for measuring raw win rate without compounding
+            distortion. Kelly sizing in evaluate_point is still computed but
+            the P&L is recalculated here using flat_bet instead.
 
     Returns:
         DataFrame of per-decision results with columns for all key metrics.
     """
+    # Determine which DataFrame to use for market structure detection.
+    # structure_df allows callers (e.g. compare_structure.py) to supply a
+    # pre-built DataFrame (e.g. real 4h bars) instead of the default 15m resample.
+    if structure_df is not None:
+        df_15m = structure_df
+    else:
+        df_15m = resample_to_15min(df_1m)
+
     # Build the list of hourly decision timestamps from the 1h index
     decision_times = df_1h.index.copy()
 
@@ -80,9 +99,11 @@ def run_backtest(
         end_ts = pd.Timestamp(end, tz="UTC")
         decision_times = decision_times[decision_times <= end_ts]
 
-    # Leave a warm-up buffer: skip the first 90 4h candles (= 15 days)
-    # to ensure every decision point has enough history for market structure.
-    min_history_ts = df_4h.index[89]  # 90th 4h candle = 15 days of warm-up
+    # Leave a warm-up buffer equal to the structure module's MIN_CANDLES requirement.
+    # This ensures every decision point has enough history before the loop starts.
+    from market_structure import MIN_CANDLES as _MS_MIN
+    warmup_idx = min(_MS_MIN - 1, len(df_15m) - 1)
+    min_history_ts = df_15m.index[warmup_idx]
     decision_times = decision_times[decision_times > min_history_ts]
 
     total = len(decision_times)
@@ -90,6 +111,8 @@ def run_backtest(
     print(f"  Strike offset   : {strike_offset:.3%} above spot")
     p_market_display = f"{p_market:.2%}" if p_market is not None else "dynamic (simulated per step)"
     print(f"  p_market        : {p_market_display}")
+    if flat_bet is not None:
+        print(f"  Sizing mode     : flat bet ${flat_bet:,.2f} per trade (no compounding)")
     print(f"  Starting bankroll: ${bankroll:,.2f}\n")
 
     rows = []
@@ -105,7 +128,7 @@ def run_backtest(
         try:
             r = evaluate_point(
                 ts=ts,
-                df_1m=df_1m, df_1h=df_1h, df_4h=df_4h,
+                df_1m=df_1m, df_1h=df_1h, df_4h=df_15m,
                 strike_offset=strike_offset,
                 p_market=p_market,
                 bankroll=current_bankroll,
@@ -114,6 +137,26 @@ def run_backtest(
         except (ValueError, KeyError):
             skipped += 1
             continue
+
+        # Flat-bet override: replace Kelly-sized P&L with fixed bet amount.
+        # Recalculates pnl using flat_bet so the bankroll curve reflects
+        # pure signal quality without compounding distortion.
+        if flat_bet is not None and r["decision"] == "trade":
+            pm   = r["p_market"]
+            side = r["side"]
+            res  = r["resolved_yes"]
+            from pricing_comparison import kalshi_fee, DEFAULT_SLIPPAGE, DEFAULT_SPREAD
+            cost = flat_bet * (kalshi_fee(pm) + DEFAULT_SLIPPAGE + DEFAULT_SPREAD)
+            if side == "yes" and res:
+                r["pnl"] = flat_bet * (1 - pm) / pm - cost
+            elif side == "yes" and not res:
+                r["pnl"] = -flat_bet - cost
+            elif side == "no" and not res:
+                r["pnl"] = flat_bet * pm / (1 - pm) - cost
+            else:  # side == "no" and res
+                r["pnl"] = -flat_bet - cost
+            r["bet_amount"] = flat_bet
+            r["trade_cost"] = cost
 
         # Update running bankroll after each closed trade
         current_bankroll += r["pnl"]
@@ -242,6 +285,8 @@ def main() -> None:
                         help="Backtest window start date YYYY-MM-DD")
     parser.add_argument("--end", default=None,
                         help="Backtest window end date YYYY-MM-DD")
+    parser.add_argument("--flat-bet", type=float, default=None,
+                        help="Fixed dollar amount per trade (disables Kelly compounding)")
     parser.add_argument("--save", default=None,
                         help="Save results to this CSV path (e.g. results/backtest.csv)")
     args = parser.parse_args()
@@ -251,15 +296,16 @@ def main() -> None:
     print("=" * 62)
 
     print("\nLoading cached OHLCV data...")
-    df_1m, df_1h, df_4h = load_data()
+    df_1m, df_1h, _ = load_data()
 
     results = run_backtest(
-        df_1m=df_1m, df_1h=df_1h, df_4h=df_4h,
+        df_1m=df_1m, df_1h=df_1h,
         strike_offset=args.offset,
         p_market=args.p_market,
         bankroll=args.bankroll,
         start=args.start,
         end=args.end,
+        flat_bet=args.flat_bet,
     )
 
     if results.empty:

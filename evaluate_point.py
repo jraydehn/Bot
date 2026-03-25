@@ -46,28 +46,30 @@ BANKROLL = 10_000
 # Data loading
 # ---------------------------------------------------------------------------
 
-def _find_parquet(interval: str) -> Path:
+def _find_parquet(interval: str, symbol: str = "BTCUSDT") -> Path:
     """
-    Find the most recently modified Parquet file for the given interval.
+    Find the most recently modified Parquet file for the given interval and symbol.
     Raises FileNotFoundError if none exist — run fetch_data.py first.
     """
-    matches = sorted(DATA_DIR.glob(f"*_{interval}_*.parquet"), key=lambda p: p.stat().st_mtime)
+    matches = sorted(DATA_DIR.glob(f"*{symbol}*_{interval}_*.parquet"), key=lambda p: p.stat().st_mtime)
     if not matches:
         raise FileNotFoundError(
-            f"No cached {interval} data found in {DATA_DIR}.\n"
-            f"Run:  python fetch_data.py  to download data first."
+            f"No cached {interval} data found for {symbol} in {DATA_DIR}.\n"
+            f"Run:  python fetch_data.py --symbol {symbol}  to download data first."
         )
     return matches[-1]  # most recently written file
 
 
-def load_data() -> tuple:
+def load_data(asset: str = "BTC") -> tuple:
     """
-    Load 1m, 1h, and 4h DataFrames from the local Parquet cache.
+    Load 1m, 1h, and 4h DataFrames from the local Parquet cache for the given asset.
 
     Returns:
         Tuple of (df_1m, df_1h, df_4h).
     """
-    paths = {iv: _find_parquet(iv) for iv in ("1m", "1h", "4h")}
+    from live_signal import ASSET_CONFIG
+    symbol = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])["binance_symbol"]
+    paths = {iv: _find_parquet(iv, symbol) for iv in ("1m", "1h", "4h")}
     dfs = {}
     for iv, path in paths.items():
         dfs[iv] = pd.read_parquet(path)

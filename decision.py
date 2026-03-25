@@ -11,31 +11,45 @@ from kelly_sizing import compute_kelly_size
 
 # Gate 3 tiered minimum net edge thresholds.
 # Both YES and NO use the same 3-indicator score (-3 to +3).
-# Neutral structure adds a premium to each tier.
+# Three structure tiers: confirmed, neutral, opposing.
 #
-# YES tiers (confirmation_score, range 2–3 when Gate 2 passes):
-#   Confirmed structure (+1):   score>=3 → 2%,  score>=2 → 4%
-#   Neutral structure (0):      score>=3 → 4%,  score>=2 → 6%
-YES_GATE3_TIERS = [(3, 0.02), (2, 0.04)]
-YES_NEUTRAL_GATE3_TIERS = [(3, 0.04), (2, 0.06)]
+# YES tiers (confirmation_score):
+#   Confirmed structure (+1):  score>=3 → 2%,  score>=2 → 4%
+#   Neutral structure (0):     score>=3 → 4%,  score>=2 → 6%
+#   Opposing structure (-1):   score>=3 → 10%, score>=2 → 15%  (data collection tier)
+YES_GATE3_TIERS          = [(3, 0.02), (2, 0.04)]
+YES_NEUTRAL_GATE3_TIERS  = [(3, 0.04), (2, 0.06)]
+YES_OPPOSING_GATE3_TIERS = [(3, 0.10), (2, 0.15)]
 #
-# NO tiers (no_score, range -3 to +1 when Gate 2 passes — Gate 2 requires no_score<=1):
-#   Confirmed structure (-1):   no_score<=-3 → 2%,  no_score<=-2 → 4%,  no_score<=0 → 6%,  no_score<=1 → 8%
-#   Neutral structure (0):      no_score<=-3 → 4%,  no_score<=-2 → 6%,  no_score<=0 → 10%, no_score<=1 → 12%
-NO_GATE3_TIERS = [(-3, 0.02), (-2, 0.04), (0, 0.06), (1, 0.08)]
-NO_NEUTRAL_GATE3_TIERS = [(-3, 0.04), (-2, 0.06), (0, 0.10), (1, 0.12)]
+# NO tiers (no_score, Gate 2 requires no_score<=1):
+#   Confirmed structure (-1):  no_score<=-3→2%,  <=-2→4%,  <=0→6%,  <=1→8%
+#   Neutral structure (0):     no_score<=-3→4%,  <=-2→6%,  <=0→10%, <=1→12%
+#   Opposing structure (+1):   no_score<=-3→10%, <=-2→15%, <=0→20%, <=1→25%
+NO_GATE3_TIERS          = [(-3, 0.02), (-2, 0.04), (0, 0.06), (1, 0.08)]
+NO_NEUTRAL_GATE3_TIERS  = [(-3, 0.04), (-2, 0.06), (0, 0.10), (1, 0.12)]
+NO_OPPOSING_GATE3_TIERS = [(-3, 0.10), (-2, 0.15), (0, 0.20), (1, 0.25)]
 
 
-def _yes_gate3_threshold(score: int, neutral: bool) -> float:
-    tiers = YES_NEUTRAL_GATE3_TIERS if neutral else YES_GATE3_TIERS
+def _yes_gate3_threshold(score: int, neutral: bool, opposing: bool) -> float:
+    if opposing:
+        tiers = YES_OPPOSING_GATE3_TIERS
+    elif neutral:
+        tiers = YES_NEUTRAL_GATE3_TIERS
+    else:
+        tiers = YES_GATE3_TIERS
     for min_score, threshold in tiers:
         if score >= min_score:
             return threshold
     return float("inf")
 
 
-def _no_gate3_threshold(score: int, neutral: bool) -> float:
-    tiers = NO_NEUTRAL_GATE3_TIERS if neutral else NO_GATE3_TIERS
+def _no_gate3_threshold(score: int, neutral: bool, opposing: bool) -> float:
+    if opposing:
+        tiers = NO_OPPOSING_GATE3_TIERS
+    elif neutral:
+        tiers = NO_NEUTRAL_GATE3_TIERS
+    else:
+        tiers = NO_GATE3_TIERS
     for max_score, threshold in tiers:
         if score <= max_score:
             return threshold
@@ -244,22 +258,14 @@ def evaluate_trade(
     structure_opposes  = (structure_bias != 0 and structure_bias != required_bias)
     neutral_trade      = not structure_confirms  # neutral OR opposing → higher thresholds
 
-    if structure_opposes:
-        reasons.append(
-            f"Gate 1 FAILED: structure_bias={structure_bias} opposes {side.upper()} trade. "
-            f"Hard block — Gate P does not override structure."
-        )
-        return DecisionResult(
-            decision="no_trade", side=side,
-            p_model=p_model, p_market=p_market,
-            raw_edge=raw_edge, net_edge=net_edge,
-            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
-            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
-            was_capped=False, reasons=reasons,
-        )
-    elif structure_confirms:
+    if structure_confirms:
         reasons.append(
             f"Gate 1 PASSED: structure_bias={structure_bias} confirms {side.upper()} trade."
+        )
+    elif structure_opposes:
+        reasons.append(
+            f"Gate 1 PASSED (opposing structure): structure_bias={structure_bias} opposes "
+            f"{side.upper()} trade — elevated edge threshold applied at Gate 3."
         )
     else:
         reasons.append(
@@ -307,11 +313,13 @@ def evaluate_trade(
     #   NO:  tiered by no_score (3-indicator, range -3 to -2 at this point)
     # Neutral structure adds a premium to each tier.
     if side == "yes":
-        effective_min_edge = _yes_gate3_threshold(confirmation_score, neutral_trade)
-        tier_label = f"YES score={confirmation_score:+d} ({'neutral' if neutral_trade else 'confirmed'} structure)"
+        effective_min_edge = _yes_gate3_threshold(confirmation_score, neutral_trade, structure_opposes)
+        struct_label = "opposing" if structure_opposes else ("neutral" if neutral_trade else "confirmed")
+        tier_label = f"YES score={confirmation_score:+d} ({struct_label} structure)"
     else:
-        effective_min_edge = _no_gate3_threshold(no_score, neutral_trade)
-        tier_label = f"NO no_score={no_score:+d} ({'neutral' if neutral_trade else 'confirmed'} structure)"
+        effective_min_edge = _no_gate3_threshold(no_score, neutral_trade, structure_opposes)
+        struct_label = "opposing" if structure_opposes else ("neutral" if neutral_trade else "confirmed")
+        tier_label = f"NO no_score={no_score:+d} ({struct_label} structure)"
 
     p_edge, p_ref = (p_model, p_market) if side == "yes" else (p_market, p_model)
     pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=effective_min_edge)

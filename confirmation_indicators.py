@@ -48,17 +48,25 @@ def _compute_rsi(series: pd.Series, period: int) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
-def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> ConfirmationResult:
+def compute_confirmation(
+    df: pd.DataFrame,
+    hist_1m: pd.DataFrame = None,
+    ema_fast: int = EMA_FAST,
+    ema_slow: int = EMA_SLOW,
+    rsi_period: int = RSI_PERIOD,
+) -> ConfirmationResult:
     """
-    Compute 3-indicator confirmation score from 1-hour bars.
+    Compute 3-indicator confirmation score from OHLCV bars.
 
     Indicators:
-      EMA:    20-EMA above 50-EMA for 3 consecutive bars = +1; below = -1; else 0
+      EMA:    ema_fast above ema_slow for 3 consecutive bars = +1; below = -1; else 0
       RSI:    >= 55 = +1; <= 45 = -1; 45-55 = 0
       Volume: high volume + price up = +1; high volume + price down = -1; low vol = 0
 
     confirmation_bias / no_bias = +1 if score >= 2, -1 if score <= -2, else 0.
 
+    Default periods are for 1h bars (EMA 20/50, RSI 21).
+    For 15m bars use ema_fast=10, ema_slow=20, rsi_period=14.
     hist_1m is accepted but ignored (kept for call-site compatibility).
     """
     if len(df) < MIN_CANDLES:
@@ -70,8 +78,8 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
     volume = df["volume"]
 
     # --- EMA ---
-    ema_20 = close.ewm(span=EMA_FAST, adjust=False).mean()
-    ema_50 = close.ewm(span=EMA_SLOW, adjust=False).mean()
+    ema_20 = close.ewm(span=ema_fast, adjust=False).mean()
+    ema_50 = close.ewm(span=ema_slow, adjust=False).mean()
     ema_20_current = float(ema_20.iloc[-1])
     ema_50_current = float(ema_50.iloc[-1])
 
@@ -89,7 +97,7 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
         ema_score = 0
 
     # --- RSI ---
-    rsi_series = _compute_rsi(close, RSI_PERIOD)
+    rsi_series = _compute_rsi(close, rsi_period)
     rsi_value  = float(rsi_series.iloc[-1])
     if rsi_value >= 55:
         rsi_regime = "bullish"

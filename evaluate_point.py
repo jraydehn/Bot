@@ -62,24 +62,29 @@ def _find_parquet(interval: str, symbol: str = "BTCUSDT") -> Path:
 
 def load_data(asset: str = "BTC") -> tuple:
     """
-    Load 1m, 1h, and 4h DataFrames from the local Parquet cache for the given asset.
+    Load OHLCV DataFrames from the local Parquet cache for the given asset.
 
-    Returns:
-        Tuple of (df_1m, df_1h, df_4h).
+    Returns (df_vol, df_confirm, df_struct) where:
+      df_vol     : 1m candles (realized vol fallback)
+      df_confirm : confirmation-interval candles (1h for hourly, 15m for BTC15)
+      df_struct  : structure-interval candles (4h for hourly, 1h for BTC15)
     """
     from live_signal import ASSET_CONFIG
-    symbol = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])["binance_symbol"]
-    paths = {iv: _find_parquet(iv, symbol) for iv in ("1m", "1h", "4h")}
+    cfg    = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])
+    symbol = cfg["binance_symbol"]
+    confirm_iv = cfg.get("confirmation_interval", "1h")
+    struct_iv  = cfg.get("structure_interval", "4h")
+
+    intervals = list(dict.fromkeys(["1m", confirm_iv, struct_iv]))  # deduplicated, ordered
+    paths = {iv: _find_parquet(iv, symbol) for iv in intervals}
     dfs = {}
     for iv, path in paths.items():
         dfs[iv] = pd.read_parquet(path)
-        # Ensure timezone-aware index for consistent slicing
         if dfs[iv].index.tz is None:
             dfs[iv].index = dfs[iv].index.tz_localize("UTC")
-    print(f"  1m : {paths['1m'].name}  ({len(dfs['1m']):,} rows)")
-    print(f"  1h : {paths['1h'].name}  ({len(dfs['1h']):,} rows)")
-    print(f"  4h : {paths['4h'].name}  ({len(dfs['4h']):,} rows)")
-    return dfs["1m"], dfs["1h"], dfs["4h"]
+        print(f"  {iv:3s}: {path.name}  ({len(dfs[iv]):,} rows)")
+
+    return dfs["1m"], dfs[confirm_iv], dfs[struct_iv]
 
 
 # ---------------------------------------------------------------------------

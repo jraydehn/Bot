@@ -39,7 +39,7 @@ from live_signal import (
     fetch_contracts_for_nearest_expiry, fetch_recent_1m_candles,
     extend_with_live_candles,
     minutes_to_expiry as tte_minutes,
-    SERIES_TICKER, TAU,
+    SERIES_TICKER, TAU, ASSET_CONFIG,
 )
 from paper_trade_runner import ensure_csv_exists, append_row, get_csv_path, DEFAULT_BANKROLL
 from outcome_checker import main as resolve_outcomes
@@ -57,27 +57,31 @@ def minutes_to_expiry(close_ts: str) -> float:
         return float("inf")
 
 
-def run_once(auth, df_1m, df_1h, df_4h, bankroll: float, sim: bool, asset: str = "BTC"):
+def run_once(auth, df_vol, df_confirm, df_struct, bankroll: float, sim: bool, asset: str = "BTC"):
     """
     Run the full signal pipeline once and return (contract_ticker, side, dec, row).
     Returns None for contract_ticker if no live contract was found.
     """
     now_utc = datetime.now(timezone.utc)
+    cfg        = ASSET_CONFIG.get(asset, ASSET_CONFIG["BTC"])
+    tau        = cfg.get("tau", TAU)
+    ema_fast   = cfg.get("ema_fast", 20)
+    ema_slow   = cfg.get("ema_slow", 50)
+    rsi_period = cfg.get("rsi_period", 21)
+    vol_bars   = cfg.get("vol_lookback_bars", 60)
 
-    # Signals — computed from cached OHLCV (reload unnecessary at 2-min cadence)
-    hist_1m = df_1m.iloc[-200:]
-    hist_1h = df_1h.iloc[-100:]
-    hist_4h = df_4h.iloc[-120:]
+    hist_confirm = df_confirm.iloc[-100:]
+    hist_struct  = df_struct.iloc[-120:]
+    hist_vol_fb  = df_vol.iloc[-200:]  # fallback if live 1m fetch fails
 
-    struct  = detect_market_structure(hist_4h)
+    struct  = detect_market_structure(hist_struct)
 
-    # Fetch fresh 1m candles for momentum and vol. Fetch 200 bars so realized vol
-    # is computed from live data rather than the parquet snapshot.
-    live_1m = fetch_recent_1m_candles(lookback_bars=200, asset=asset)
-    vol_1m_src = live_1m if live_1m is not None and len(live_1m) >= 60 else hist_1m
-    vol     = compute_realized_volatility(vol_1m_src)
-    confirm = compute_confirmation(hist_1h, hist_1m=live_1m if live_1m is not None else hist_1m)
-    gate_side = "yes" if struct.structure_bias == 1 else "no"
+    # Fetch fresh 1m candles for realized vol.
+    live_1m    = fetch_recent_1m_candles(lookback_bars=max(vol_bars * 2, 120), asset=asset)
+    vol_src    = live_1m if live_1m is not None and len(live_1m) >= vol_bars else hist_vol_fb
+    vol        = compute_realized_volatility(vol_src)
+    confirm    = compute_confirmation(hist_confirm, ema_fast=ema_fast, ema_slow=ema_slow, rsi_period=rsi_period)
+    gate_side  = "yes" if struct.structure_bias == 1 else "no"
 
     # Live spot
     live_spot = fetch_live_spot(asset=asset)
@@ -131,7 +135,7 @@ def run_once(auth, df_1m, df_1h, df_4h, bankroll: float, sim: bool, asset: str =
         dec, chosen, p_market_source = best_any_dec, best_any_meta, "real"
     else:
         eff = strike / spot - 1
-        prob_c   = estimate_probability(spot, strike, TAU, vol.vol_60m)
+        prob_c   = estimate_probability(spot, strike, tau, vol.vol_60m)
         p_market_sim = simulate_p_market(eff, side=gate_side)
         dec      = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
                                   prob_c.p_yes, p_market_sim, bankroll,
@@ -198,18 +202,24 @@ def run_once(auth, df_1m, df_1h, df_4h, bankroll: float, sim: bool, asset: str =
 
 def init_asset_state(asset: str, bankroll: float, session_start: str) -> dict:
     """Load OHLCV data and initialize per-asset tracking state."""
+    cfg        = ASSET_CONFIG.get(asset, ASSET_CONFIG["BTC"])
+    confirm_iv = cfg.get("confirmation_interval", "1h")
+    struct_iv  = cfg.get("structure_interval", "4h")
+
     print(f"  Loading OHLCV data ({asset})...")
-    df_1m, df_1h, df_4h = load_data(asset=asset)
-    df_1m = extend_with_live_candles(df_1m, "1m", 200, asset=asset)
-    df_1h = extend_with_live_candles(df_1h, "1h", 120, asset=asset)
-    df_4h = extend_with_live_candles(df_4h, "4h",  60, asset=asset)
-    csv_path = get_csv_path(asset)
+    df_vol, df_confirm, df_struct = load_data(asset=asset)
+    df_vol     = extend_with_live_candles(df_vol,     "1m",       200, asset=asset)
+    df_confirm = extend_with_live_candles(df_confirm, confirm_iv, 200, asset=asset)
+    df_struct  = extend_with_live_candles(df_struct,  struct_iv,  120, asset=asset)
+    csv_path   = get_csv_path(asset)
     ensure_csv_exists(csv_path)
     return {
         "asset":             asset,
-        "df_1m":             df_1m,
-        "df_1h":             df_1h,
-        "df_4h":             df_4h,
+        "df_vol":            df_vol,
+        "df_confirm":        df_confirm,
+        "df_struct":         df_struct,
+        "confirm_iv":        confirm_iv,
+        "struct_iv":         struct_iv,
         "csv_path":          csv_path,
         "last_data_refresh": datetime.now(timezone.utc),
         "logged":            set(),
@@ -231,9 +241,9 @@ def run_asset(state: dict, auth, bankroll: float, sim: bool, high_edge_min: floa
     # Refresh OHLCV every 10 minutes
     if (now_utc - state["last_data_refresh"]).total_seconds() >= 600:
         try:
-            state["df_1m"] = extend_with_live_candles(state["df_1m"], "1m", 200, asset=asset)
-            state["df_1h"] = extend_with_live_candles(state["df_1h"], "1h", 120, asset=asset)
-            state["df_4h"] = extend_with_live_candles(state["df_4h"], "4h",  60, asset=asset)
+            state["df_vol"]     = extend_with_live_candles(state["df_vol"],     "1m",                200, asset=asset)
+            state["df_confirm"] = extend_with_live_candles(state["df_confirm"], state["confirm_iv"], 200, asset=asset)
+            state["df_struct"]  = extend_with_live_candles(state["df_struct"],  state["struct_iv"],  120, asset=asset)
             state["last_data_refresh"] = now_utc
         except Exception as exc:
             print(f"  [{asset}] WARNING: OHLCV refresh failed ({exc}), using existing data.")
@@ -247,7 +257,7 @@ def run_asset(state: dict, auth, bankroll: float, sim: bool, high_edge_min: floa
 
     try:
         ticker, close_ts, dec, prob, p_market, p_mkt_src, struct, confirm, row, n_scanned = run_once(
-            auth, state["df_1m"], state["df_1h"], state["df_4h"], bankroll, sim, asset=asset
+            auth, state["df_vol"], state["df_confirm"], state["df_struct"], bankroll, sim, asset=asset
         )
     except Exception as exc:
         print(f"  [{asset}] ERROR: {exc}")

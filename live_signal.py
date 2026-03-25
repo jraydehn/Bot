@@ -44,40 +44,87 @@ SERIES_TICKER = "KXBTCD"
 CANDLE_WINDOW = 120   # seconds of candlestick history to fetch for current price
 DEFAULT_OFFSET = 0.005
 DEFAULT_BANKROLL = 10_000
-TAU = 60  # 1-hour expiry
+TAU = 60  # default expiry in minutes (hourly contracts)
 
-# Per-asset configuration: Kalshi series ticker, Binance symbol, and spot price feeds.
+# Per-asset configuration.
+# Timeframe fields (with defaults for hourly contracts):
+#   tau                  : contract duration in minutes
+#   confirmation_interval: candle interval for EMA/RSI/vol indicators
+#   structure_interval   : candle interval for swing-high/low structure
+#   ema_fast / ema_slow  : EMA periods for confirmation
+#   rsi_period           : RSI lookback for confirmation
+#   vol_lookback_bars    : number of 1m candles for realized vol
+#   contract_window_sec  : Kalshi API window for fetching live contracts
+_BTC_SPOT_SOURCES = [
+    ("coinbase", lambda: float(requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot",      timeout=8).json()["data"]["amount"])),
+    ("kraken",   lambda: float(requests.get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD",   timeout=8).json()["result"]["XXBTZUSD"]["c"][0])),
+    ("bitstamp", lambda: float(requests.get("https://www.bitstamp.net/api/v2/ticker/btcusd/",       timeout=8).json()["last"])),
+    ("gemini",   lambda: float(requests.get("https://api.gemini.com/v1/pubticker/btcusd",           timeout=8).json()["last"])),
+]
 ASSET_CONFIG = {
     "BTC": {
-        "series_ticker":  "KXBTCD",
-        "binance_symbol": "BTCUSDT",
-        "index_name":     "BRTI",
-        "spot_sources": [
-            ("coinbase", lambda: float(requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot",      timeout=8).json()["data"]["amount"])),
-            ("kraken",   lambda: float(requests.get("https://api.kraken.com/0/public/Ticker?pair=XBTUSD",   timeout=8).json()["result"]["XXBTZUSD"]["c"][0])),
-            ("bitstamp", lambda: float(requests.get("https://www.bitstamp.net/api/v2/ticker/btcusd/",       timeout=8).json()["last"])),
-            ("gemini",   lambda: float(requests.get("https://api.gemini.com/v1/pubticker/btcusd",           timeout=8).json()["last"])),
-        ],
+        "series_ticker":       "KXBTCD",
+        "binance_symbol":      "BTCUSDT",
+        "index_name":          "BRTI",
+        "spot_sources":        _BTC_SPOT_SOURCES,
+        "tau":                 60,
+        "confirmation_interval": "1h",
+        "structure_interval":  "4h",
+        "ema_fast":            20,
+        "ema_slow":            50,
+        "rsi_period":          21,
+        "vol_lookback_bars":   60,
+        "contract_window_sec": 7200,
     },
     "ETH": {
-        "series_ticker":  "KXETHD",
-        "binance_symbol": "ETHUSDT",
-        "index_name":     "ETHUSD",
+        "series_ticker":       "KXETHD",
+        "binance_symbol":      "ETHUSDT",
+        "index_name":          "ETHUSD",
         "spot_sources": [
             ("coinbase", lambda: float(requests.get("https://api.coinbase.com/v2/prices/ETH-USD/spot",      timeout=8).json()["data"]["amount"])),
             ("kraken",   lambda: float(requests.get("https://api.kraken.com/0/public/Ticker?pair=XETHZUSD", timeout=8).json()["result"]["XETHZUSD"]["c"][0])),
             ("bitstamp", lambda: float(requests.get("https://www.bitstamp.net/api/v2/ticker/ethusd/",       timeout=8).json()["last"])),
             ("gemini",   lambda: float(requests.get("https://api.gemini.com/v1/pubticker/ethusd",           timeout=8).json()["last"])),
         ],
+        "tau":                 60,
+        "confirmation_interval": "1h",
+        "structure_interval":  "4h",
+        "ema_fast":            20,
+        "ema_slow":            50,
+        "rsi_period":          21,
+        "vol_lookback_bars":   60,
+        "contract_window_sec": 7200,
     },
     "SOL": {
-        "series_ticker":  "KXSOLD",
-        "binance_symbol": "SOLUSDT",
-        "index_name":     "SOLUSD",
+        "series_ticker":       "KXSOLD",
+        "binance_symbol":      "SOLUSDT",
+        "index_name":          "SOLUSD",
         "spot_sources": [
             ("coinbase", lambda: float(requests.get("https://api.coinbase.com/v2/prices/SOL-USD/spot",      timeout=8).json()["data"]["amount"])),
             ("kraken",   lambda: float(requests.get("https://api.kraken.com/0/public/Ticker?pair=SOLUSD",   timeout=8).json()["result"]["SOLUSD"]["c"][0])),
         ],
+        "tau":                 60,
+        "confirmation_interval": "1h",
+        "structure_interval":  "4h",
+        "ema_fast":            20,
+        "ema_slow":            50,
+        "rsi_period":          21,
+        "vol_lookback_bars":   60,
+        "contract_window_sec": 7200,
+    },
+    "BTC15": {
+        "series_ticker":       "KXBTC15",
+        "binance_symbol":      "BTCUSDT",
+        "index_name":          "BRTI",
+        "spot_sources":        _BTC_SPOT_SOURCES,
+        "tau":                 15,
+        "confirmation_interval": "15m",
+        "structure_interval":  "1h",
+        "ema_fast":            10,
+        "ema_slow":            20,
+        "rsi_period":          14,
+        "vol_lookback_bars":   30,
+        "contract_window_sec": 1800,
     },
 }
 
@@ -263,12 +310,14 @@ def fetch_contracts_for_nearest_expiry(auth: KalshiAuth, spot: float = 0.0, asse
     now_ts = int(time.time())
     now_dt = datetime.now(timezone.utc)
 
-    # Query in two passes: first 4 hours (catches near-term hourly contracts),
-    # then 4-24 hours (catches next daily/weekly if hourly window is empty).
-    # This prevents the 200-result limit from excluding near-term contracts when
-    # many longer-dated contracts are listed first by the API.
+    # Query in two passes: first window (near-term), then far window if empty.
+    # Window size is asset-specific: 15-min contracts use a 30-min window;
+    # hourly contracts use a 4-hour window followed by 24-hour fallback.
+    cfg = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])
+    near_window = cfg.get("contract_window_sec", 7200)
+    far_window  = near_window * 6
     all_markets = []
-    for window_end in [now_ts + 14400, now_ts + 86400]:
+    for window_end in [now_ts + near_window, now_ts + far_window]:
         cursor = None
         window_markets = []
         while True:

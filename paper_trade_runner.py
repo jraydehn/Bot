@@ -38,7 +38,7 @@ from kelly_sizing import compute_kelly_size
 from live_signal import (
     load_auth, kalshi_get, fetch_live_spot, fetch_current_price, find_live_contract,
     fetch_contracts_for_nearest_expiry, fetch_recent_1m_candles, minutes_to_expiry,
-    BASE_URL, SERIES_TICKER, CANDLE_WINDOW, TAU,
+    BASE_URL, SERIES_TICKER, CANDLE_WINDOW, TAU, ASSET_CONFIG,
 )
 
 PAPER_TRADES_CSV = Path(__file__).parent / "results" / "paper_trades.csv"
@@ -133,26 +133,33 @@ def main() -> None:
             print("  WARNING: No Kalshi credentials — using simulated p_market.")
 
     # Load OHLCV
-    print(f"  Loading OHLCV data ({args.asset})...")
-    df_1m, df_1h, df_4h = load_data(asset=args.asset)
+    cfg        = ASSET_CONFIG.get(args.asset, ASSET_CONFIG["BTC"])
+    tau        = cfg.get("tau", TAU)
+    ema_fast   = cfg.get("ema_fast", 20)
+    ema_slow   = cfg.get("ema_slow", 50)
+    rsi_period = cfg.get("rsi_period", 21)
+    vol_bars   = cfg.get("vol_lookback_bars", 60)
+    confirm_iv = cfg.get("confirmation_interval", "1h")
 
-    ts = df_1m.index[-1]
+    print(f"  Loading OHLCV data ({args.asset})...")
+    df_vol, df_confirm, df_struct = load_data(asset=args.asset)
+
+    ts = df_confirm.index[-1]
 
     # Live spot
     live_spot = fetch_live_spot(asset=args.asset)
-    spot = live_spot if live_spot is not None else float(df_1m["close"].iloc[-1])
+    spot = live_spot if live_spot is not None else float(df_confirm["close"].iloc[-1])
 
     # Signals
-    hist_1m = df_1m.iloc[-200:]
-    hist_1h = df_1h.iloc[-100:]
-    hist_4h = df_4h.iloc[-120:]
+    hist_confirm = df_confirm.iloc[-100:]
+    hist_struct  = df_struct.iloc[-120:]
 
-    vol     = compute_realized_volatility(hist_1m)
-    struct  = detect_market_structure(hist_4h)
-
-    # Fetch fresh 1m candles for real-time momentum scores.
-    live_1m = fetch_recent_1m_candles(lookback_bars=70, asset=args.asset)
-    confirm = compute_confirmation(hist_1h, hist_1m=live_1m if live_1m is not None else hist_1m)
+    # Fetch fresh 1m candles for realized vol
+    live_1m = fetch_recent_1m_candles(lookback_bars=max(vol_bars * 2, 120), asset=args.asset)
+    vol_src = live_1m if live_1m is not None and len(live_1m) >= vol_bars else df_vol.iloc[-200:]
+    vol     = compute_realized_volatility(vol_src)
+    struct  = detect_market_structure(hist_struct)
+    confirm = compute_confirmation(hist_confirm, ema_fast=ema_fast, ema_slow=ema_slow, rsi_period=rsi_period)
     gate_side = "yes" if struct.structure_bias == 1 else "no"
 
     # Scan all contracts for nearest expiry; select highest net_edge trade.
@@ -212,7 +219,7 @@ def main() -> None:
     else:
         # No auth or empty ladder — simulate
         effective_offset = strike / spot - 1
-        prob_c           = estimate_probability(spot, strike, TAU, vol.vol_60m)
+        prob_c           = estimate_probability(spot, strike, tau, vol.vol_60m)
         p_market_sim     = simulate_p_market(effective_offset, side=gate_side)
         dec              = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
                                           prob_c.p_yes, p_market_sim, args.bankroll,

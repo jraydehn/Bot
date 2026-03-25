@@ -179,16 +179,12 @@ def evaluate_trade(
 
     Gates are evaluated in this order — if any gate fails, the function
     returns immediately with decision="no_trade":
-        1. Market structure bias must support the proposed trade direction.
-           - YES trades: structure_bias must be +1 (bullish). Neutral (0) blocks YES
-                         via the normal gate path — confirmed structure is required
-                         because lagging indicators (EMA/RSI) reflect prior momentum,
-                         not immediate direction in a ranging market.
-                         Neutral-structure YES can still fire through Gate P if the
-                         edge is large enough relative to confirmation_score.
-           - NO trades:  structure_bias must be -1 (bearish, standard threshold)
-                         OR 0 (neutral, higher edge threshold applied at Gate 3).
-                         structure_bias = +1 always blocks a NO trade.
+        1. Market structure bias must not oppose the proposed trade direction.
+           - YES trades: structure_bias == -1 hard-blocks. structure_bias == 0 or +1
+                         allowed (neutral applies higher thresholds at Gate 3).
+           - NO trades:  structure_bias == +1 hard-blocks. structure_bias == 0 or -1
+                         allowed (neutral applies higher thresholds at Gate 3).
+           Gate P can override a Gate 1 hard-block if the edge is large enough.
         2. Confirmation indicators bias must align with the proposed trade direction.
         3. Net edge (after fees and slippage) must exceed the tiered minimum threshold.
            Thresholds scale with confirmation strength (confirmation_score for YES,
@@ -248,14 +244,22 @@ def evaluate_trade(
     structure_opposes  = (structure_bias != 0 and structure_bias != required_bias)
     neutral_trade      = not structure_confirms  # neutral OR opposing → higher thresholds
 
-    if structure_confirms:
+    if structure_opposes:
+        reasons.append(
+            f"Gate 1 FAILED: structure_bias={structure_bias} opposes {side.upper()} trade. "
+            f"Hard block — Gate P does not override structure."
+        )
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=raw_edge, net_edge=net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
+    elif structure_confirms:
         reasons.append(
             f"Gate 1 PASSED: structure_bias={structure_bias} confirms {side.upper()} trade."
-        )
-    elif structure_opposes:
-        reasons.append(
-            f"Gate 1 PASSED (against structure): structure_bias={structure_bias} opposes "
-            f"{side.upper()} trade — neutral/higher thresholds applied at Gate 3."
         )
     else:
         reasons.append(

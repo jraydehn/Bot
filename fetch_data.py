@@ -414,7 +414,7 @@ def _interval_to_ms(interval: str) -> int:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Fetch 1m, 1h, and 4h BTC OHLCV data and save to data/."""
+    """Fetch 1m, 15m, 1h, and 4h OHLCV data and save to data/."""
     parser = argparse.ArgumentParser(description="Fetch BTC OHLCV data for backtesting.")
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
     parser.add_argument("--start", default="2024-01-01",
@@ -439,10 +439,10 @@ def main() -> None:
                           source=args.source, force_refresh=args.refresh)
     check_gaps(df_1m, "1m")
 
-    # Steps 2–3: Resample from 1m and cache
+    # Steps 2–4: Resample from 1m and cache
     end_str = args.end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for step, (rule, label) in enumerate([("1h", "1-hour"), ("4h", "4-hour")], start=2):
-        print(f"\n[{step}/3] {label} bars (resampled from 1m)")
+    for step, (rule, label) in enumerate([("15m", "15-minute"), ("1h", "1-hour"), ("4h", "4-hour")], start=2):
+        print(f"\n[{step}/4] {label} bars (resampled from 1m)")
         path = _cache_path(args.source, args.symbol, rule, args.start, end_str)
 
         if path.exists() and not args.refresh:

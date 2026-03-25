@@ -19,7 +19,7 @@ from kelly_sizing import compute_kelly_size
 #   Opposing structure (-1):   score>=3 → 10%, score>=2 → 15%  (data collection tier)
 YES_GATE3_TIERS          = [(3, 0.02), (2, 0.04)]
 YES_NEUTRAL_GATE3_TIERS  = [(3, 0.04), (2, 0.06)]
-YES_OPPOSING_GATE3_TIERS = [(3, 0.10), (2, 0.15)]
+YES_OPPOSING_GATE3_TIERS = [(3, 0.15), (2, 0.20)]
 #
 # NO tiers (no_score, Gate 2 requires no_score<=1):
 #   Confirmed structure (-1):  no_score<=-3→2%,  <=-2→4%,  <=0→6%,  <=1→8%
@@ -27,7 +27,7 @@ YES_OPPOSING_GATE3_TIERS = [(3, 0.10), (2, 0.15)]
 #   Opposing structure (+1):   no_score<=-3→10%, <=-2→15%, <=0→20%, <=1→25%
 NO_GATE3_TIERS          = [(-3, 0.02), (-2, 0.04), (0, 0.06), (1, 0.08)]
 NO_NEUTRAL_GATE3_TIERS  = [(-3, 0.04), (-2, 0.06), (0, 0.10), (1, 0.12)]
-NO_OPPOSING_GATE3_TIERS = [(-3, 0.10), (-2, 0.15), (0, 0.20), (1, 0.25)]
+NO_OPPOSING_GATE3_TIERS = [(-3, 0.10), (-2, 0.12), (0, 0.15), (1, 0.18)]
 
 
 def _yes_gate3_threshold(score: int, neutral: bool, opposing: bool) -> float:

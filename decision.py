@@ -10,15 +10,14 @@ from pricing_comparison import evaluate_edge, kalshi_fee, DEFAULT_SLIPPAGE, DEFA
 from kelly_sizing import compute_kelly_size
 
 # Gate 3 tiered minimum net edge thresholds.
-# Separate tiers for YES (7-indicator confirmation_score) and NO (3-indicator no_score).
-# Neutral structure adds a premium to each tier (missing structural confirmation).
-# Gate P thresholds are intentionally higher — Gate P fires without structure/confirmation.
+# Both YES and NO use the same 3-indicator score (-3 to +3).
+# Neutral structure adds a premium to each tier.
 #
-# YES tiers (confirmation_score, range 2–9 when Gate 2 passes):
-#   Confirmed structure (+1):   score>=7 → 2%,  score>=4 → 4%,  score>=2 → 6%
-#   Neutral structure (0):      score>=7 → 4%,  score>=4 → 6%,  score>=2 → 10%
-YES_GATE3_TIERS = [(7, 0.02), (4, 0.04), (2, 0.06)]
-YES_NEUTRAL_GATE3_TIERS = [(7, 0.04), (4, 0.06), (2, 0.10)]
+# YES tiers (confirmation_score, range 2–3 when Gate 2 passes):
+#   Confirmed structure (+1):   score>=3 → 2%,  score>=2 → 4%
+#   Neutral structure (0):      score>=3 → 4%,  score>=2 → 6%
+YES_GATE3_TIERS = [(3, 0.02), (2, 0.04)]
+YES_NEUTRAL_GATE3_TIERS = [(3, 0.04), (2, 0.06)]
 #
 # NO tiers (no_score, range -3 to 0 when Gate 2 passes — Gate 2 requires no_score<=0):
 #   Confirmed structure (-1):   no_score<=-3 → 2%,  no_score<=-2 → 4%,  no_score<=0 → 6%
@@ -71,25 +70,28 @@ def _pure_edge_override(
     yes_net = (p_model - p_market) - fee - slippage - spread
     no_net  = (p_market - p_model) - fee - slippage - spread
 
-    # Tiered edge requirements — each direction has its own model and sliding threshold.
+    # Tiered edge requirements — both directions use the same 3-indicator score (-3 to +3).
     #
-    # YES (7-indicator momentum model, confirmation_score -9 to +9):
-    #   score >= 7 (both mom + most hourly bullish) → edge >= 6%
-    #   score >= 4 (both mom positive, hourly mixed) → edge >= 8%
-    #   score <  2 (weak/negative confirmation)     → edge >= 25%  (universal floor)
+    # YES (confirmation_score -3 to +3):
+    #   score >= 3 (all 3 bullish)       → edge >= 6%
+    #   score >= 2 (2 of 3 bullish)      → edge >= 8%
+    #   score >= 1 (1 of 3 bullish)      → edge >= 10%
+    #   score <= 0 (neutral/bearish)     → edge >= 25%  (universal floor)
     #
-    # NO (3-indicator model, no_score -3 to +3):
-    #   no_score <= -2 (EMA+RSI+Vol all bearish)    → edge >= 6%
-    #   no_score <=  0 (neutral/mixed)              → edge >= 8%
-    #   no_score <=  1 (slightly bullish)           → edge >= 10%
-    #   no_score <=  2 (mostly bullish)             → edge >= 15%
-    #   no_score  =  3 (strongly bullish)           → edge >= 25%  (universal floor)
-    if confirmation_score >= 7:
+    # NO (no_score -3 to +3):
+    #   no_score <= -2 (majority bearish) → edge >= 6%
+    #   no_score <=  0 (neutral/mixed)   → edge >= 8%
+    #   no_score <=  1 (slightly bullish) → edge >= 10%
+    #   no_score <=  2 (mostly bullish)  → edge >= 15%
+    #   no_score  =  3 (strongly bullish) → edge >= 25%  (universal floor)
+    if confirmation_score >= 3:
         yes_min = 0.06
-    elif confirmation_score >= 4:
+    elif confirmation_score >= 2:
         yes_min = PURE_EDGE_MIN_NET_EDGE  # 8%
+    elif confirmation_score >= 1:
+        yes_min = 0.10
     else:
-        yes_min = 0.25  # universal floor — any score qualifies at 25%+ net edge
+        yes_min = 0.25  # universal floor
 
     if no_score <= -2:
         no_min = 0.06
@@ -263,18 +265,15 @@ def evaluate_trade(
         )
 
     # --- Gate 2: Confirmation indicators ---
-    # NO trades use no_score (3-indicator: EMA+RSI+Vol) — the original working model.
-    #   no_score <= 0 passes (neutral or bearish); no_score > 0 blocked (net bullish).
-    #   Scores -1 to 0 are allowed but face a higher Gate 3 edge requirement (8%).
-    # YES trades use confirmation_bias (7-indicator: adds MACD, VWAP, momentum).
-    # Momentum scores are intentionally excluded from NO direction to prevent
-    # short-term bounces from overriding a broader bearish structure signal.
+    # Both YES and NO use the same 3-indicator score (EMA + RSI + directional vol).
+    # YES: confirmation_bias == +1 required (score >= 2).
+    # NO:  no_score <= 0 passes (neutral or bearish); > 0 blocked (net bullish signals).
     if side == "no":
         gate2_passes = no_score <= 0
-        bias_label = f"no_score={no_score:+d} (3-indicator)"
+        bias_label = f"no_score={no_score:+d}"
     else:
         gate2_passes = confirmation_bias == required_bias
-        bias_label = f"confirmation_bias={confirmation_bias} (7-indicator)"
+        bias_label = f"confirmation_bias={confirmation_bias}"
 
     if not gate2_passes:
         reasons.append(

@@ -32,8 +32,10 @@ PAPER_TRADES_CSV = Path(__file__).parent / "results" / "paper_trades.csv"
 CSV_COLUMNS = [
     "logged_at", "decision_time", "contract_ticker", "close_ts",
     "spot", "strike", "offset_pct", "p_market", "p_market_source",
-    "p_yes_model", "z_score", "vol_60m", "vol_60m_model", "vol_implied_kalshi", "vol_ratio", "vol_eff",
-    "structure_bias", "confirmation_bias", "confirmation_score",
+    "p_yes_model", "z_score", "vol_60m", "vol_60m_model", "vol_implied_kalshi", "vol_ratio", "spread", "vol_eff",
+    "structure_bias", "confirmation_bias", "confirmation_score", "no_score",
+    "obi_score", "obi_raw", "obi_exchanges",
+    "vol_score", "vwap_score", "ema_stretch_score",
     "ema_alignment", "rsi_value", "rsi_regime", "raw_edge", "net_edge",
     "decision", "side", "neutral_gate", "pure_edge_gate",
     "contracts_scanned", "tau_minutes", "gate_blocked",
@@ -92,6 +94,104 @@ def compute_pnl(row: dict, resolved_yes: bool) -> float:
             return round(-bet, 2)
 
 
+def recover_missing_tickers(rows: list, auth: KalshiAuth) -> int:
+    """
+    For trade rows with no contract_ticker, try to find the matching Kalshi contract
+    by querying for settled contracts near the row's logged_at time and closest strike.
+    Updates the row in-place. Returns the number of rows recovered.
+    """
+    from live_signal import kalshi_get, ASSET_CONFIG
+    import time as _time
+
+    recovered = 0
+    for row in rows:
+        if row.get("decision", "").strip() != "trade":
+            continue
+        if (row.get("contract_ticker") or "").strip():
+            continue  # already has a ticker
+
+        try:
+            logged_dt = datetime.fromisoformat(row["logged_at"].replace("Z", "+00:00"))
+            if logged_dt.tzinfo is None:
+                logged_dt = logged_dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+
+        strike = float(row.get("strike") or 0)
+        if not strike:
+            continue
+
+        # Search a 2-hour window around the logged time for settled contracts
+        series = "KXBTCD"
+        window_start = int((logged_dt.timestamp()) - 60)
+        window_end   = int((logged_dt.timestamp()) + 7200)
+
+        try:
+            data = kalshi_get("/markets", {
+                "series_ticker": series,
+                "min_close_ts":  window_start,
+                "max_close_ts":  window_end,
+                "limit":         200,
+            }, auth)
+        except Exception as e:
+            print(f"  [recover] API error: {e}")
+            continue
+
+        markets = data.get("markets") or []
+        if not markets:
+            continue
+
+        # Find settled contract with closest floor_strike to our simulated strike
+        settled = [m for m in markets if m.get("status") in ("settled", "resolved", "finalized", "determined")]
+        if not settled:
+            continue
+
+        best = min(settled, key=lambda m: abs(float(m.get("floor_strike") or m.get("strike_value") or 0) - strike))
+        best_strike = float(best.get("floor_strike") or best.get("strike_value") or 0)
+
+        if abs(best_strike - strike) > strike * 0.02:  # >2% away — skip, likely wrong contract
+            print(f"  [recover] No close match for strike={strike:.2f} (closest={best_strike:.2f})")
+            continue
+
+        ticker   = best.get("ticker", "")
+        close_ts = best.get("close_time", "")
+        row["contract_ticker"] = ticker
+        row["close_ts"]        = close_ts
+
+        # Fetch the real p_market from the candlestick at the time of the trade
+        try:
+            trade_ts = int(logged_dt.timestamp())
+            series   = best.get("series_ticker", "KXBTCD")
+            path     = f"/series/{series}/markets/{ticker}/candlesticks"
+            cdata    = kalshi_get(path, {"start_ts": trade_ts - 120, "end_ts": trade_ts + 60, "period_interval": 1}, auth)
+            candles  = cdata.get("candlesticks") or []
+            real_pm  = None
+            for c in reversed(candles):
+                bid_d = c.get("yes_bid") or {}
+                ask_d = c.get("yes_ask") or {}
+                try:
+                    bid = float(bid_d.get("close_dollars") or bid_d.get("open_dollars") or 0)
+                    ask = float(ask_d.get("close_dollars") or ask_d.get("open_dollars") or 0)
+                except (ValueError, TypeError):
+                    continue
+                if ask > 0:
+                    real_pm = round((bid + ask) / 2.0, 6)
+                    break
+            if real_pm is not None:
+                row["p_market"]        = str(real_pm)
+                row["p_market_source"] = "real"
+                print(f"  [recover] Matched strike={strike:.2f} → {ticker}  p_market updated: {real_pm:.4f} (close={close_ts})")
+            else:
+                print(f"  [recover] Matched strike={strike:.2f} → {ticker} (no candlestick price found, p_market unchanged)")
+        except Exception as e:
+            print(f"  [recover] Ticker matched but candlestick fetch failed: {e}")
+
+        recovered += 1
+        _time.sleep(0.1)
+
+    return recovered
+
+
 def main(csv_path: Path = None) -> None:
     target = csv_path or PAPER_TRADES_CSV
     if not target.exists():
@@ -107,6 +207,11 @@ def main(csv_path: Path = None) -> None:
     with open(target, newline="") as f:
         rows = list(csv.DictReader(f))
 
+    # Try to recover tickers for any trade rows that were logged without one
+    recovered = recover_missing_tickers(rows, auth)
+    if recovered:
+        print(f"  Recovered {recovered} missing ticker(s).")
+
     updated = 0
     skipped = 0
 
@@ -121,9 +226,8 @@ def main(csv_path: Path = None) -> None:
             skipped += 1
             continue
         if row.get("decision", "").strip() != "trade":
-            # Still log resolution for no_trade rows if we have a ticker
-            # (useful for counterfactual analysis)
-            pass
+            skipped += 1
+            continue
 
         # Check if contract close time has passed
         close_ts_str = row.get("close_ts", "").strip()

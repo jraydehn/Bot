@@ -1,14 +1,17 @@
 """
 Probability engine for estimating P(BTC finishes above strike K at expiry).
 
-Uses a zero-drift log-normal price model. No machine learning; pure closed-form
-math based on realized volatility.
+Uses a log-normal price model with an optional directional drift term derived
+from market structure and confirmation signals. No machine learning; pure
+closed-form math based on realized volatility.
 """
 
 import math
 from dataclasses import dataclass
 
 from scipy.stats import norm
+
+
 
 
 @dataclass
@@ -27,18 +30,28 @@ def estimate_probability(
     K: float,
     tau: float,
     sigma_min: float,
+    structure_bias: int = 0,    # kept for API compatibility, no longer used in calculation
+    confirmation_score: int = 0, # kept for API compatibility, no longer used in calculation
 ) -> ProbabilityResult:
     """
     Estimate the probability that BTC finishes above strike K at expiration.
 
-    Assumes a log-normal model with no drift. Volatility is scaled from
+    Uses a log-normal model with an optional directional drift derived from
+    market structure and confirmation signals. Volatility is scaled from
     per-minute to the full expiry window using the square-root-of-time rule.
+
+    The drift term shifts p_yes in the direction of the dominant signal:
+      - Bullish signals (structure=+1, high confirmation_score) → higher p_yes
+      - Bearish signals (structure=-1, low confirmation_score) → lower p_yes
+      - Neutral/absent signals (defaults) → zero drift (original behavior)
 
     Args:
         S: Current BTC spot price in USD.
         K: Strike price of the event contract in USD.
         tau: Minutes remaining until expiry. Must be > 0.
         sigma_min: Realized per-minute volatility (std of log returns). Must be > 0.
+        structure_bias: Market structure signal: +1 (bullish), -1 (bearish), 0 (neutral).
+        confirmation_score: 7-indicator confirmation score, typically -7 to +7.
 
     Returns:
         ProbabilityResult with p_yes and supporting diagnostic metrics.
@@ -57,10 +70,10 @@ def estimate_probability(
     # Log-distance: how far the strike sits above current price in log space
     log_distance = math.log(K / S)
 
-    # z: how many standard deviations the strike is away from current price
+    # z: standard deviations from spot to the strike (pure log-normal, no drift)
     z = log_distance / sigma_tau
 
-    # p_yes: probability that BTC finishes above the strike (right-tail area under normal curve)
+    # p_yes: probability that BTC finishes above the strike (right-tail area)
     p_yes = 1 - norm.cdf(z)
 
     # Expected move: convert 1-sigma log move to a percentage of current price
@@ -112,15 +125,23 @@ def implied_vol_from_price(
     p_market = 1 - norm.cdf(log(K/S) / (sigma_min * sqrt(tau)))
     => sigma_min = log(K/S) / (norm.ppf(1 - p_market) * sqrt(tau))
 
-    Returns float('nan') if the inputs are degenerate (e.g. ITM strike,
-    extreme probabilities, or non-positive tau).
+    Valid for both OTM YES (K > S, p_market < 0.50) and OTM NO / ITM YES
+    (K < S, p_market > 0.50) — in both cases log(K/S) and z_implied have
+    matching signs, producing a positive sigma_min.
+
+    Returns float('nan') if inputs are degenerate or signs are inconsistent
+    (e.g. K > S but p_market > 0.50, or K = S, or p_market = 0.50).
     """
     try:
-        if not (0 < p_market < 1) or K <= S or tau <= 0:
+        if not (0 < p_market < 1) or tau <= 0 or K == S:
             return float("nan")
+        log_dist  = math.log(K / S)
         z_implied = norm.ppf(1.0 - p_market)
-        if z_implied <= 0:
+        if z_implied == 0:
             return float("nan")
-        return math.log(K / S) / (z_implied * math.sqrt(tau))
+        sigma_min = log_dist / (z_implied * math.sqrt(tau))
+        if sigma_min <= 0:
+            return float("nan")  # inconsistent: market price contradicts strike direction
+        return sigma_min
     except Exception:
         return float("nan")

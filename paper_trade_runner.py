@@ -32,8 +32,11 @@ from market_data import compute_realized_volatility
 from probability_engine import estimate_probability, implied_vol_from_price, blend_vol, REALIZED_VOL_WEIGHT
 from market_structure import detect_market_structure
 from confirmation_indicators import compute_confirmation
+from order_book import fetch_order_book_imbalance
 from pricing_comparison import simulate_p_market, evaluate_edge, DEFAULT_SLIPPAGE, DEFAULT_SPREAD
 from decision import evaluate_trade
+import outcome_checker
+import update_data
 from kelly_sizing import compute_kelly_size
 from live_signal import (
     load_auth, kalshi_get, fetch_live_spot, fetch_current_price, find_live_contract,
@@ -42,6 +45,11 @@ from live_signal import (
 )
 
 PAPER_TRADES_CSV = Path(__file__).parent / "results" / "paper_trades.csv"
+
+# In-memory set of tickers traded this process run — resets on restart.
+# Prevents re-trading the same contract within a session without blocking
+# re-evaluation after a restart.
+_SESSION_TRADED: set = set()
 
 
 def get_csv_path(asset: str = "BTC") -> Path:
@@ -68,10 +76,18 @@ CSV_COLUMNS = [
     "vol_60m_model",
     "vol_implied_kalshi",
     "vol_ratio",
+    "spread",
     "vol_eff",
     "structure_bias",
     "confirmation_bias",
     "confirmation_score",
+    "no_score",
+    "obi_score",
+    "obi_raw",
+    "obi_exchanges",
+    "vol_score",
+    "vwap_score",
+    "ema_stretch_score",
     "ema_alignment",
     "rsi_value",
     "rsi_regime",
@@ -159,7 +175,9 @@ def main() -> None:
     vol_src = live_1m if live_1m is not None and len(live_1m) >= vol_bars else df_vol.iloc[-200:]
     vol     = compute_realized_volatility(vol_src)
     struct  = detect_market_structure(hist_struct)
-    confirm = compute_confirmation(hist_confirm, ema_fast=ema_fast, ema_slow=ema_slow, rsi_period=rsi_period)
+    obi     = fetch_order_book_imbalance()
+    print(f"  OBI: {obi.obi:+.4f}  score={obi.obi_score:+d}  exchanges={obi.exchanges_used}")
+    confirm = compute_confirmation(hist_confirm, hist_1m=live_1m, obi_score=obi.obi_score, momentum_enabled=False)
     gate_side = "yes" if struct.structure_bias == 1 else "no"
 
     # Scan all contracts for nearest expiry; select highest net_edge trade.
@@ -180,19 +198,63 @@ def main() -> None:
         contracts_scanned = len(ladder)
         print(f"  [scan] {contracts_scanned} liquid contracts in nearest expiry")
 
+        # Load already-traded tickers and strike positions per expiry to prevent conflicting bets
+        csv_path_check = get_csv_path(args.asset)
+        already_traded = set()
+        already_traded_expiries = {}  # {close_ts: {"yes": [strikes], "no": [strikes]}}
+        if csv_path_check.exists():
+            try:
+                df_existing = pd.read_csv(csv_path_check)
+                # already_traded: in-memory session set (resets on restart)
+                already_traded = _SESSION_TRADED
+                # already_traded_expiries: only active (not yet expired) contracts
+                # Expired contracts have settled and cannot conflict with new trades
+                traded_rows_all = df_existing[df_existing["decision"] == "trade"].copy()
+                traded_rows_all = traded_rows_all[
+                    pd.to_datetime(traded_rows_all["close_ts"], utc=True) > pd.Timestamp(now_utc)
+                ]
+                for _, r in traded_rows_all[["close_ts", "side", "strike"]].dropna().iterrows():
+                    bucket = already_traded_expiries.setdefault(r["close_ts"], {"yes": [], "no": []})
+                    bucket[r["side"]].append(float(r["strike"]))
+            except Exception:
+                pass
+
         for c in ladder:
+            if c["ticker"] in already_traded:
+                print(f"  [scan] Skipping {c['ticker']} — already traded this ticker")
+                continue
             s_k       = c["floor_strike"]
             pm        = c["p_market"]
+            if abs(s_k / spot - 1) > 0.01:
+                continue
+            spread_c  = c["ask"] - c["bid"]
+            if spread_c > 0.08:
+                print(f"  [scan] Skipping {c['ticker']} — spread={spread_c:.3f} (stale/illiquid)")
+                continue
             tau_c     = minutes_to_expiry(c["close_time"])
             vol_imp_c = implied_vol_from_price(pm, spot, s_k, tau_c)
-            vol_eff_c = blend_vol(vol.vol_60m, vol_imp_c)
-            prob_c    = estimate_probability(spot, s_k, tau_c, vol_eff_c)
+            vol_ratio_c = vol.vol_multi / vol_imp_c if vol_imp_c and vol_imp_c > 0 else None
+            if vol_ratio_c is not None and vol_ratio_c > 2.0:
+                print(f"  [scan] Skipping {c['ticker']} — vol_ratio={vol_ratio_c:.2f} (realized >> implied)")
+                continue
+            vol_eff_c = blend_vol(vol.vol_multi, vol_imp_c)
+            prob_c    = estimate_probability(spot, s_k, tau_c, vol_eff_c,
+                                               structure_bias=struct.structure_bias,
+                                               confirmation_score=confirm.confirmation_score)
             dec_c     = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
                                        prob_c.p_yes, pm, args.bankroll,
                                        confirmation_score=confirm.confirmation_score, no_score=confirm.no_score)
+            positions = already_traded_expiries.get(c["close_time"], {"yes": [], "no": []})
+            if dec_c.side == "yes" and any(no_k < s_k for no_k in positions["no"]):
+                print(f"  [scan] Skipping {c['ticker']} — YES@{s_k} conflicts with existing NO below it")
+                continue
+            if dec_c.side == "no" and any(yes_k > s_k for yes_k in positions["yes"]):
+                print(f"  [scan] Skipping {c['ticker']} — NO@{s_k} conflicts with existing YES above it")
+                continue
+
             meta_c    = {"strike": s_k, "p_market": pm, "prob": prob_c,
                          "contract_ticker": c["ticker"], "close_ts": c["close_time"],
-                         "vol_eff": vol_eff_c}
+                         "vol_eff": vol_eff_c, "bid": c["bid"], "ask": c["ask"]}
 
             if best_any_dec is None or dec_c.net_edge > best_any_dec.net_edge:
                 best_any_dec  = dec_c
@@ -217,16 +279,8 @@ def main() -> None:
         print(f"  [scan] No trade passes gates. Best seen: {chosen['contract_ticker']}  "
               f"net_edge={dec.net_edge:+.4f}")
     else:
-        # No auth or empty ladder — simulate
-        effective_offset = strike / spot - 1
-        prob_c           = estimate_probability(spot, strike, tau, vol.vol_60m)
-        p_market_sim     = simulate_p_market(effective_offset, side=gate_side)
-        dec              = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
-                                          prob_c.p_yes, p_market_sim, args.bankroll,
-                                          confirmation_score=confirm.confirmation_score, no_score=confirm.no_score)
-        chosen           = {"strike": strike, "p_market": p_market_sim,
-                            "prob": prob_c, "contract_ticker": "", "close_ts": "",
-                            "vol_eff": vol.vol_60m}
+        print("  [scan] No real contracts available (auth failed or empty ladder) — skipping.")
+        return
 
     strike          = chosen["strike"]
     p_market        = chosen["p_market"]
@@ -236,9 +290,10 @@ def main() -> None:
     effective_offset = strike / spot - 1
     pricing = evaluate_edge(prob.p_yes, p_market)
 
-    vol_eff  = chosen.get("vol_eff", vol.vol_60m)
+    vol_eff  = chosen.get("vol_eff", vol.vol_multi)
     vol_impl = implied_vol_from_price(p_market, spot, strike, minutes_to_expiry(close_ts))
-    vol_ratio = round(vol.vol_60m / vol_impl, 4) if vol_impl > 0 else ""
+    vol_ratio = round(vol.vol_multi / vol_impl, 4) if vol_impl > 0 else ""
+    spread    = round(chosen.get("ask", 0) - chosen.get("bid", 0), 4) if chosen.get("ask") else ""
 
     # Build row
     row = {
@@ -254,13 +309,21 @@ def main() -> None:
         "p_yes_model":        round(prob.p_yes, 6),
         "z_score":            round(prob.z_score, 4),
         "vol_60m":            round(vol.vol_60m, 8),
-        "vol_60m_model":      round(vol.vol_60m, 8),
+        "vol_60m_model":      round(vol.vol_multi, 8),
         "vol_implied_kalshi": round(vol_impl, 8) if vol_impl == vol_impl else "",
         "vol_ratio":          vol_ratio,
+        "spread":             spread,
         "vol_eff":            round(vol_eff, 8),
         "structure_bias":     struct.structure_bias,
         "confirmation_bias":  confirm.confirmation_bias,
         "confirmation_score": confirm.confirmation_score,
+        "no_score":           confirm.no_score,
+        "obi_score":          confirm.obi_score,
+        "obi_raw":            round(obi.obi, 4) if obi.obi == obi.obi else "",
+        "obi_exchanges":      obi.exchanges_used,
+        "vol_score":          confirm.vol_score,
+        "vwap_score":         confirm.vwap_score,
+        "ema_stretch_score":  confirm.ema_stretch_score,
         "ema_alignment":      confirm.ema_alignment,
         "rsi_value":          round(confirm.rsi_value, 2),
         "rsi_regime":         confirm.rsi_regime,
@@ -292,7 +355,28 @@ def main() -> None:
     csv_path = get_csv_path(args.asset)
     ensure_csv_exists(csv_path)
     append_row(row, csv_path)
+    if dec.decision == "trade":
+        _SESSION_TRADED.add(contract_ticker)
 
 
 if __name__ == "__main__":
-    main()
+    loop_count = 0
+    _last_hour = datetime.now(timezone.utc).hour
+    while True:
+        # Reset session-traded set at the top of each new clock hour
+        _current_hour = datetime.now(timezone.utc).hour
+        if _current_hour != _last_hour:
+            _SESSION_TRADED.clear()
+            print(f"  [session] New hour — already_traded reset.")
+            _last_hour = _current_hour
+        if loop_count % 30 == 0:          # refresh OHLCV data every 30 minutes
+            print("  [data] Updating OHLCV parquet files...")
+            try:
+                update_data.main()
+            except Exception as e:
+                print(f"  [data] Update failed (will retry next cycle): {e}")
+        if loop_count % 5 == 0:
+            outcome_checker.main()
+        main()
+        loop_count += 1
+        time.sleep(60)

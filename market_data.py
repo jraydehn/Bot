@@ -14,13 +14,20 @@ REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
 MIN_ROWS = 120
 
 
+# Weights for multi-horizon realized vol blend.
+# Favors short-term windows to react quickly to vol regime changes.
+MULTI_VOL_WEIGHTS = {"vol_15m": 0.50, "vol_30m": 0.30, "vol_60m": 0.20}
+
+
 @dataclass
 class VolatilityResult:
-    """Realized volatility per minute for three rolling windows."""
+    """Realized volatility per minute for four rolling windows."""
 
+    vol_15m: float   # std of log returns over trailing 15 minutes
     vol_30m: float   # std of log returns over trailing 30 minutes
     vol_60m: float   # std of log returns over trailing 60 minutes
     vol_120m: float  # std of log returns over trailing 120 minutes
+    vol_multi: float # weighted blend: 50% 15m + 30% 30m + 20% 60m
     log_returns: pd.Series  # full series of per-minute log returns
 
 
@@ -63,13 +70,26 @@ def compute_realized_volatility(df: pd.DataFrame) -> VolatilityResult:
 
     # Rolling std of log returns gives realized volatility per minute
     # ddof=1 applies the sample correction (Bessel's correction), standard practice
-    vol_30m = float(log_returns.rolling(window=30).std().iloc[-1])
-    vol_60m = float(log_returns.rolling(window=60).std().iloc[-1])
+    vol_15m  = float(log_returns.rolling(window=15).std().iloc[-1])
+    vol_30m  = float(log_returns.rolling(window=30).std().iloc[-1])
+    vol_60m  = float(log_returns.rolling(window=60).std().iloc[-1])
     vol_120m = float(log_returns.rolling(window=120).std().iloc[-1])
 
+    # Multi-horizon blend: weight recent windows more heavily so that a vol spike
+    # in the last 15 minutes is immediately reflected in the probability model.
+    # Falls back to available windows if any are NaN (e.g., insufficient history).
+    vols    = {"vol_15m": vol_15m, "vol_30m": vol_30m, "vol_60m": vol_60m}
+    w_total = sum(w for k, w in MULTI_VOL_WEIGHTS.items() if not np.isnan(vols[k]))
+    vol_multi = (
+        sum(MULTI_VOL_WEIGHTS[k] * vols[k] for k in vols if not np.isnan(vols[k])) / w_total
+        if w_total > 0 else vol_60m
+    )
+
     return VolatilityResult(
+        vol_15m=vol_15m,
         vol_30m=vol_30m,
         vol_60m=vol_60m,
         vol_120m=vol_120m,
+        vol_multi=vol_multi,
         log_returns=log_returns,
     )

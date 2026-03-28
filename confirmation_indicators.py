@@ -14,16 +14,19 @@ EMA_SLOW = 50            # slow EMA period for trend alignment
 RSI_PERIOD = 21          # RSI lookback period
 VOLUME_MA_PERIOD = 20    # simple moving average period for volume baseline
 EMA_CONFIRM_BARS = 3     # consecutive bars the EMA spread must hold to confirm
+EMA_STRETCH_PERIOD = 20  # EMA period on 5m bars (covers ~100 minutes)
+EMA_STRETCH_THRESHOLD = 0.001  # ±0.1% from 5m EMA triggers overbought/oversold signal
 
 
 @dataclass
 class ConfirmationResult:
     """Output of the confirmation indicators module."""
 
-    confirmation_bias: int    # +1 bullish, -1 bearish, 0 neutral — from 7-indicator score (YES direction)
-    no_bias: int              # +1 bullish, -1 bearish, 0 neutral — from 3-indicator no_score (NO direction)
-    confirmation_score: int   # sum of up to 7 indicator scores, range -9 to +9
-    no_score: int             # 3-indicator score for NO direction (EMA+RSI+Vol, -3 to +3)
+    confirmation_bias: int    # +1 bullish, -1 bearish, 0 neutral — from 8-indicator score (YES direction)
+    no_bias: int              # +1 bullish, -1 bearish, 0 neutral — from 4-indicator no_score (NO direction)
+    confirmation_score: int   # sum of up to 8 indicator scores, range -6 to +6 (without momentum)
+    no_score: int             # 7-indicator score for NO direction (EMA+RSI+Vol+OBI+MACD+VWAP+Stretch, -6 to +6)
+    obi_score: int            # +1 bullish, -1 bearish, 0 neutral — from order book imbalance
     ema_alignment: str        # "bullish", "bearish", or "neutral"
     rsi_regime: str           # "bullish", "bearish", or "neutral"
     rsi_value: float          # current RSI reading
@@ -32,6 +35,9 @@ class ConfirmationResult:
     ema_50_current: float     # current value of the 50-period EMA
     mom_15m_score: int        # +1 if 15-min price change > 0, -1 if < 0, 0 if unavailable
     mom_60m_score: int        # +1 if 60-min price change > 0, -1 if < 0, 0 if unavailable
+    ema_stretch_score: int    # +1 oversold (below 5m EMA), -1 overbought (above), 0 neutral
+    vol_score: int            # +1 high vol + up candle, -1 high vol + down candle, 0 low vol
+    vwap_score: int           # +1 price above 24h VWAP, -1 below
     reason: str               # plain-English explanation of the classification
 
 
@@ -63,7 +69,7 @@ def _compute_rsi(series: pd.Series, period: int) -> pd.Series:
     return rsi
 
 
-def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> ConfirmationResult:
+def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_score: int = 0, momentum_enabled: bool = True) -> ConfirmationResult:
     """
     Compute EMA alignment, RSI regime, and volume confirmation from 1-hour bars.
 
@@ -138,8 +144,12 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
     rsi_series = _compute_rsi(close, RSI_PERIOD)
     rsi_value = float(rsi_series.iloc[-1])
 
-    if rsi_value >= 55:
+    if rsi_value > 70:
+        rsi_regime = "neutral"    # overbought — extreme, not a reliable directional signal
+    elif rsi_value >= 55:
         rsi_regime = "bullish"
+    elif rsi_value <= 30:
+        rsi_regime = "neutral"    # oversold — extreme, not a reliable directional signal
     elif rsi_value <= 45:
         rsi_regime = "bearish"
     else:
@@ -155,12 +165,7 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
     price_up = bool(float(close.iloc[-1]) > float(close.iloc[-2]))
     volume_confirmed = high_vol  # kept for display: True if volume above average
 
-    # --- MACD (12, 26, 9) ---
-    ema_12 = close.ewm(span=12, adjust=False).mean()
-    ema_26 = close.ewm(span=26, adjust=False).mean()
-    macd_line = ema_12 - ema_26
-    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    macd_score = 1 if float(macd_line.iloc[-1]) > float(signal_line.iloc[-1]) else -1
+    macd_score = 0  # MACD removed — too lagging for 1-hour contracts (12-26h lookback)
 
     # --- Rolling VWAP (24-period) ---
     if all(c in df.columns for c in ["high", "low"]):
@@ -173,7 +178,7 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
 
     # --- Score each indicator ---
     ema_score = 1 if ema_alignment == "bullish" else (-1 if ema_alignment == "bearish" else 0)
-    rsi_score  = 1 if rsi_regime == "bullish" else (-1 if rsi_regime == "bearish" else 0)
+    rsi_score  = 0  # RSI signals paused — regime still computed and logged for future use
     if high_vol and price_up:
         vol_score = 1
     elif high_vol and not price_up:
@@ -181,13 +186,13 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
     else:
         vol_score = 0  # low volume = neutral signal
 
-    # --- Short-term 1m momentum scores (if hist_1m provided) ---
+    # --- Short-term 1m momentum scores (if hist_1m provided and momentum enabled) ---
     # Weight 2 (vs weight 1 for hourly indicators) so that falling short-term momentum
     # overrides a bullish hourly signal in Gate P. Retroactive analysis showed that
     # chg_15m > 0 AND chg_60m > 0 is the strongest predictor of Gate P YES wins.
     mom_15m_score = 0
     mom_60m_score = 0
-    if hist_1m is not None and len(hist_1m) >= 62:
+    if momentum_enabled and hist_1m is not None and len(hist_1m) >= 62:
         hist_1m_c = hist_1m.copy()
         hist_1m_c.columns = hist_1m_c.columns.str.lower()
         c1m = hist_1m_c["close"]
@@ -199,23 +204,47 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
         mom_15m_score = 2 if mom_15m > 0 else -2
         mom_60m_score = 2 if mom_60m > 0 else -2
 
-    # --- 3-indicator score for NO direction (original model, unchanged) ---
-    # EMA + RSI + Vol only — these were the working NO indicators from the baseline model.
-    # Momentum scores are intentionally excluded from NO direction to avoid short-term
-    # bounces flipping the NO signal during a broader bearish structure.
-    no_score = ema_score + rsi_score + vol_score  # range -3 to +3
+    # --- EMA Stretch score (5m candles resampled from 1m, 20-period EMA) ---
+    # Measures mean reversion: if price is extended above the 5m EMA it is overbought
+    # and likely to revert down (-1); if below, oversold and likely to revert up (+1).
+    # Groups consecutive 1m bars into 5-bar buckets (no datetime index required).
+    ema_stretch_score = 0
+    if hist_1m is not None and len(hist_1m) >= 100:
+        try:
+            h1m = hist_1m.copy()
+            h1m.columns = h1m.columns.str.lower()
+            closes_1m = h1m["close"].values
+            n_5m = len(closes_1m) // 5
+            closes_5m = pd.Series([closes_1m[(i + 1) * 5 - 1] for i in range(n_5m)])
+            if len(closes_5m) >= EMA_STRETCH_PERIOD:
+                ema_5m = closes_5m.ewm(span=EMA_STRETCH_PERIOD, adjust=False).mean()
+                current_5m_close = float(closes_5m.iloc[-1])
+                current_5m_ema   = float(ema_5m.iloc[-1])
+                stretch = (current_5m_close - current_5m_ema) / current_5m_ema
+                if stretch > EMA_STRETCH_THRESHOLD:
+                    ema_stretch_score = -1   # overbought — expect reversion down
+                elif stretch < -EMA_STRETCH_THRESHOLD:
+                    ema_stretch_score = +1   # oversold — expect reversion up
+        except Exception:
+            ema_stretch_score = 0
 
-    if no_score >= 2:
+    # --- 6-indicator score for NO direction ---
+    # EMA + RSI + Vol + OBI + VWAP + EMA Stretch. MACD removed (too lagging for 1h contracts).
+    # Momentum excluded to avoid short-term bounces flipping the NO signal.
+    no_score = ema_score + rsi_score + vol_score + obi_score + vwap_score + ema_stretch_score  # range -5 to +5 (RSI paused)
+
+    if no_score >= 1:
         no_bias = +1
-    elif no_score <= -2:
+    elif no_score <= -1:
         no_bias = -1
     else:
         no_bias = 0
 
-    # --- 7-indicator score for YES direction (MACD, VWAP, momentum added) ---
-    # Hourly indicators: -5 to +5; momentum (weight 2 each): -4 to +4 → total -9 to +9
-    confirmation_score = ema_score + rsi_score + vol_score + macd_score + vwap_score + mom_15m_score + mom_60m_score
-    max_score = 5 + (4 if mom_15m_score != 0 or mom_60m_score != 0 else 0)
+    # --- YES direction score (VWAP, momentum, OBI, EMA Stretch; MACD removed) ---
+    # Hourly indicators: -5 to +5 (RSI paused); momentum (weight 2 each): -4 to +4 → total -9 to +9
+    # Without momentum (runtime default): -5 to +5
+    confirmation_score = ema_score + rsi_score + vol_score + vwap_score + mom_15m_score + mom_60m_score + obi_score + ema_stretch_score
+    max_score = 6 + (4 if mom_15m_score != 0 or mom_60m_score != 0 else 0)
 
     # --- confirmation_bias: YES direction uses full 7-indicator score ---
     if confirmation_score >= 2:
@@ -233,11 +262,11 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
         mom_str = ", Mom15m={:+d}, Mom60m={:+d}".format(mom_15m_score, mom_60m_score)
     tag = "confirmed" if confirmation_bias != 0 else "mixed signals"
     reason = (
-        "{}: score={:+d}/{} (EMA={:+d}, RSI={:+d}, Vol={:+d}, MACD={:+d}, VWAP={:+d}{}) → {} (YES bias). "
-        "NO bias from 3-indicator no_score={:+d} (no_bias={:+d}). "
+        "{}: score={:+d}/{} (EMA={:+d}, RSI={:+d}, Vol={:+d}, VWAP={:+d}, OBI={:+d}, Stretch={:+d}{}) → {} (YES bias). "
+        "NO bias from no_score={:+d} (no_bias={:+d}). "
         "20-EMA ({:.2f}) vs 50-EMA ({:.2f}); RSI={:.1f} ({}).".format(
             label, confirmation_score, max_score,
-            ema_score, rsi_score, vol_score, macd_score, vwap_score, mom_str, tag,
+            ema_score, rsi_score, vol_score, vwap_score, obi_score, ema_stretch_score, mom_str, tag,
             no_score, no_bias,
             ema_20_current, ema_50_current, rsi_value, rsi_regime
         )
@@ -248,6 +277,7 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
         no_bias=no_bias,
         confirmation_score=confirmation_score,
         no_score=no_score,
+        obi_score=obi_score,
         ema_alignment=ema_alignment,
         rsi_regime=rsi_regime,
         rsi_value=rsi_value,
@@ -256,5 +286,8 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None) -> Conf
         ema_50_current=ema_50_current,
         mom_15m_score=mom_15m_score,
         mom_60m_score=mom_60m_score,
+        ema_stretch_score=ema_stretch_score,
+        vol_score=vol_score,
+        vwap_score=vwap_score,
         reason=reason,
     )

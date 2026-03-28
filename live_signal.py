@@ -112,20 +112,8 @@ ASSET_CONFIG = {
         "vol_lookback_bars":   60,
         "contract_window_sec": 7200,
     },
-    "BTC15": {
-        "series_ticker":       "KXBTC15",
-        "binance_symbol":      "BTCUSDT",
-        "index_name":          "BRTI",
-        "spot_sources":        _BTC_SPOT_SOURCES,
-        "tau":                 15,
-        "confirmation_interval": "15m",
-        "structure_interval":  "1h",
-        "ema_fast":            10,
-        "ema_slow":            20,
-        "rsi_period":          14,
-        "vol_lookback_bars":   30,
-        "contract_window_sec": 1800,
-    },
+    # BTC15 (KXBTC15M) dropped: directional contract ("price up in 15 mins?"),
+    # incompatible with the strike-based log-normal probability engine.
 }
 
 
@@ -338,11 +326,14 @@ def fetch_contracts_for_nearest_expiry(auth: KalshiAuth, spot: float = 0.0, asse
                 break
         all_markets.extend(window_markets)
         # If we found liquid contracts in the near window, don't bother with the far window
-        if window_end == now_ts + 14400 and window_markets:
+        if window_end == now_ts + near_window and window_markets:
             break
 
     if not all_markets:
+        print(f"  [scan] API returned 0 markets total")
         return []
+
+    print(f"  [scan] API returned {len(all_markets)} markets total")
 
     # Find the nearest future close_time
     future_close_times = set()
@@ -357,39 +348,60 @@ def fetch_contracts_for_nearest_expiry(auth: KalshiAuth, spot: float = 0.0, asse
             pass
 
     if not future_close_times:
+        print(f"  [scan] No future close_times found in {len(all_markets)} markets")
         return []
 
-    nearest_expiry = min(future_close_times)
+    # Collect all expiries that have open (non-initialized) contracts
+    open_expiries = []
+    for expiry in sorted(future_close_times):
+        candidates = [m for m in all_markets if m.get("close_time") == expiry
+                      and m.get("status") not in ("initialized", "closed", "settled", "resolved", "finalized")]
+        if candidates:
+            open_expiries.append((expiry, candidates))
 
-    # Extract liquid contracts at that expiry
+    if not open_expiries:
+        statuses = list({m.get("status") for m in all_markets})
+        print(f"  [scan] No open contracts found. Statuses seen: {statuses}")
+        return []
+
+    active_markets = []
+    for expiry, candidates in open_expiries:
+        print(f"  [scan] Expiry: {expiry}  ({len(candidates)} open contracts)")
+        active_markets.extend(candidates)
+
+    # Extract all liquid contracts across both expiries (above AND below spot)
     contracts = []
-    for m in all_markets:
-        if m.get("close_time") != nearest_expiry:
-            continue
+    n_no_strike = n_no_bid = 0
+    for m in active_markets:
         fs = m.get("floor_strike")
         if fs is None:
+            n_no_strike += 1
             continue
         try:
             fs = float(fs)
         except (ValueError, TypeError):
+            n_no_strike += 1
             continue
         try:
             bid = float(m.get("yes_bid_dollars") or 0)
             ask = float(m.get("yes_ask_dollars") or 0)
         except (ValueError, TypeError):
+            n_no_bid += 1
             continue
         if bid <= 0 or ask <= 0:
+            n_no_bid += 1
             continue
-        if spot > 0 and fs <= spot:
-            continue   # skip ITM contracts — probability engine is OTM-only
         contracts.append({
             "ticker":       m.get("ticker", ""),
             "floor_strike": fs,
             "p_market":     (bid + ask) / 2,
             "bid":          bid,
             "ask":          ask,
-            "close_time":   nearest_expiry,
+            "close_time":   m.get("close_time"),
         })
+
+    if not contracts:
+        print(f"  [scan] 0 liquid contracts (no_strike={n_no_strike}, no_bid/ask={n_no_bid})")
 
     return sorted(contracts, key=lambda x: x["floor_strike"])
 

@@ -35,8 +35,12 @@ CSV_COLUMNS = [
     "p_yes_model", "z_score", "vol_60m", "vol_60m_model", "vol_implied_kalshi", "vol_ratio", "spread", "vol_eff",
     "structure_bias", "confirmation_bias", "confirmation_score", "no_score",
     "obi_score", "obi_raw", "obi_exchanges",
-    "vol_score", "vwap_score", "ema_stretch_score",
-    "ema_alignment", "rsi_value", "rsi_regime", "raw_edge", "net_edge",
+    "vpin_score", "vpin_raw",
+    "funding_bias", "avg_funding_rate",
+    "vol_score", "vwap_score", "vwap_signal", "vwap_total", "vwap_stretch_score", "vwap_distance_pct", "bearish_rejection", "bullish_rejection", "ema_stretch_score",
+    "stoch_bias", "stoch_k", "stoch_d", "stoch_crossover_active",
+    "ema_stack_bias",
+    "ema_alignment", "z_shift", "direction_strength", "raw_edge", "net_edge",
     "decision", "side", "neutral_gate", "pure_edge_gate",
     "contracts_scanned", "tau_minutes", "gate_blocked",
     "kelly_fraction", "bet_fraction", "bet_amount", "bankroll",
@@ -282,7 +286,7 @@ def main(csv_path: Path = None) -> None:
     # Write all rows back
     if updated > 0:
         with open(target, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction='ignore')
             writer.writeheader()
             writer.writerows(rows)
         print(f"\n  Updated {updated} rows in {target}")

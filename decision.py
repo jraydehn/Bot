@@ -10,37 +10,27 @@ from pricing_comparison import evaluate_edge, kalshi_fee, DEFAULT_SLIPPAGE, DEFA
 from kelly_sizing import compute_kelly_size
 
 # Gate 3 tiered minimum net edge thresholds.
-# Separate tiers for YES (5-indicator confirmation_score, momentum paused) and NO (6-indicator no_score).
-# Neutral structure adds a premium to each tier (missing structural confirmation).
-# Gate P thresholds are intentionally higher — Gate P fires without structure/confirmation.
+# Separate tiers for YES (confirmation_score) and NO (no_score).
+# Gate P thresholds are intentionally higher — Gate P fires without confirmation.
 #
-# YES tiers (confirmation_score, range 2–5 when Gate 2 passes, momentum paused):
-#   Confirmed structure (+1):  score>=4 → 2%,  score>=3 → 4%,  score>=2 → 6%
-#   Neutral structure (0):     score>=4 → 4%,  score>=3 → 6%,  score>=2 → 10%
-#   Opposing structure (-1):   score>=4 → 15%, score>=3 → 20%  (data collection tier)
-YES_GATE3_TIERS          = [(4, 0.02), (3, 0.04), (2, 0.06)]
-YES_NEUTRAL_GATE3_TIERS  = [(4, 0.04), (3, 0.06), (2, 0.10)]
-YES_OPPOSING_GATE3_TIERS = [(4, 0.15), (3, 0.20)]
+# YES tiers (confirmation_score):
+#   score>=4 → 1%,  score>=3 → 2%,  score>=2 → 4%
+YES_NEUTRAL_GATE3_TIERS  = [(4, 0.01), (3, 0.02), (2, 0.04)]
 #
-# NO tiers (no_score, range -5 to 0 when Gate 2 passes — Gate 2 requires no_score<=0):
-#   Confirmed structure (-1):  no_score<=-3 → 2%,  no_score<=-2 → 4%,  no_score<=0 → 6%
-#   Neutral structure (0):     no_score<=-3 → 4%,  no_score<=-2 → 6%,  no_score<=0 → 10%
-#   Opposing structure (+1):   no_score<=-3 → 10%, no_score<=-2 → 12%, no_score<=0 → 15%
-NO_GATE3_TIERS          = [(-3, 0.02), (-2, 0.04), (0, 0.06)]
-NO_NEUTRAL_GATE3_TIERS  = [(-3, 0.04), (-2, 0.06), (0, 0.10)]
-NO_OPPOSING_GATE3_TIERS = [(-3, 0.10), (-2, 0.12), (0, 0.15)]
+# NO tiers (no_score, Gate 2 requires no_score<=0):
+#   no_score<=-3 → 1%,  no_score<=-2 → 2%,  no_score<=0 → 4%
+NO_NEUTRAL_GATE3_TIERS  = [(-3, 0.01), (-2, 0.02), (0, 0.04)]
 
 # When structure is neutral and the trade direction opposes confirmation, a flat
-# minimum net edge is required. Higher than normal neutral tiers because both
-# structure and confirmation oppose the direction — only a large mispricing justifies it.
-NEUTRAL_CONTRARIAN_MIN_EDGE = 0.15
+# minimum net edge is required.
+NEUTRAL_CONTRARIAN_MIN_EDGE = 0.10
 
 # Gate 2S: strong-opposition block threshold.
 # When confirmation_score is this strongly opposed to the trade direction,
 # block the trade even in dual-direction (conflict) evaluation mode.
 # YES trade blocked if confirmation_score <= -STRONG_OPPOSITION_THRESHOLD
 # NO  trade blocked if confirmation_score >= +STRONG_OPPOSITION_THRESHOLD
-STRONG_OPPOSITION_THRESHOLD = 2
+STRONG_OPPOSITION_THRESHOLD = 3
 
 
 def _rr_min_edge(p_market: float, side: str) -> float:
@@ -72,27 +62,15 @@ def _rr_min_edge(p_market: float, side: str) -> float:
     return 0.25
 
 
-def _yes_gate3_threshold(score: int, neutral: bool, opposing: bool = False) -> float:
-    if opposing:
-        tiers = YES_OPPOSING_GATE3_TIERS
-    elif neutral:
-        tiers = YES_NEUTRAL_GATE3_TIERS
-    else:
-        tiers = YES_GATE3_TIERS
-    for min_score, threshold in tiers:
+def _yes_gate3_threshold(score: int) -> float:
+    for min_score, threshold in YES_NEUTRAL_GATE3_TIERS:
         if score >= min_score:
             return threshold
     return float("inf")
 
 
-def _no_gate3_threshold(score: int, neutral: bool, opposing: bool = False) -> float:
-    if opposing:
-        tiers = NO_OPPOSING_GATE3_TIERS
-    elif neutral:
-        tiers = NO_NEUTRAL_GATE3_TIERS
-    else:
-        tiers = NO_GATE3_TIERS
-    for max_score, threshold in tiers:
+def _no_gate3_threshold(score: int) -> float:
+    for max_score, threshold in NO_NEUTRAL_GATE3_TIERS:
         if score <= max_score:
             return threshold
     return float("inf")
@@ -140,24 +118,24 @@ def _pure_edge_override(
     #   no_score <=  4 (mostly bullish)             → edge >= 15%
     #   no_score  =  5 (all bullish)                → edge >= 25%  (universal floor)
     if confirmation_score >= 4:
-        yes_min = 0.06
+        yes_min = 0.05
     elif confirmation_score >= 3:
-        yes_min = PURE_EDGE_MIN_NET_EDGE  # 8%
+        yes_min = 0.06
     else:
-        yes_min = 0.25  # universal floor — any score qualifies at 25%+ net edge
+        yes_min = 0.15  # universal floor — any score qualifies at 15%+ net edge
 
     if no_score <= -3:
-        no_min = 0.06
+        no_min = 0.05
     elif no_score <= 0:
-        no_min = 0.10
+        no_min = 0.08
     elif no_score <= 1:
-        no_min = 0.15
+        no_min = 0.10
     elif no_score <= 2:
-        no_min = 0.12
+        no_min = 0.10
     elif no_score <= 4:
-        no_min = 0.15
+        no_min = 0.12
     else:
-        no_min = 0.25  # universal floor — any score qualifies at 25%+ net edge
+        no_min = 0.20  # universal floor — any score qualifies at 20%+ net edge
 
     yes_ok = yes_net >= yes_min
     no_ok  = no_net  >= no_min
@@ -228,33 +206,24 @@ def evaluate_trade(
     no_score: int = 0,
     no_bias: int = 0,
     force_side: str = None,
+    obi_score: int = 0,
+    vol_score: int = 0,
+    ema_alignment: str = "neutral",
 ) -> DecisionResult:
     """
     Evaluate all gates in sequence and produce a final trade decision.
 
     Gates are evaluated in this order — if any gate fails, the function
     returns immediately with decision="no_trade":
-        1. Market structure bias must support the proposed trade direction.
-           - YES trades: structure_bias must be +1 (bullish). Neutral (0) blocks YES
-                         via the normal gate path — confirmed structure is required
-                         because lagging indicators (EMA/RSI) reflect prior momentum,
-                         not immediate direction in a ranging market.
-                         Neutral-structure YES can still fire through Gate P if the
-                         edge is large enough relative to confirmation_score.
-           - NO trades:  structure_bias must be -1 (bearish, standard threshold)
-                         OR 0 (neutral, higher edge threshold applied at Gate 3).
-                         structure_bias = +1 always blocks a NO trade.
-        2. Confirmation indicators bias must align with the proposed trade direction.
-        3. Net edge (after fees and slippage) must exceed the tiered minimum threshold.
+        1. Confirmation indicators bias must align with the proposed trade direction.
+        2. Net edge (after fees and slippage) must exceed the tiered minimum threshold.
            Thresholds scale with confirmation strength (confirmation_score for YES,
-           no_score for NO). Neutral structure adds a premium to each tier.
+           no_score for NO).
 
-    If all three gates pass, Kelly sizing is called to determine bet amount.
+    Both YES and NO directions are always evaluated; whichever passes with the
+    higher net edge is returned.  structure_bias is recorded but does not gate trades.
 
-    Trade side is determined by the gate signals, not by comparing p_model to
-    p_market. structure_bias = +1 → YES trade; -1 or 0 → NO trade considered.
-    Neutral structure (0) allows both directions but applies higher edge premiums
-    at Gate 3, especially for YES (higher neutral tier premium than NO).
+    If all gates pass, Kelly sizing is called to determine bet amount.
 
     For NO bets the edge is direction-adjusted: since a NO bet profits when the
     market overprices YES, the relevant raw_edge is p_market - p_model (how much
@@ -297,20 +266,18 @@ def evaluate_trade(
             was_capped=False, reasons=reasons,
         )
 
-    # When structure is neutral OR structure and confirmation conflict, evaluate
-    # both directions independently and return whichever qualifies with the higher
-    # net edge. There is never a hard block — conflicting signals elevate the
-    # required threshold at Gate 3 rather than preventing a trade entirely.
-    signals_conflict = (structure_bias == -1 and confirmation_bias == 1) or \
-                       (structure_bias == 1  and confirmation_bias == -1)
-
-    if (structure_bias == 0 or signals_conflict) and force_side is None:
+    # Always evaluate both directions; return whichever qualifies with higher net edge.
+    if force_side is None:
         dec_yes = evaluate_trade(structure_bias, confirmation_bias, p_model, p_market,
                                  bankroll, slippage, spread, min_net_edge,
-                                 confirmation_score, no_score, no_bias, force_side="yes")
+                                 confirmation_score, no_score, no_bias, force_side="yes",
+                                 obi_score=obi_score, vol_score=vol_score,
+                                 ema_alignment=ema_alignment)
         dec_no  = evaluate_trade(structure_bias, confirmation_bias, p_model, p_market,
                                  bankroll, slippage, spread, min_net_edge,
-                                 confirmation_score, no_score, no_bias, force_side="no")
+                                 confirmation_score, no_score, no_bias, force_side="no",
+                                 obi_score=obi_score, vol_score=vol_score,
+                                 ema_alignment=ema_alignment)
         if dec_yes.decision == "trade" and dec_no.decision == "trade":
             return dec_yes if dec_yes.net_edge >= dec_no.net_edge else dec_no
         elif dec_yes.decision == "trade":
@@ -320,17 +287,8 @@ def evaluate_trade(
         else:
             return dec_yes if dec_yes.net_edge >= dec_no.net_edge else dec_no
 
-    # Side determination:
-    #   force_side overrides structure when provided (used to evaluate both directions).
-    #   Otherwise structure_bias drives direction; neutral defers to confirmation_bias.
-    if force_side is not None:
-        side = force_side
-    elif structure_bias == 1:
-        side = "yes"
-    elif structure_bias == -1:
-        side = "no"
-    else:
-        side = "yes" if confirmation_bias == 1 else "no"
+    # force_side path: evaluate a specific direction (called from the block above).
+    side = force_side
     required_bias = +1 if side == "yes" else -1
 
     # Direction-aware edge:
@@ -340,118 +298,17 @@ def evaluate_trade(
     raw_edge = p_model - p_market if side == "yes" else p_market - p_model
     net_edge = raw_edge - fee - slippage - spread
 
-    # --- Gate 1: Market structure ---
-    # Structure confirming direction → confirmed thresholds at Gate 3.
-    # Structure neutral or opposing → neutral (higher) thresholds at Gate 3.
-    # Structure never hard-blocks a direction — it only affects required edge.
-    structure_confirms = (structure_bias == required_bias)
-    structure_opposes  = (structure_bias != 0 and structure_bias != required_bias)
-    neutral_trade      = not structure_confirms  # neutral OR opposing → higher thresholds
-
-    if structure_confirms:
+    # --- Gate EMA: block neutral EMA alignment ---
+    # Data analysis: ema=neutral produces 16.7% win rate (-$1,079 on 72 trades).
+    # Structure=+1 + ema=neutral wins 0% across 21 trades. Neutral EMA means price
+    # is trapped between the 20 and 50 EMA — no directional conviction, no edge.
+    if ema_alignment == "neutral":
         reasons.append(
-            f"Gate 1 PASSED: structure_bias={structure_bias} confirms {side.upper()} trade."
+            f"Gate EMA FAILED: ema_alignment=neutral — price between EMAs, "
+            f"no directional conviction. 16.7% historical win rate."
         )
-    elif structure_opposes:
-        reasons.append(
-            f"Gate 1 PASSED (opposing structure): structure_bias={structure_bias} opposes "
-            f"{side.upper()} trade — elevated edge threshold applied at Gate 3."
-        )
-    else:
-        reasons.append(
-            f"Gate 1 PASSED (neutral): structure_bias=0 — market is ranging. "
-            f"{side.upper()} direction from {'force_side' if force_side else 'confirmation_bias'}. "
-            f"Tiered edge threshold applied at Gate 3 (neutral premium)."
-        )
-
-    # --- Gate 2: Confirmation indicators ---
-    # NO trades use no_score (3-indicator: EMA+RSI+Vol) — the original working model.
-    #   no_score <= 0 passes (neutral or bearish); no_score > 0 blocked (net bullish).
-    #   Scores -1 to 0 are allowed but face a higher Gate 3 edge requirement (8%).
-    # YES trades use confirmation_bias (7-indicator: adds MACD, VWAP, momentum).
-    # Momentum scores are intentionally excluded from NO direction to prevent
-    # short-term bounces from overriding a broader bearish structure signal.
-    if side == "no":
-        gate2_passes = no_score <= 0
-        bias_label = f"no_score={no_score:+d} (3-indicator)"
-    else:
-        gate2_passes = confirmation_bias == required_bias
-        bias_label = f"confirmation_bias={confirmation_bias} (7-indicator)"
-
-    opposing_confirmation = not gate2_passes
-    if not gate2_passes:
-        if force_side is not None:
-            # Gate 2S: block when confirmation strongly opposes the direction.
-            strong_opposition = (
-                (side == "yes" and confirmation_score <= -STRONG_OPPOSITION_THRESHOLD) or
-                (side == "no"  and no_score >= 3)
-            )
-            if strong_opposition:
-                reasons.append(
-                    f"Gate 2S FAILED: confirmation_score={confirmation_score:+d} strongly opposes "
-                    f"{side.upper()} trade (threshold=±{STRONG_OPPOSITION_THRESHOLD}). Blocked."
-                )
-                return DecisionResult(
-                    decision="no_trade", side=side,
-                    p_model=p_model, p_market=p_market,
-                    raw_edge=raw_edge, net_edge=net_edge,
-                    structure_bias=structure_bias, confirmation_bias=confirmation_bias,
-                    kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
-                    was_capped=False, reasons=reasons,
-                )
-            # Dual-direction evaluation: allow through with elevated threshold at Gate 3.
-            reasons.append(
-                f"Gate 2 NOTE: {bias_label} opposes {side.upper()} trade — "
-                f"contrarian threshold ({NEUTRAL_CONTRARIAN_MIN_EDGE:.0%}) applied at Gate 3."
-            )
-        else:
-            reasons.append(
-                f"Gate 2 FAILED: {bias_label} does not align with "
-                f"required bias for a {side.upper()} trade. "
-                f"EMA/RSI/volume signals do not confirm this direction."
-            )
-            override = _pure_edge_override(p_model, p_market, bankroll, structure_bias,
-                                           confirmation_bias, confirmation_score, no_score, reasons, slippage, spread)
-            if override:
-                return override
-            return DecisionResult(
-                decision="no_trade", side=side,
-                p_model=p_model, p_market=p_market,
-                raw_edge=raw_edge, net_edge=net_edge,
-                structure_bias=structure_bias, confirmation_bias=confirmation_bias,
-                kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
-                was_capped=False, reasons=reasons,
-            )
-    else:
-        reasons.append(
-            f"Gate 2 PASSED: {bias_label} aligns with {side.upper()} trade."
-        )
-
-    # --- Gate 3: Tiered net edge threshold ---
-    # Minimum edge required scales with confirmation strength:
-    #   YES: tiered by confirmation_score (7-indicator, range 2–9 at this point)
-    #   NO:  tiered by no_score (3-indicator, range -3 to -2 at this point)
-    # Neutral structure adds a premium to each tier.
-    if opposing_confirmation:
-        effective_min_edge = NEUTRAL_CONTRARIAN_MIN_EDGE
-        tier_label = f"{side.upper()} contrarian (neutral structure, confirmation opposes)"
-    elif side == "yes":
-        effective_min_edge = _yes_gate3_threshold(confirmation_score, neutral_trade, structure_opposes)
-        struct_label = "opposing" if structure_opposes else ("neutral" if neutral_trade else "confirmed")
-        tier_label = f"YES score={confirmation_score:+d} ({struct_label} structure)"
-    else:
-        effective_min_edge = _no_gate3_threshold(no_score, neutral_trade, structure_opposes)
-        struct_label = "opposing" if structure_opposes else ("neutral" if neutral_trade else "confirmed")
-        tier_label = f"NO no_score={no_score:+d} ({struct_label} structure)"
-
-    p_edge, p_ref = (p_model, p_market) if side == "yes" else (p_market, p_model)
-    pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=effective_min_edge)
-    if not pricing.qualifies:
-        reasons.append(f"Gate 3 FAILED [{tier_label}, min={effective_min_edge:.0%}]: {pricing.reason}")
-        override = _pure_edge_override(p_model, p_market, bankroll, structure_bias,
-                                       confirmation_bias, confirmation_score, no_score, reasons, slippage, spread)
-        if override:
-            return override
+        p_edge, p_ref = (p_model, p_market) if side == "yes" else (p_market, p_model)
+        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
         return DecisionResult(
             decision="no_trade", side=side,
             p_model=p_model, p_market=p_market,
@@ -460,19 +317,98 @@ def evaluate_trade(
             kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
             was_capped=False, reasons=reasons,
         )
-    reasons.append(f"Gate 3 PASSED [{tier_label}, min={effective_min_edge:.0%}]: {pricing.reason}")
+    reasons.append(f"Gate EMA PASSED: ema_alignment={ema_alignment}.")
 
-    # --- Gate R:R: Risk-to-reward minimum edge ---
-    # Ensures net edge is large enough to justify the payout asymmetry.
-    # High R:R contracts (e.g. YES at 88 cents) require substantially more edge
-    # because a single loss wipes out many wins. Gate P cannot override this —
-    # R:R is a risk management constraint, not a mispricing threshold.
-    rr      = p_market / (1 - p_market) if side == "yes" else (1 - p_market) / p_market
-    rr_min  = _rr_min_edge(p_market, side)
-    if net_edge < rr_min:
+    # --- Gate EMA-Dir: EMA alignment must oppose the trade direction ---
+    # Paper trade analysis (n=235): ema=bullish+YES wins 0% (n=19); ema=bearish+YES wins 63.5% (n=52).
+    # ema=bullish+NO wins 63% (n=46); ema=bearish+NO wins only 37% (n=46, below break-even).
+    #
+    # Mechanism: 1-hour Kalshi contracts reward contrarian positioning. After bearish EMA
+    # (price below both MAs, downtrend established), a bounce of 0.5% to reach the strike
+    # is statistically likely — the market underprices the reversal. After bullish EMA,
+    # the strike 0.5% above already-elevated spot requires continued acceleration, which
+    # rarely sustains for a full hour — the market correctly prices continuation risk.
+    #
+    # Rule: ema=bearish → only YES (fade the downtrend, catch the bounce).
+    #       ema=bullish → only NO (fade the uptrend, market already priced in continuation).
+    if ema_alignment == "bullish" and side == "yes":
         reasons.append(
-            f"Gate R:R FAILED [R:R={rr:.1f}:1, min={rr_min:.0%}]: "
-            f"net_edge={net_edge:+.4f} insufficient for this payout structure."
+            f"Gate EMA-Dir FAILED: ema=bullish+YES — continuation bet, 0% historical win "
+            f"rate (n=19). 1h contracts do not sustain momentum; YES only valid after "
+            f"bearish EMA (contrarian bounce)."
+        )
+        p_edge, p_ref = (p_model, p_market)
+        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
+    if ema_alignment == "bearish" and side == "no":
+        reasons.append(
+            f"Gate EMA-Dir FAILED: ema=bearish+NO — downtrend continuation bet, 37% win "
+            f"rate (n=46, below break-even). Market already prices further decline; "
+            f"NO only valid after bullish EMA (contrarian fade)."
+        )
+        p_edge, p_ref = (p_market, p_model)
+        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
+    reasons.append(
+        f"Gate EMA-Dir PASSED: ema={ema_alignment} opposes {side.upper()} direction (contrarian)."
+    )
+
+    # --- Gate PM: p_market must be in the directionally valid range ---
+    # Paper trade analysis cross-tabbed by EMA regime and side:
+    #
+    # YES (ema=bearish):
+    #   p_market ≥ 0.55 → 96.4% win rate (n=28)  ← the only YES regime with real edge
+    #   p_market 0.45–0.55 → 33.3% win rate (n=3, coin flip, no edge)
+    #   p_market < 0.45 → 23.5% win rate (n=21)   ← log-normal systematically overestimates OTM
+    #
+    # NO (ema=bullish):
+    #   p_market ≤ 0.45 → 78–100% win rate (n=32) ← market overprices YES in a declining trend
+    #   p_market 0.45–0.55 → 33.3% win rate (n=9, coin flip, no edge)
+    #   p_market > 0.55 → 20% win rate (n=5)       ← NO on near-ITM contracts is dangerous
+    #
+    # Mechanism: When YES wins at high p_market, the strike is near/in-the-money — the contract
+    # is fairly priced near certainty and a small model edge is real. When YES is cheap
+    # (p_market < 0.55), the model's log-normal estimate inflates OTM probabilities; the
+    # market is correct that the 0.5% move rarely materialises in an uptrend.
+    P_MARKET_YES_MIN = 0.55
+    P_MARKET_NO_MAX  = 0.45
+    if side == "yes" and p_market < P_MARKET_YES_MIN:
+        p_edge, p_ref = (p_model, p_market)
+        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
+        reasons.append(
+            f"Gate PM FAILED: p_market={p_market:.3f} < {P_MARKET_YES_MIN} for YES — "
+            f"OTM YES bets in bearish EMA win only 24% (n=21). Log-normal "
+            f"overestimates OTM probability; YES valid only near/in-the-money."
+        )
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
+    if side == "no" and p_market > P_MARKET_NO_MAX:
+        p_edge, p_ref = (p_market, p_model)
+        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
+        reasons.append(
+            f"Gate PM FAILED: p_market={p_market:.3f} > {P_MARKET_NO_MAX} for NO — "
+            f"near-ATM NO in bullish EMA wins only 33% (n=9) and ITM NO wins 20% (n=5). "
+            f"NO valid only when YES contract is cheap (p_market ≤ {P_MARKET_NO_MAX})."
         )
         return DecisionResult(
             decision="no_trade", side=side,
@@ -483,17 +419,90 @@ def evaluate_trade(
             was_capped=False, reasons=reasons,
         )
     reasons.append(
-        f"Gate R:R PASSED [R:R={rr:.1f}:1, min={rr_min:.0%}]: "
-        f"net_edge={net_edge:+.4f} clears R:R threshold."
+        f"Gate PM PASSED: p_market={p_market:.3f} in valid range for {side.upper()} "
+        f"({'≥' if side == 'yes' else '≤'}{P_MARKET_YES_MIN if side == 'yes' else P_MARKET_NO_MAX})."
     )
 
+    # --- Gate NO quality: NO trades require no_score >= 1 ---
+    # Data analysis: NO trades with no_score=0 win 39.4% and are consistently
+    # unprofitable. no_score=1 (at least one bearish indicator firing) produces
+    # 46.9% win rate with +$219 PnL. Requires at least one signal supporting NO.
+    if side == "no" and no_score < 1:
+        reasons.append(
+            f"Gate NO FAILED: no_score={no_score} < 1 — insufficient bearish signal "
+            f"confirmation for NO trade. no_score=0 historically 39.4% win rate."
+        )
+        p_edge, p_ref = (p_market, p_model)
+        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
+    if side == "no":
+        reasons.append(f"Gate NO PASSED: no_score={no_score} >= 1.")
+
+    # --- Gate 3: Minimum net edge threshold = 5% ---
+    # Data analysis: trades with net_edge < 0.05 collectively lose -$2,136 at ~30% win.
+    # net_edge > 0.05 produces 71.4% win rate (+$435 on 49 trades). The model's
+    # edge calculation is accurate when it fires clearly — trust it.
+    effective_min_edge = 0.05
+    p_edge, p_ref = (p_model, p_market) if side == "yes" else (p_market, p_model)
+    pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=effective_min_edge)
+    if not pricing.qualifies:
+        reasons.append(f"Gate 3 FAILED [min={effective_min_edge:.0%}]: {pricing.reason}")
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
+    reasons.append(f"Gate 3 PASSED [min={effective_min_edge:.0%}]: {pricing.reason}")
+
+    # --- Gate R:R: filter by risk-to-reward ratio ---
+    # Formula:
+    #   YES: rr = p_market / (1 - p_market)  — increases with p_market
+    #   NO:  rr = (1 - p_market) / p_market  — decreases with p_market
+    #
+    # Lower bound (both sides): rr < 0.33 blocks deep-underdog YES (pm < 0.25,
+    #   historically 12% win) and deep-favorite NO (pm > 0.75, already mostly
+    #   filtered by offset gate).
+    #
+    # Upper bound (NO only): rr > 4.0 blocks cheap NO bets (pm < 0.20) where
+    #   payout is tiny relative to risk — historically negative PnL despite 79%
+    #   win rate due to outsized losses. Upper bound NOT applied to YES because
+    #   high-p_market YES bets (rr > 4 at pm > 0.80) win 96% historically.
+    RR_MIN = 0.33
+    RR_MAX_NO = 4.0
+    rr = p_market / (1 - p_market) if side == "yes" else (1 - p_market) / p_market
+    rr_fail = rr < RR_MIN or (side == "no" and rr > RR_MAX_NO)
+    if rr_fail:
+        bound = f"< {RR_MIN}" if rr < RR_MIN else f"> {RR_MAX_NO} (NO only)"
+        reasons.append(
+            f"Gate R:R FAILED: R:R={rr:.2f} {bound} for {side.upper()} at p_market={p_market:.3f}."
+        )
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
+    reasons.append(f"Gate R:R PASSED: R:R={rr:.2f} for {side.upper()}.")
+
     # --- All gates passed: compute Kelly sizing ---
-    # p_model and p_market are always passed as YES-space probabilities.
-    # compute_kelly_size applies the correct payout formula internally based on side.
-    # Multipliers differ by side to reflect their different variance profiles:
-    #   YES: quarter Kelly (0.25) — ~26% win rate, high per-trade variance
-    #   NO:  half Kelly    (0.50) — ~96% win rate, low per-trade variance
-    kelly_multiplier = 0.25 if side == "yes" else 0.50
+    # Multipliers calibrated from paper trade analysis with EMA-Dir + PM gates applied:
+    #   YES: half Kelly (0.50) — 96.4% win rate (ema=bearish + p_market≥0.55 + edge≥5%)
+    #        Full Kelly ~0.91 at these win rates; capped at half for model uncertainty.
+    #   NO:  half Kelly (0.50) — 78% win rate (ema=bullish + p_market≤0.45 + no_score≥1)
+    #        Raised from 0.25 → 0.50 as the qualifying NO regime improved from 50% to 78%.
+    kelly_multiplier = 0.50
     kelly = compute_kelly_size(p_model, p_market, bankroll, kelly_multiplier, side=side)
     reasons.append(f"Sizing: {kelly.reason}")
 

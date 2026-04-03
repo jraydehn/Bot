@@ -67,7 +67,7 @@ def load_data(asset: str = "BTC") -> tuple:
     Returns (df_vol, df_confirm, df_struct) where:
       df_vol     : 1m candles (realized vol fallback)
       df_confirm : confirmation-interval candles (1h for hourly, 15m for BTC15)
-      df_struct  : structure-interval candles (4h for hourly, 1h for BTC15)
+      df_struct  : structure-interval candles (1h for hourly, 1h for BTC15)
     """
     from live_signal import ASSET_CONFIG
     cfg    = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])
@@ -148,15 +148,12 @@ def evaluate_point(
 
     # --- Run structure first so side is known before simulating p_market ---
     vol     = compute_realized_volatility(hist_1m)
-    prob    = estimate_probability(spot, strike, tau, vol.vol_60m)
     struct  = detect_market_structure(hist_4h)
-    confirm = compute_confirmation(hist_1h)
+    confirm = compute_confirmation(hist_1h, hist_1m=hist_1m)
+    prob    = estimate_probability(spot, strike, tau, vol.vol_60m,
+                                   confirmation_score=confirm.confirmation_score)
 
     # --- Resolve p_market: simulate from strike offset and gate-implied side ---
-    # Structure bias determines trade direction before p_market is needed.
-    # YES trade (bullish): OTM YES contract priced low by the market.
-    # NO  trade (bearish): market still prices YES high due to uncertainty,
-    #   making NO contracts cheap and creating genuine positive edge.
     effective_offset = strike / spot - 1
     gate_side = "yes" if struct.structure_bias == 1 else "no"
     if p_market is None:
@@ -164,7 +161,10 @@ def evaluate_point(
     pricing = evaluate_edge(prob.p_yes, p_market)
     kelly   = compute_kelly_size(prob.p_yes, p_market, bankroll, side=gate_side)
     dec     = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
-                             prob.p_yes, p_market, bankroll)
+                             prob.p_yes, p_market, bankroll,
+                             confirmation_score=confirm.confirmation_score,
+                             no_score=confirm.no_score,
+                             ema_alignment=confirm.ema_alignment)
 
     # --- Check actual outcome at expiry ---
     expiry_ts = ts + pd.Timedelta(minutes=tau)
@@ -233,8 +233,8 @@ def evaluate_point(
         # Confirmation
         "confirmation_bias": confirm.confirmation_bias,
         "ema_alignment":   confirm.ema_alignment,
-        "rsi_value":       confirm.rsi_value,
-        "rsi_regime":      confirm.rsi_regime,
+        "stoch_k":         confirm.stoch_k,
+        "stoch_bias":      confirm.stoch_bias,
         "volume_confirmed": confirm.volume_confirmed,
         "confirm_reason":  confirm.reason,
         # Kelly
@@ -306,8 +306,8 @@ def print_report(r: dict) -> None:
 
     print("\n── MODULE 5: CONFIRMATION INDICATORS (1h) ───────────────")
     row("ema_alignment:",      r['ema_alignment'])
-    row("rsi_value:",          f"{r['rsi_value']:.2f}")
-    row("rsi_regime:",         r['rsi_regime'])
+    row("stoch_k:",             f"{r['stoch_k']:.2f}")
+    row("stoch_bias:",         f"{r['stoch_bias']:+d}")
     row("volume_confirmed:",   str(r['volume_confirmed']))
     row("confirmation_bias:",  f"{r['confirmation_bias']:+d}")
     row("reason:",             r['confirm_reason'][:55])

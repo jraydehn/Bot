@@ -35,6 +35,7 @@ from confirmation_indicators import compute_confirmation
 from order_book import fetch_order_book_imbalance
 from pricing_comparison import simulate_p_market, evaluate_edge, DEFAULT_SLIPPAGE, DEFAULT_SPREAD
 from decision import evaluate_trade
+from funding_rate import fetch_funding_rate, FundingRateResult
 import outcome_checker
 import update_data
 from kelly_sizing import compute_kelly_size
@@ -45,6 +46,12 @@ from live_signal import (
 )
 
 PAPER_TRADES_CSV = Path(__file__).parent / "results" / "paper_trades.csv"
+
+# Funding rate cache — funding updates every 8 hours so re-fetching once per
+# minute is wasteful. Cache the result for 5 minutes (300 seconds).
+_funding_cache: "FundingRateResult | None" = None
+_funding_cache_ts: float = 0.0
+_FUNDING_CACHE_TTL = 300  # seconds
 
 # In-memory set of tickers traded this process run — resets on restart.
 # Prevents re-trading the same contract within a session without blocking
@@ -85,12 +92,27 @@ CSV_COLUMNS = [
     "obi_score",
     "obi_raw",
     "obi_exchanges",
+    "vpin_score",
+    "vpin_raw",
+    "funding_bias",
+    "avg_funding_rate",
     "vol_score",
     "vwap_score",
+    "vwap_signal",
+    "vwap_total",
+    "vwap_stretch_score",
+    "vwap_distance_pct",
+    "bearish_rejection",
+    "bullish_rejection",
     "ema_stretch_score",
+    "stoch_bias",
+    "stoch_k",
+    "stoch_d",
+    "stoch_crossover_active",
+    "ema_stack_bias",
     "ema_alignment",
-    "rsi_value",
-    "rsi_regime",
+    "z_shift",
+    "direction_strength",
     "raw_edge",
     "net_edge",
     "decision",
@@ -118,6 +140,23 @@ def ensure_csv_exists(csv_path: Path = None) -> None:
             writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
             writer.writeheader()
         print(f"  Created {path}")
+        return
+    # Migrate if the file's header is missing any columns in CSV_COLUMNS
+    with open(path, newline="") as f:
+        existing_cols = (csv.DictReader(f).fieldnames or [])
+    new_cols = [c for c in CSV_COLUMNS if c not in existing_cols]
+    if new_cols:
+        print(f"  [migrate] Adding columns to {path.name}: {new_cols}")
+        with open(path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        for row in rows:
+            for col in new_cols:
+                row.setdefault(col, "")
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"  [migrate] Migrated {len(rows)} rows.")
 
 
 def append_row(row: dict, csv_path: Path = None) -> None:
@@ -171,13 +210,42 @@ def main() -> None:
     hist_struct  = df_struct.iloc[-120:]
 
     # Fetch fresh 1m candles for realized vol
-    live_1m = fetch_recent_1m_candles(lookback_bars=max(vol_bars * 2, 120), asset=args.asset)
+    live_1m = fetch_recent_1m_candles(lookback_bars=max(vol_bars * 2, 800), asset=args.asset)
     vol_src = live_1m if live_1m is not None and len(live_1m) >= vol_bars else df_vol.iloc[-200:]
     vol     = compute_realized_volatility(vol_src)
     struct  = detect_market_structure(hist_struct)
-    obi     = fetch_order_book_imbalance()
+    obi     = fetch_order_book_imbalance(asset=args.asset)
     print(f"  OBI: {obi.obi:+.4f}  score={obi.obi_score:+d}  exchanges={obi.exchanges_used}")
-    confirm = compute_confirmation(hist_confirm, hist_1m=live_1m, obi_score=obi.obi_score, momentum_enabled=False)
+
+    # Fetch funding rate — cached for 5 minutes since it updates every 8 hours.
+    # Falls back to neutral (funding_bias=0) on failure; never crashes the loop.
+    global _funding_cache, _funding_cache_ts
+    import time as _time
+    if _funding_cache is None or (_time.time() - _funding_cache_ts) > _FUNDING_CACHE_TTL:
+        try:
+            _funding_cache    = fetch_funding_rate(asset=args.asset)
+            _funding_cache_ts = _time.time()
+        except Exception as exc:
+            print(f"  [funding] Fetch error: {exc} — using neutral fallback")
+            from funding_rate import _FALLBACK
+            _funding_cache    = _FALLBACK
+            _funding_cache_ts = _time.time()
+    funding = _funding_cache
+    print(f"  Funding: {funding.avg_funding_rate*100:+.4f}%/8h  bias={funding.funding_bias:+d}  ({', '.join(funding.exchanges_used) or 'none'})")
+
+    confirm = compute_confirmation(hist_confirm, hist_1m=live_1m, obi_score=obi.obi_score, momentum_enabled=False,
+                                   funding_bias=funding.funding_bias, avg_funding_rate=funding.avg_funding_rate)
+
+    # --- Funding rate probability adjustment ---
+    # Nudge p_yes_model ±2.5% based on funding bias before edge calculation.
+    # Bullish funding (overcrowded shorts → squeeze): p_yes up → YES edge grows.
+    # Bearish funding (overcrowded longs → unwind): p_yes down → NO edge grows.
+    # Applied symmetrically — does not hardcode a directional preference.
+    FUNDING_P_YES_DELTA = 0.025
+    funding_delta = FUNDING_P_YES_DELTA * funding.funding_bias
+    if funding_delta != 0:
+        print(f"  Funding adj: p_yes {'+' if funding_delta > 0 else ''}{funding_delta:.3f} (bias={funding.funding_bias:+d})")
+
     gate_side = "yes" if struct.structure_bias == 1 else "no"
 
     # Scan all contracts for nearest expiry; select highest net_edge trade.
@@ -200,13 +268,11 @@ def main() -> None:
 
         # Load already-traded tickers and strike positions per expiry to prevent conflicting bets
         csv_path_check = get_csv_path(args.asset)
-        already_traded = set()
+        already_traded = _SESSION_TRADED  # always use session set; CSV failure cannot bypass it
         already_traded_expiries = {}  # {close_ts: {"yes": [strikes], "no": [strikes]}}
         if csv_path_check.exists():
             try:
                 df_existing = pd.read_csv(csv_path_check)
-                # already_traded: in-memory session set (resets on restart)
-                already_traded = _SESSION_TRADED
                 # already_traded_expiries: only active (not yet expired) contracts
                 # Expired contracts have settled and cannot conflict with new trades
                 traded_rows_all = df_existing[df_existing["decision"] == "trade"].copy()
@@ -227,6 +293,14 @@ def main() -> None:
             pm        = c["p_market"]
             if abs(s_k / spot - 1) > 0.01:
                 continue
+            # Skip contracts where BTC is already above the strike (offset <= 0).
+            # NO bets on these contracts have a 12% historical win rate — BTC has
+            # already crossed the level we'd be betting against. YES bets here are
+            # deep ITM and caught by Gate 0's p_model saturation check anyway.
+            offset_c = s_k / spot - 1
+            if offset_c <= 0:
+                print(f"  [scan] Skipping {c['ticker']} — offset={offset_c*100:+.3f}% (BTC above strike)")
+                continue
             spread_c  = c["ask"] - c["bid"]
             if spread_c > 0.08:
                 print(f"  [scan] Skipping {c['ticker']} — spread={spread_c:.3f} (stale/illiquid)")
@@ -239,11 +313,13 @@ def main() -> None:
                 continue
             vol_eff_c = blend_vol(vol.vol_multi, vol_imp_c)
             prob_c    = estimate_probability(spot, s_k, tau_c, vol_eff_c,
-                                               structure_bias=struct.structure_bias,
-                                               confirmation_score=confirm.confirmation_score)
+                                               structure_bias=0,
+                                               confirmation_score=0)  # pure log-normal; indicators logged separately
+            p_yes_adj_c = max(0.03, min(0.97, prob_c.p_yes + funding_delta))
             dec_c     = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
-                                       prob_c.p_yes, pm, args.bankroll,
-                                       confirmation_score=confirm.confirmation_score, no_score=confirm.no_score)
+                                       p_yes_adj_c, pm, args.bankroll,
+                                       confirmation_score=confirm.confirmation_score, no_score=confirm.no_score,
+                                       obi_score=confirm.obi_score, vol_score=confirm.vol_score)
             positions = already_traded_expiries.get(c["close_time"], {"yes": [], "no": []})
             if dec_c.side == "yes" and any(no_k < s_k for no_k in positions["no"]):
                 print(f"  [scan] Skipping {c['ticker']} — YES@{s_k} conflicts with existing NO below it")
@@ -288,7 +364,8 @@ def main() -> None:
     contract_ticker = chosen["contract_ticker"]
     close_ts        = chosen["close_ts"]
     effective_offset = strike / spot - 1
-    pricing = evaluate_edge(prob.p_yes, p_market)
+    p_yes_adj = max(0.03, min(0.97, prob.p_yes + funding_delta))
+    pricing = evaluate_edge(p_yes_adj, p_market)
 
     vol_eff  = chosen.get("vol_eff", vol.vol_multi)
     vol_impl = implied_vol_from_price(p_market, spot, strike, minutes_to_expiry(close_ts))
@@ -321,12 +398,27 @@ def main() -> None:
         "obi_score":          confirm.obi_score,
         "obi_raw":            round(obi.obi, 4) if obi.obi == obi.obi else "",
         "obi_exchanges":      obi.exchanges_used,
+        "vpin_score":         confirm.vpin_score,
+        "vpin_raw":           round(confirm.vpin_raw, 4) if confirm.vpin_raw == confirm.vpin_raw else "",
+        "funding_bias":       confirm.funding_bias,
+        "avg_funding_rate":   round(confirm.avg_funding_rate, 8),
         "vol_score":          confirm.vol_score,
         "vwap_score":         confirm.vwap_score,
-        "ema_stretch_score":  confirm.ema_stretch_score,
-        "ema_alignment":      confirm.ema_alignment,
-        "rsi_value":          round(confirm.rsi_value, 2),
-        "rsi_regime":         confirm.rsi_regime,
+        "vwap_signal":        confirm.vwap_signal,
+        "vwap_total":         confirm.vwap_total,
+        "vwap_stretch_score": confirm.stretch_score,
+        "vwap_distance_pct":  round(confirm.distance_pct * 100, 4) if confirm.distance_pct == confirm.distance_pct else "",
+        "bearish_rejection":  confirm.bearish_rejection,
+        "bullish_rejection":  confirm.bullish_rejection,
+        "ema_stretch_score":      confirm.ema_stretch_score,
+        "stoch_bias":             confirm.stoch_bias,
+        "stoch_k":                round(confirm.stoch_k, 2) if confirm.stoch_k == confirm.stoch_k else "",
+        "stoch_d":                round(confirm.stoch_d, 2) if confirm.stoch_d == confirm.stoch_d else "",
+        "stoch_crossover_active": confirm.stoch_crossover_active,
+        "ema_stack_bias":         confirm.ema_stack_bias,
+        "ema_alignment":          confirm.ema_alignment,
+        "z_shift":            round(prob.z_shift, 6),
+        "direction_strength": round(prob.direction_strength, 4),
         "raw_edge":           round(dec.raw_edge, 6),
         "net_edge":           round(dec.net_edge, 6),
         "decision":           dec.decision,

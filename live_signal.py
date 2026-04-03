@@ -69,7 +69,7 @@ ASSET_CONFIG = {
         "spot_sources":        _BTC_SPOT_SOURCES,
         "tau":                 60,
         "confirmation_interval": "1h",
-        "structure_interval":  "4h",
+        "structure_interval":  "1h",
         "ema_fast":            20,
         "ema_slow":            50,
         "rsi_period":          21,
@@ -88,7 +88,7 @@ ASSET_CONFIG = {
         ],
         "tau":                 60,
         "confirmation_interval": "1h",
-        "structure_interval":  "4h",
+        "structure_interval":  "1h",
         "ema_fast":            20,
         "ema_slow":            50,
         "rsi_period":          21,
@@ -105,7 +105,7 @@ ASSET_CONFIG = {
         ],
         "tau":                 60,
         "confirmation_interval": "1h",
-        "structure_interval":  "4h",
+        "structure_interval":  "1h",
         "ema_fast":            20,
         "ema_slow":            50,
         "rsi_period":          21,
@@ -647,7 +647,7 @@ def main() -> None:
     row("structure_bias:", f"{struct.structure_bias:+d}  ({struct.reason[:35]})")
     row("confirmation_bias:", f"{confirm.confirmation_bias:+d}  ({confirm.reason[:35]})")
     row("ema_alignment:", confirm.ema_alignment)
-    row("rsi:", f"{confirm.rsi_value:.1f}  ({confirm.rsi_regime})")
+    row("stoch:", f"%K={confirm.stoch_k:.1f}  (bias={confirm.stoch_bias:+d})")
 
     print("\n── EDGE ────────────────────────────────────────────────")
     row("raw_edge:", f"{pricing.raw_edge:+.4f}")

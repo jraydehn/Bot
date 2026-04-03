@@ -31,6 +31,8 @@ from market_data import compute_realized_volatility
 from probability_engine import estimate_probability, implied_vol_from_price, blend_vol
 from market_structure import detect_market_structure
 from confirmation_indicators import compute_confirmation
+from order_book import fetch_order_book_imbalance
+from funding_rate import fetch_funding_rate, _FALLBACK as _FUNDING_FALLBACK
 from pricing_comparison import simulate_p_market, evaluate_edge, DEFAULT_SLIPPAGE, DEFAULT_SPREAD
 from decision import evaluate_trade
 from kelly_sizing import compute_kelly_size
@@ -43,6 +45,11 @@ from live_signal import (
 )
 from paper_trade_runner import ensure_csv_exists, append_row, get_csv_path, DEFAULT_BANKROLL
 from outcome_checker import main as resolve_outcomes
+
+
+_FUNDING_CACHE: dict    = {}   # asset -> FundingRateResult
+_FUNDING_CACHE_TS: dict = {}   # asset -> float (time.time())
+_FUNDING_CACHE_TTL      = 300  # seconds (5 min — funding updates every 8h)
 
 
 def minutes_to_expiry(close_ts: str) -> float:
@@ -77,15 +84,40 @@ def run_once(auth, df_vol, df_confirm, df_struct, bankroll: float, sim: bool, as
     struct  = detect_market_structure(hist_struct)
 
     # Fetch fresh 1m candles for realized vol.
-    live_1m    = fetch_recent_1m_candles(lookback_bars=max(vol_bars * 2, 120), asset=asset)
+    live_1m    = fetch_recent_1m_candles(lookback_bars=max(vol_bars * 2, 800), asset=asset)
     vol_src    = live_1m if live_1m is not None and len(live_1m) >= vol_bars else hist_vol_fb
     vol        = compute_realized_volatility(vol_src)
-    confirm    = compute_confirmation(hist_confirm, ema_fast=ema_fast, ema_slow=ema_slow, rsi_period=rsi_period)
+
+    # OBI — fetch fresh each cycle (fast, real-time signal)
+    try:
+        obi = fetch_order_book_imbalance(asset=asset)
+    except Exception as exc:
+        print(f"  [{asset}] OBI fetch failed: {exc} — using neutral")
+        from order_book import OrderBookResult
+        obi = OrderBookResult(obi=float("nan"), obi_score=0, bid_volume=0.0,
+                              ask_volume=0.0, exchanges_used=0, reason="fetch failed")
+
+    # Funding rate — cached 5 minutes (updates every 8h on exchanges)
+    import time as _time
+    if asset not in _FUNDING_CACHE or (_time.time() - _FUNDING_CACHE_TS.get(asset, 0)) > _FUNDING_CACHE_TTL:
+        try:
+            _FUNDING_CACHE[asset]    = fetch_funding_rate(asset=asset)
+            _FUNDING_CACHE_TS[asset] = _time.time()
+        except Exception as exc:
+            print(f"  [{asset}] Funding fetch failed: {exc} — using neutral fallback")
+            _FUNDING_CACHE[asset]    = _FUNDING_FALLBACK
+            _FUNDING_CACHE_TS[asset] = _time.time()
+    funding = _FUNDING_CACHE[asset]
+
+    confirm    = compute_confirmation(hist_confirm, hist_1m=live_1m, momentum_enabled=False,
+                                      obi_score=obi.obi_score,
+                                      funding_bias=funding.funding_bias,
+                                      avg_funding_rate=funding.avg_funding_rate)
     gate_side  = "yes" if struct.structure_bias == 1 else "no"
 
     # Live spot
     live_spot = fetch_live_spot(asset=asset)
-    spot = live_spot if live_spot is not None else float(df_1m["close"].iloc[-1])
+    spot = live_spot if live_spot is not None else float(df_vol["close"].iloc[-1])
 
     # Scan all contracts for nearest expiry; select highest net_edge trade.
     contracts_scanned = 0
@@ -133,6 +165,10 @@ def run_once(auth, df_vol, df_confirm, df_struct, bankroll: float, sim: bool, as
         dec, chosen, p_market_source = best_trade_dec, best_trade_meta, "real"
     elif best_any_dec is not None:
         dec, chosen, p_market_source = best_any_dec, best_any_meta, "real"
+    elif not sim and auth is not None:
+        # Auth available but no liquid contracts found (e.g. hour rollover gap) — skip cycle
+        print(f"  [{asset}] No liquid contracts found — skipping cycle.")
+        return
     else:
         eff = strike / spot - 1
         prob_c   = estimate_probability(spot, strike, tau, vol.vol_60m)
@@ -157,44 +193,66 @@ def run_once(auth, df_vol, df_confirm, df_struct, bankroll: float, sim: bool, as
     vol_ratio = round(vol.vol_60m / vol_impl, 4) if vol_impl > 0 else ""
 
     row = {
-        "logged_at":          now_utc.strftime("%Y-%m-%d %H:%M:%S"),
-        "decision_time":      df_1m.index[-1].strftime("%Y-%m-%d %H:%M"),
-        "contract_ticker":    ticker,
-        "close_ts":           close_ts,
-        "spot":               round(spot, 2),
-        "strike":             round(strike, 2),
-        "offset_pct":         round(eff_offset * 100, 4),
-        "p_market":           round(p_market, 6),
-        "p_market_source":    p_market_source,
-        "p_yes_model":        round(prob.p_yes, 6),
-        "z_score":            round(prob.z_score, 4),
-        "vol_60m":            round(vol.vol_60m, 8),
-        "vol_60m_model":      round(vol.vol_60m, 8),
-        "vol_implied_kalshi": round(vol_impl, 8) if vol_impl == vol_impl else "",
-        "vol_ratio":          vol_ratio,
-        "vol_eff":            round(vol_eff, 8),
-        "structure_bias":     struct.structure_bias,
-        "confirmation_bias":  confirm.confirmation_bias,
-        "confirmation_score": confirm.confirmation_score,
-        "ema_alignment":      confirm.ema_alignment,
-        "rsi_value":          round(confirm.rsi_value, 2),
-        "rsi_regime":         confirm.rsi_regime,
-        "raw_edge":           round(dec.raw_edge, 6),
-        "net_edge":           round(dec.net_edge, 6),
-        "decision":           dec.decision,
-        "side":               dec.side,
-        "neutral_gate":       struct.structure_bias == 0 and any("Gate 1 PASSED (neutral)" in r for r in dec.reasons),
-        "pure_edge_gate":     any("Gate P PASSED" in r for r in dec.reasons),
-        "contracts_scanned":  contracts_scanned,
-        "tau_minutes":        round(tte_minutes(close_ts), 2),
-        "gate_blocked":       next((r.split(":")[0] for r in dec.reasons if "FAILED" in r), "") if dec.decision == "no_trade" else "",
-        "kelly_fraction":     round(dec.kelly_fraction, 6),
-        "bet_fraction":       round(dec.bet_fraction, 6),
-        "bet_amount":         round(dec.bet_amount, 2),
-        "bankroll":           round(bankroll, 2),
-        "resolved_yes":       "",
-        "would_win":          "",
-        "would_pnl":          "",
+        "logged_at":              now_utc.strftime("%Y-%m-%d %H:%M:%S"),
+        "decision_time":          df_vol.index[-1].strftime("%Y-%m-%d %H:%M"),
+        "contract_ticker":        ticker,
+        "close_ts":               close_ts,
+        "spot":                   round(spot, 2),
+        "strike":                 round(strike, 2),
+        "offset_pct":             round(eff_offset * 100, 4),
+        "p_market":               round(p_market, 6),
+        "p_market_source":        p_market_source,
+        "p_yes_model":            round(prob.p_yes, 6),
+        "z_score":                round(prob.z_score, 4),
+        "vol_60m":                round(vol.vol_60m, 8),
+        "vol_60m_model":          round(vol.vol_multi, 8),
+        "vol_implied_kalshi":     round(vol_impl, 8) if vol_impl == vol_impl else "",
+        "vol_ratio":              vol_ratio,
+        "vol_eff":                round(vol_eff, 8),
+        "structure_bias":         struct.structure_bias,
+        "confirmation_bias":      confirm.confirmation_bias,
+        "confirmation_score":     confirm.confirmation_score,
+        "no_score":               confirm.no_score,
+        "obi_score":              confirm.obi_score,
+        "obi_raw":                round(obi.obi, 4) if obi.obi == obi.obi else "",
+        "obi_exchanges":          obi.exchanges_used,
+        "vpin_score":             confirm.vpin_score,
+        "vpin_raw":               round(confirm.vpin_raw, 4) if confirm.vpin_raw == confirm.vpin_raw else "",
+        "funding_bias":           confirm.funding_bias,
+        "avg_funding_rate":       round(confirm.avg_funding_rate, 8),
+        "vol_score":              confirm.vol_score,
+        "vwap_score":             confirm.vwap_score,
+        "vwap_signal":            confirm.vwap_signal,
+        "vwap_total":             confirm.vwap_total,
+        "vwap_stretch_score":     confirm.stretch_score,
+        "vwap_distance_pct":      round(confirm.distance_pct * 100, 4) if confirm.distance_pct == confirm.distance_pct else "",
+        "bearish_rejection":      confirm.bearish_rejection,
+        "bullish_rejection":      confirm.bullish_rejection,
+        "ema_stretch_score":      confirm.ema_stretch_score,
+        "stoch_bias":             confirm.stoch_bias,
+        "stoch_k":                round(confirm.stoch_k, 2) if confirm.stoch_k == confirm.stoch_k else "",
+        "stoch_d":                round(confirm.stoch_d, 2) if confirm.stoch_d == confirm.stoch_d else "",
+        "stoch_crossover_active": confirm.stoch_crossover_active,
+        "ema_stack_bias":         confirm.ema_stack_bias,
+        "ema_alignment":          confirm.ema_alignment,
+        "z_shift":                round(prob.z_shift, 6),
+        "direction_strength":     round(prob.direction_strength, 4),
+        "raw_edge":               round(dec.raw_edge, 6),
+        "net_edge":               round(dec.net_edge, 6),
+        "decision":               dec.decision,
+        "side":                   dec.side,
+        "neutral_gate":           struct.structure_bias == 0 and any("Gate 1 PASSED (neutral)" in r for r in dec.reasons),
+        "pure_edge_gate":         any("Gate P PASSED" in r for r in dec.reasons),
+        "contracts_scanned":      contracts_scanned,
+        "tau_minutes":            round(tte_minutes(close_ts), 2),
+        "gate_blocked":           next((r.split(":")[0] for r in dec.reasons if "FAILED" in r), "") if dec.decision == "no_trade" else "",
+        "kelly_fraction":         round(dec.kelly_fraction, 6),
+        "bet_fraction":           round(dec.bet_fraction, 6),
+        "bet_amount":             round(dec.bet_amount, 2),
+        "bankroll":               round(bankroll, 2),
+        "resolved_yes":           "",
+        "would_win":              "",
+        "would_pnl":              "",
     }
 
     return ticker, close_ts, dec, prob, p_market, p_market_source, struct, confirm, row, contracts_scanned
@@ -227,6 +285,8 @@ def init_asset_state(asset: str, bankroll: float, session_start: str) -> dict:
         "session_start":     session_start,
         "soft_drawdown":     bankroll * 0.20,
         "hard_drawdown":     bankroll * 0.35,
+        "funding_cache":     None,
+        "funding_cache_ts":  0.0,
     }
 
 
@@ -266,7 +326,7 @@ def run_asset(state: dict, auth, bankroll: float, sim: bool, high_edge_min: floa
     tte         = minutes_to_expiry(close_ts)
     tte_str     = f"{tte:.1f} min to expiry" if tte < 999 else "no contract"
     expiry_window = ticker.split("-")[1] if ticker and ticker.count("-") >= 2 else ""
-    gate_blocked  = next((r.split(":")[0] for r in dec.reasons if "FAILED" in r), "")
+    gate_blocked  = next((r.split(":")[0] for r in dec.reasons if "FAILED" in r), "") if dec.decision == "no_trade" else ""
 
     print(f"  [{asset}] Scanned  : {n_scanned} contracts")
     print(f"  [{asset}] Contract : {ticker or '—'}  ({tte_str})")
@@ -274,7 +334,7 @@ def run_asset(state: dict, auth, bankroll: float, sim: bool, high_edge_min: floa
     print(f"  [{asset}] p_yes    : {prob.p_yes:.4f}  p_market: {p_market:.4f} ({p_mkt_src})")
     print(f"  [{asset}] Signals  : structure={struct.structure_bias:+d}  "
           f"yes_score={confirm.confirmation_score:+d}  no_score={confirm.no_score:+d}  "
-          f"EMA={confirm.ema_alignment}  RSI={confirm.rsi_value:.1f}({confirm.rsi_regime})")
+          f"EMA={confirm.ema_alignment}  Stoch=%K{confirm.stoch_k:.1f}(bias={confirm.stoch_bias:+d})")
     print(f"  [{asset}] Decision : {dec.decision.upper()}  side={dec.side.upper()}  "
           f"net_edge={dec.net_edge:+.4f}  bet=${dec.bet_amount:,.2f}"
           + (f"  [{gate_blocked}]" if gate_blocked else ""))

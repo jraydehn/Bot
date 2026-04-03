@@ -14,15 +14,24 @@ from scipy.stats import norm
 
 
 
+# Maximum z-shift as a fraction of sigma_tau.
+# At alpha=0.20, a perfectly bullish signal (confirmation_score=max_score) shifts z
+# by 0.20 * sigma_tau — meaningful but bounded; can never dominate log(K/S).
+DIRECTION_ALPHA = 0.20
+
+
 @dataclass
 class ProbabilityResult:
     """All outputs from the probability engine."""
 
     p_yes: float            # probability BTC closes above strike at expiry
-    z_score: float          # standard deviations the strike is above current price
+    z_score: float          # adjusted z-score (after directional shift)
     log_distance: float     # ln(K / S) — log-space gap between spot and strike
     sigma_to_expiry: float  # total volatility scaled to the full expiry window
     expected_move_pct: float  # 1-sigma expected move as a % of current price
+    z_raw: float = 0.0          # unadjusted z-score (before directional shift)
+    z_shift: float = 0.0        # directional shift applied to z
+    direction_strength: float = 0.0  # normalized [-1, +1] confirmation strength
 
 
 def estimate_probability(
@@ -30,28 +39,31 @@ def estimate_probability(
     K: float,
     tau: float,
     sigma_min: float,
-    structure_bias: int = 0,    # kept for API compatibility, no longer used in calculation
-    confirmation_score: int = 0, # kept for API compatibility, no longer used in calculation
+    structure_bias: int = 0,    # kept for API compatibility, unused in calculation
+    confirmation_score: int = 0,
+    max_score: int = 5,
 ) -> ProbabilityResult:
     """
     Estimate the probability that BTC finishes above strike K at expiration.
 
-    Uses a log-normal model with an optional directional drift derived from
-    market structure and confirmation signals. Volatility is scaled from
-    per-minute to the full expiry window using the square-root-of-time rule.
+    Uses a log-normal model with a capped directional z-shift derived from
+    confirmation indicators. The shift is bounded at DIRECTION_ALPHA * sigma_tau
+    so it can never dominate the log-distance term (unlike accumulated drift).
 
-    The drift term shifts p_yes in the direction of the dominant signal:
-      - Bullish signals (structure=+1, high confirmation_score) → higher p_yes
-      - Bearish signals (structure=-1, low confirmation_score) → lower p_yes
-      - Neutral/absent signals (defaults) → zero drift (original behavior)
+    Shift formula: z_adjusted = z - alpha * D * sigma_tau
+      D = confirmation_score / max_score, clamped to [-1, +1]
+      Bullish (D > 0) → lower z → higher p_yes
+      Bearish (D < 0) → higher z → lower p_yes
+      Neutral (D = 0) → no shift (default behavior)
 
     Args:
         S: Current BTC spot price in USD.
         K: Strike price of the event contract in USD.
         tau: Minutes remaining until expiry. Must be > 0.
         sigma_min: Realized per-minute volatility (std of log returns). Must be > 0.
-        structure_bias: Market structure signal: +1 (bullish), -1 (bearish), 0 (neutral).
-        confirmation_score: 7-indicator confirmation score, typically -7 to +7.
+        structure_bias: Unused (kept for API compatibility).
+        confirmation_score: Net confirmation indicator score (e.g. -5 to +5).
+        max_score: Maximum possible absolute value of confirmation_score.
 
     Returns:
         ProbabilityResult with p_yes and supporting diagnostic metrics.
@@ -70,21 +82,35 @@ def estimate_probability(
     # Log-distance: how far the strike sits above current price in log space
     log_distance = math.log(K / S)
 
-    # z: standard deviations from spot to the strike (pure log-normal, no drift)
+    # z: unadjusted standard deviations from spot to strike (pure log-normal)
     z = log_distance / sigma_tau
 
+    # Directional z-shift: shift z toward the direction of confirmation signals.
+    # Bounded by DIRECTION_ALPHA * sigma_tau — proportional to volatility, never linear.
+    if max_score > 0 and confirmation_score != 0:
+        direction_strength = max(-1.0, min(1.0, confirmation_score / max_score))
+        z_shift = DIRECTION_ALPHA * direction_strength * sigma_tau
+    else:
+        direction_strength = 0.0
+        z_shift = 0.0
+
+    z_adjusted = z - z_shift  # bullish shift reduces z, increasing p_yes
+
     # p_yes: probability that BTC finishes above the strike (right-tail area)
-    p_yes = 1 - norm.cdf(z)
+    p_yes = 1 - norm.cdf(z_adjusted)
 
     # Expected move: convert 1-sigma log move to a percentage of current price
     expected_move_pct = (math.exp(sigma_tau) - 1) * 100
 
     return ProbabilityResult(
         p_yes=p_yes,
-        z_score=z,
+        z_score=z_adjusted,
         log_distance=log_distance,
         sigma_to_expiry=sigma_tau,
         expected_move_pct=expected_move_pct,
+        z_raw=z,
+        z_shift=z_shift,
+        direction_strength=direction_strength,
     )
 
 

@@ -1,75 +1,163 @@
 """
-Confirmation indicators module: EMA alignment, RSI regime, and volume confirmation
-on 1-hour candles. All three must agree for a directional confirmation signal.
+Confirmation indicators module: EMA alignment, stochastic oscillator, volume,
+VWAP, OBI, and funding rate on 1-hour / 1-minute candles.
 """
 
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 
+from stochastic import compute_stochastic, StochasticResult
+from ema_stack import compute_ema_stack, EMAStackResult
+
 
 MIN_CANDLES = 60
 EMA_FAST = 20            # fast EMA period for trend alignment
 EMA_SLOW = 50            # slow EMA period for trend alignment
-RSI_PERIOD = 21          # RSI lookback period
 VOLUME_MA_PERIOD = 20    # simple moving average period for volume baseline
 EMA_CONFIRM_BARS = 3     # consecutive bars the EMA spread must hold to confirm
 EMA_STRETCH_PERIOD = 20  # EMA period on 5m bars (covers ~100 minutes)
 EMA_STRETCH_THRESHOLD = 0.001  # ±0.1% from 5m EMA triggers overbought/oversold signal
+
+# VPIN parameters
+VPIN_BUCKET_BARS = 5     # target number of 1m bars per volume bucket
+VPIN_N_BUCKETS   = 10    # number of recent buckets to average
+VPIN_THRESHOLD   = 0.80  # minimum unsigned imbalance to assign a score
+
+# Session-anchored VWAP parameters (session resets at 00:00 UTC)
+VWAP_NEUTRAL_BAND     = 0.002  # ±0.2% — price within this distance of VWAP = no signal
+VWAP_REJECTION_WEIGHT = 2      # rejection score counts double in vwap_total
+VWAP_STRETCH_WEIGHT   = 1      # position and stretch scores count single
+VWAP_MIN_SESSION_BARS = 60     # minimum candles in session to produce a signal
 
 
 @dataclass
 class ConfirmationResult:
     """Output of the confirmation indicators module."""
 
-    confirmation_bias: int    # +1 bullish, -1 bearish, 0 neutral — from 8-indicator score (YES direction)
-    no_bias: int              # +1 bullish, -1 bearish, 0 neutral — from 4-indicator no_score (NO direction)
-    confirmation_score: int   # sum of up to 8 indicator scores, range -6 to +6 (without momentum)
-    no_score: int             # 7-indicator score for NO direction (EMA+RSI+Vol+OBI+MACD+VWAP+Stretch, -6 to +6)
+    confirmation_bias: int    # +1 bullish, -1 bearish, 0 neutral — from 4-indicator YES score
+    no_bias: int              # -1 bearish (good for NO), +1 bullish (bad for NO), 0 mixed
+    confirmation_score: int   # count of bullish signals for YES (0–4): OBI, funding, stoch, vwap
+    no_score: int             # count of bearish signals for NO (0–4): OBI, funding, stoch, vwap
     obi_score: int            # +1 bullish, -1 bearish, 0 neutral — from order book imbalance
-    ema_alignment: str        # "bullish", "bearish", or "neutral"
-    rsi_regime: str           # "bullish", "bearish", or "neutral"
-    rsi_value: float          # current RSI reading
+    vpin_score: int           # +1 bullish, -1 bearish, 0 neutral — from VPIN informed flow
+    vpin_raw: float           # unsigned VPIN magnitude 0–1 (NaN if insufficient data)
+    ema_alignment: str        # "bullish", "bearish", or "neutral" — logged for analysis
     volume_confirmed: bool    # True if latest volume exceeds its 20-period average
     ema_20_current: float     # current value of the 20-period EMA
     ema_50_current: float     # current value of the 50-period EMA
     mom_15m_score: int        # +1 if 15-min price change > 0, -1 if < 0, 0 if unavailable
     mom_60m_score: int        # +1 if 60-min price change > 0, -1 if < 0, 0 if unavailable
     ema_stretch_score: int    # +1 oversold (below 5m EMA), -1 overbought (above), 0 neutral
+    stoch_bias: int           # +1 oversold/bullish crossover, -1 overbought/bearish crossover, 0 neutral
+    stoch_k: float            # current %K value (0–100)
+    stoch_d: float            # current %D value (smoothed %K)
+    stoch_crossover_active: bool  # True if crossover fired on current or previous 15m candle
+    ema_stack_bias: int        # +1 bullish EMA9>21>50 stack, -1 bearish, 0 neutral/insufficient
     vol_score: int            # +1 high vol + up candle, -1 high vol + down candle, 0 low vol
-    vwap_score: int           # +1 price above 24h VWAP, -1 below
+    vwap_score: int           # composite VWAP signal inverted for contrarian edge (= -vwap_signal)
+    vwap_signal: int          # raw VWAP composite signal: +1 bullish, -1 bearish, 0 neutral
+    vwap_total: int           # sum: position_score + stretch_score + rejection_score*2
+    stretch_score: int        # -2 above 2σ, -1 above 1σ, +1 below 1σ, +2 below 2σ, 0 within bands
+    bearish_rejection: bool   # prev candle high > VWAP but close < VWAP and spot < VWAP
+    bullish_rejection: bool   # prev candle low < VWAP but close > VWAP and spot > VWAP
+    vwap_current: float       # session-anchored VWAP value at current candle
+    vwap_upper_1: float       # VWAP + 1σ upper band
+    vwap_upper_2: float       # VWAP + 2σ upper band
+    vwap_lower_1: float       # VWAP - 1σ lower band
+    vwap_lower_2: float       # VWAP - 2σ lower band
+    distance_pct: float       # (spot - vwap) / vwap — how far price is from session anchor
+    funding_bias: int         # +1 bullish (overcrowded shorts), -1 bearish (overcrowded longs), 0 neutral
+    avg_funding_rate: float   # averaged funding rate across exchanges (0.0 if unavailable)
     reason: str               # plain-English explanation of the classification
 
 
-def _compute_rsi(series: pd.Series, period: int) -> pd.Series:
+
+def compute_vpin(hist_1m: pd.DataFrame) -> tuple:
     """
-    Compute RSI using Wilder's exponential smoothing method.
+    Compute VPIN (Volume-synchronized Probability of Informed Trading) from 1m OHLCV data
+    using bulk volume classification (BVC).
 
-    Uses EWM with alpha=1/period, which approximates Wilder's smoothing
-    and is consistent with most charting platforms.
+    For each bar: V_buy = volume * (close - low) / (high - low), V_sell = volume - V_buy.
+    Bars are accumulated into equal-volume buckets; VPIN is the mean unsigned imbalance
+    over the last VPIN_N_BUCKETS buckets. Direction comes from net flow in the most recent bucket.
 
-    Args:
-        series: Closing price series.
-        period: Lookback period for RSI (typically 14 or 21).
-
-    Returns:
-        RSI series on the same index as the input.
+    Returns (vpin_raw, vpin_score):
+        vpin_raw:  unsigned VPIN magnitude 0–1, or NaN if insufficient data
+        vpin_score: +1 informed buying, -1 informed selling, 0 neutral/insufficient
     """
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    try:
+        h = hist_1m.copy()
+        h.columns = h.columns.str.lower()
+        if len(h) < VPIN_BUCKET_BARS * VPIN_N_BUCKETS:
+            return float("nan"), 0
 
-    # Wilder smoothing: exponential weighted mean with alpha = 1/period
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+        high   = h["high"].values.astype(float)
+        low    = h["low"].values.astype(float)
+        close  = h["close"].values.astype(float)
+        volume = h["volume"].values.astype(float)
 
-    # Avoid division by zero when there are no losing periods
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+        # Bulk volume classification
+        hl_range = high - low
+        buy_vol  = np.where(hl_range > 0, volume * (close - low) / hl_range, volume / 2.0)
+        sell_vol = volume - buy_vol
+
+        # Dynamic bucket size: average bar volume × VPIN_BUCKET_BARS
+        bucket_size = float(np.mean(volume)) * VPIN_BUCKET_BARS
+        if bucket_size <= 0:
+            return float("nan"), 0
+
+        # Accumulate bars into equal-volume buckets
+        buckets = []
+        cur_buy = cur_sell = cur_total = 0.0
+        for bv, sv in zip(buy_vol, sell_vol):
+            remaining_b, remaining_s, remaining_v = bv, sv, bv + sv
+            while remaining_v > 1e-9:
+                space = bucket_size - cur_total
+                if remaining_v <= space:
+                    cur_buy   += remaining_b
+                    cur_sell  += remaining_s
+                    cur_total += remaining_v
+                    remaining_b = remaining_s = remaining_v = 0.0
+                else:
+                    frac = space / remaining_v
+                    cur_buy   += remaining_b * frac
+                    cur_sell  += remaining_s * frac
+                    cur_total  = bucket_size
+                    remaining_b *= (1 - frac)
+                    remaining_s *= (1 - frac)
+                    remaining_v -= space
+                    buckets.append((cur_buy, cur_sell))
+                    cur_buy = cur_sell = cur_total = 0.0
+
+        if len(buckets) < 2:
+            return float("nan"), 0
+
+        recent = buckets[-VPIN_N_BUCKETS:]
+        imbalances = [abs(b - s) / (b + s) for b, s in recent if (b + s) > 0]
+        if not imbalances:
+            return float("nan"), 0
+
+        vpin_raw = float(np.mean(imbalances))
+
+        last_b, last_s = recent[-1]
+        last_total = last_b + last_s
+        net_flow = (last_b - last_s) / last_total if last_total > 0 else 0.0
+
+        if vpin_raw >= VPIN_THRESHOLD and net_flow > 0.05:
+            vpin_score = +1
+        elif vpin_raw >= VPIN_THRESHOLD and net_flow < -0.05:
+            vpin_score = -1
+        else:
+            vpin_score = 0
+
+        return vpin_raw, vpin_score
+
+    except Exception:
+        return float("nan"), 0
 
 
-def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_score: int = 0, momentum_enabled: bool = True) -> ConfirmationResult:
+def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_score: int = 0, momentum_enabled: bool = True, funding_bias: int = 0, avg_funding_rate: float = 0.0) -> ConfirmationResult:
     """
     Compute EMA alignment, RSI regime, and volume confirmation from 1-hour bars.
 
@@ -140,20 +228,16 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
     else:
         ema_alignment = "neutral"
 
-    # --- RSI Regime ---
-    rsi_series = _compute_rsi(close, RSI_PERIOD)
-    rsi_value = float(rsi_series.iloc[-1])
+    # --- Stochastic Oscillator (15m bars resampled from hist_1m) ---
+    # Replaces RSI regime and RSI mean reversion. Measures where price closed
+    # relative to its recent high-low range on 15-minute bars — more responsive
+    # than hourly RSI for 1-hour contract decisions.
+    stoch = compute_stochastic(hist_1m)
 
-    if rsi_value > 70:
-        rsi_regime = "neutral"    # overbought — extreme, not a reliable directional signal
-    elif rsi_value >= 55:
-        rsi_regime = "bullish"
-    elif rsi_value <= 30:
-        rsi_regime = "neutral"    # oversold — extreme, not a reliable directional signal
-    elif rsi_value <= 45:
-        rsi_regime = "bearish"
-    else:
-        rsi_regime = "neutral"
+    # --- EMA Stack (9/21/50 on 15m bars resampled from hist_1m) ---
+    # Bullish: EMA9 > EMA21 > EMA50 AND price > EMA9. All timeframes aligned up.
+    # Bearish: EMA9 < EMA21 < EMA50 AND price < EMA9. All timeframes aligned down.
+    ema_stack = compute_ema_stack(hist_1m)
 
     # --- Volume Confirmation ---
     # Directional volume: high volume on an up candle = bullish, high volume on a down
@@ -161,35 +245,179 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
     # selling pressure (high volume + price down) as bearish rather than penalizing
     # any high-volume candle regardless of direction.
     vol_sma = volume.rolling(window=VOLUME_MA_PERIOD).mean()
-    high_vol = bool(float(volume.iloc[-1]) > float(vol_sma.iloc[-1]))
-    price_up = bool(float(close.iloc[-1]) > float(close.iloc[-2]))
+    # Use the last COMPLETED bar (-2) not the current partial bar (-1) for volume.
+    # The live 1h feed always includes the in-progress candle whose accumulated
+    # volume is a fraction of a full bar, making high_vol=False nearly always.
+    high_vol = bool(float(volume.iloc[-2]) > float(vol_sma.iloc[-2]))
+    price_up = bool(float(close.iloc[-2]) > float(close.iloc[-3]))
     volume_confirmed = high_vol  # kept for display: True if volume above average
 
     macd_score = 0  # MACD removed — too lagging for 1-hour contracts (12-26h lookback)
 
-    # --- Rolling VWAP (24-period) ---
-    if all(c in df.columns for c in ["high", "low"]):
-        typical_price = (df["high"] + df["low"] + close) / 3
-        tp_x_vol = typical_price * volume
-        vwap = tp_x_vol.rolling(24).sum() / volume.rolling(24).sum()
-        vwap_score = 1 if float(close.iloc[-1]) > float(vwap.iloc[-1]) else -1
-    else:
-        vwap_score = 0
+    # --- Session-Anchored VWAP ---
+    # VWAP resets at 00:00 UTC each day and accumulates through the session.
+    # It is the volume-weighted average price for the current trading day —
+    # a key institutional reference level. Price above session VWAP means
+    # buyers have been in control all day; below means sellers.
+    vwap_score        = 0
+    vwap_signal       = 0
+    vwap_total        = 0
+    stretch_score     = 0
+    bearish_rejection = False
+    bullish_rejection = False
+    vwap_current      = float("nan")
+    vwap_upper_1      = float("nan")
+    vwap_upper_2      = float("nan")
+    vwap_lower_1      = float("nan")
+    vwap_lower_2      = float("nan")
+    distance_pct      = float("nan")
 
-    # --- Score each indicator ---
+    # Use 1-minute bars for session VWAP: 60 candles = 1 hour of data, matching
+    # the "60 session candles" minimum threshold. Falls back to no signal if
+    # hist_1m is unavailable.
+    _vwap_src = None
+    if hist_1m is not None and len(hist_1m) > 0:
+        _h1m = hist_1m.copy()
+        _h1m.columns = _h1m.columns.str.lower()
+        if all(c in _h1m.columns for c in ["high", "low", "close", "volume"]):
+            _vwap_src = _h1m
+
+    if _vwap_src is not None:
+        try:
+            # Slice to current session: 1m bars from 00:00 UTC today onward.
+            if isinstance(_vwap_src.index, pd.DatetimeIndex):
+                last_ts       = _vwap_src.index[-1]
+                session_start = last_ts.normalize().tz_localize(None) if last_ts.tzinfo is None else last_ts.normalize()
+                session_df    = _vwap_src[_vwap_src.index >= session_start]
+            else:
+                session_df = _vwap_src
+
+            if len(session_df) < VWAP_MIN_SESSION_BARS:
+                # Too early in the session — fewer than 60 candles, signal unreliable
+                vwap_score = 0
+            else:
+                tp  = (session_df["high"] + session_df["low"] + session_df["close"]) / 3
+                vol = session_df["volume"]
+
+                # Cumulative session VWAP: sum(typical_price × volume) / sum(volume)
+                # anchored to session open — unlike rolling VWAP this never forgets
+                # early-session volume that set the institutional reference.
+                vwap_series  = (tp * vol).cumsum() / vol.cumsum()
+                vwap_current = float(vwap_series.iloc[-1])
+
+                # Standard deviation of (typical_price − VWAP) across session candles.
+                # Measures how widely price has oscillated around the session anchor —
+                # used to define statistically significant deviation bands.
+                vwap_std  = float((tp - vwap_series).std())
+                spot      = float(session_df["close"].iloc[-1])
+                distance_pct = (spot - vwap_current) / vwap_current
+
+                # σ-bands: 1σ and 2σ above/below VWAP.
+                # Price beyond these levels is statistically stretched and
+                # historically reverts toward the session anchor.
+                vwap_upper_1 = vwap_current + vwap_std
+                vwap_upper_2 = vwap_current + 2 * vwap_std
+                vwap_lower_1 = vwap_current - vwap_std
+                vwap_lower_2 = vwap_current - 2 * vwap_std
+
+                # --- Position score: price location relative to VWAP and neutral band ---
+                # Price well above VWAP: institutions buying all session, bullish.
+                # Price well below VWAP: selling pressure dominant, bearish.
+                # Within ±0.2% neutral band: noise — no directional signal.
+                if distance_pct > VWAP_NEUTRAL_BAND or spot > vwap_upper_1:
+                    position_score = +1   # above VWAP or upper band — bullish
+                elif distance_pct < -VWAP_NEUTRAL_BAND or spot < vwap_lower_1:
+                    position_score = -1   # below VWAP or lower band — bearish
+                else:
+                    position_score = 0    # within neutral band — no signal
+
+                # --- Band stretch score: mean reversion from σ-bands ---
+                # Price beyond 1σ/2σ is overextended and tends to revert.
+                # The farther price is from VWAP, the stronger the reversion pressure.
+                if spot > vwap_upper_2:
+                    stretch_score = -2   # >2σ above VWAP — strong bearish mean reversion
+                elif spot > vwap_upper_1:
+                    stretch_score = -1   # >1σ above VWAP — mild bearish reversion pressure
+                elif spot < vwap_lower_2:
+                    stretch_score = +2   # >2σ below VWAP — strong bullish mean reversion
+                elif spot < vwap_lower_1:
+                    stretch_score = +1   # >1σ below VWAP — mild bullish reversion pressure
+                else:
+                    stretch_score = 0    # within 1σ bands — no stretch signal
+
+                # --- VWAP rejection: previous candle tested VWAP but failed to hold ---
+                # A rejection is a high-conviction mean reversion signal: price tagged
+                # VWAP (confirming it as a reference level) but was pushed back,
+                # indicating the level acted as resistance/support.
+                rejection_score = 0
+                if len(session_df) >= 2:
+                    prev       = session_df.iloc[-2]
+                    prev_vwap  = float(vwap_series.iloc[-2])
+
+                    # Bearish rejection: prev candle high exceeded VWAP (tested resistance)
+                    # but close fell back below — sellers defended VWAP as resistance.
+                    # Current spot also below VWAP confirms the rejection is holding.
+                    bearish_rejection = (
+                        float(prev["high"])  > prev_vwap and
+                        float(prev["close"]) < prev_vwap and
+                        spot < vwap_current
+                    )
+
+                    # Bullish rejection: prev candle low dipped below VWAP (tested support)
+                    # but close recovered above — buyers defended VWAP as support.
+                    # Current spot above VWAP confirms the bounce is holding.
+                    bullish_rejection = (
+                        float(prev["low"])   < prev_vwap and
+                        float(prev["close"]) > prev_vwap and
+                        spot > vwap_current
+                    )
+
+                    if bearish_rejection:
+                        rejection_score = -1   # VWAP acted as resistance — bearish
+                    elif bullish_rejection:
+                        rejection_score = +1   # VWAP acted as support — bullish
+
+                # --- Combine into vwap_total ---
+                # Position and stretch each count once; rejection counts double
+                # because a failed VWAP test is a higher-conviction signal than
+                # simply being above/below the level.
+                vwap_total = (
+                    position_score * VWAP_STRETCH_WEIGHT
+                    + stretch_score * VWAP_STRETCH_WEIGHT
+                    + rejection_score * VWAP_REJECTION_WEIGHT
+                )
+
+                # Require composite score ≥ ±2 to avoid single-indicator noise.
+                if vwap_total >= 2:
+                    vwap_signal = +1
+                elif vwap_total <= -2:
+                    vwap_signal = -1
+                else:
+                    vwap_signal = 0
+
+                # vwap_score is the INVERTED composite signal — historical data shows
+                # the old rolling VWAP was a reliable contrarian indicator: aligned
+                # trades had 19% win rate vs 37% for misaligned. Inverting preserves
+                # that edge while the session-anchored model accumulates new data.
+                vwap_score = -vwap_signal
+
+        except Exception:
+            vwap_score = 0
+            vwap_signal = 0
+
+    # --- VPIN ---
+    vpin_raw, vpin_score = compute_vpin(hist_1m) if hist_1m is not None and len(hist_1m) >= VPIN_BUCKET_BARS * VPIN_N_BUCKETS else (float("nan"), 0)
+
+    # --- Supporting indicators (logged for analysis, not in primary scoring) ---
     ema_score = 1 if ema_alignment == "bullish" else (-1 if ema_alignment == "bearish" else 0)
-    rsi_score  = 0  # RSI signals paused — regime still computed and logged for future use
     if high_vol and price_up:
         vol_score = 1
     elif high_vol and not price_up:
         vol_score = -1
     else:
-        vol_score = 0  # low volume = neutral signal
+        vol_score = 0
 
-    # --- Short-term 1m momentum scores (if hist_1m provided and momentum enabled) ---
-    # Weight 2 (vs weight 1 for hourly indicators) so that falling short-term momentum
-    # overrides a bullish hourly signal in Gate P. Retroactive analysis showed that
-    # chg_15m > 0 AND chg_60m > 0 is the strongest predictor of Gate P YES wins.
+    # --- Short-term momentum (logged only, not in primary scoring) ---
     mom_15m_score = 0
     mom_60m_score = 0
     if momentum_enabled and hist_1m is not None and len(hist_1m) >= 62:
@@ -197,8 +425,8 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
         hist_1m_c.columns = hist_1m_c.columns.str.lower()
         c1m = hist_1m_c["close"]
         last_close_1m = float(c1m.iloc[-1])
-        close_15_ago  = float(c1m.iloc[-16])   # ~15 min ago
-        close_60_ago  = float(c1m.iloc[-61])   # ~60 min ago
+        close_15_ago  = float(c1m.iloc[-16])
+        close_60_ago  = float(c1m.iloc[-61])
         mom_15m = (last_close_1m - close_15_ago) / close_15_ago
         mom_60m = (last_close_1m - close_60_ago) / close_60_ago
         mom_15m_score = 2 if mom_15m > 0 else -2
@@ -228,47 +456,58 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
         except Exception:
             ema_stretch_score = 0
 
-    # --- 6-indicator score for NO direction ---
-    # EMA + RSI + Vol + OBI + VWAP + EMA Stretch. MACD removed (too lagging for 1h contracts).
-    # Momentum excluded to avoid short-term bounces flipping the NO signal.
-    no_score = ema_score + rsi_score + vol_score + obi_score + vwap_score + ema_stretch_score  # range -5 to +5 (RSI paused)
+    # --- 4-indicator NO score (0–4, where higher = more bearish = better for NO) ---
+    # Threshold: 2 of 4 bearish signals required for NO confirmation.
+    no_score = 0
+    if obi_score        == -1: no_score += 1   # bearish order book pressure
+    if funding_bias     == -1: no_score += 1   # overcrowded longs → mean reversion down
+    if stoch.stoch_bias == -1: no_score += 1   # overbought or bearish stoch crossover
+    if vwap_signal      == -1: no_score += 1   # price at premium above VWAP
 
-    if no_score >= 1:
-        no_bias = +1
-    elif no_score <= -1:
-        no_bias = -1
+    if no_score >= 2:
+        no_bias = -1   # majority bearish → supports NO bet
+    elif no_score == 0:
+        no_bias = +1   # no bearish signals → bullish conditions, bad for NO
     else:
-        no_bias = 0
+        no_bias = 0    # mixed signals
 
-    # --- YES direction score (VWAP, momentum, OBI, EMA Stretch; MACD removed) ---
-    # Hourly indicators: -5 to +5 (RSI paused); momentum (weight 2 each): -4 to +4 → total -9 to +9
-    # Without momentum (runtime default): -5 to +5
-    confirmation_score = ema_score + rsi_score + vol_score + vwap_score + mom_15m_score + mom_60m_score + obi_score + ema_stretch_score
-    max_score = 6 + (4 if mom_15m_score != 0 or mom_60m_score != 0 else 0)
+    # --- 4-indicator YES score (0–4, where higher = more bullish = better for YES) ---
+    # Threshold: 2 of 4 bullish signals required for YES confirmation.
+    confirmation_score = 0
+    if obi_score        == +1: confirmation_score += 1   # bullish order book pressure
+    if funding_bias     == +1: confirmation_score += 1   # overcrowded shorts → squeeze up
+    if stoch.stoch_bias == +1: confirmation_score += 1   # oversold or bullish stoch crossover
+    if vwap_signal      == +1: confirmation_score += 1   # price at discount below VWAP
 
-    # --- confirmation_bias: YES direction uses full 7-indicator score ---
     if confirmation_score >= 2:
         confirmation_bias = +1
         label = "Bullish"
-    elif confirmation_score <= -2:
+    elif confirmation_score == 0:
         confirmation_bias = -1
         label = "Bearish"
     else:
         confirmation_bias = 0
         label = "Neutral"
 
-    mom_str = ""
-    if mom_15m_score != 0 or mom_60m_score != 0:
-        mom_str = ", Mom15m={:+d}, Mom60m={:+d}".format(mom_15m_score, mom_60m_score)
-    tag = "confirmed" if confirmation_bias != 0 else "mixed signals"
+    max_score = 4
+    vwap_detail = (
+        f"VWAP={vwap_current:.2f}(dist={distance_pct*100:+.3f}%,total={vwap_total:+d}"
+        f",stretch={stretch_score:+d},rej={'B' if bearish_rejection else ('U' if bullish_rejection else '-')})"
+        if not (vwap_current != vwap_current) else "VWAP=unavail"
+    )
     reason = (
-        "{}: score={:+d}/{} (EMA={:+d}, RSI={:+d}, Vol={:+d}, VWAP={:+d}, OBI={:+d}, Stretch={:+d}{}) → {} (YES bias). "
-        "NO bias from no_score={:+d} (no_bias={:+d}). "
-        "20-EMA ({:.2f}) vs 50-EMA ({:.2f}); RSI={:.1f} ({}).".format(
-            label, confirmation_score, max_score,
-            ema_score, rsi_score, vol_score, vwap_score, obi_score, ema_stretch_score, mom_str, tag,
+        "{}: YES={}/4 (OBI={:+d}, Funding={:+d}, Stoch={:+d}, VWAP={:+d}). "
+        "NO={}/4 (no_bias={:+d}). "
+        "Stoch: K={:.1f} D={:.1f} xover={}. "
+        "EMA={} ({:.0f}/{:.0f}). {}. "
+        "Aux: EMA_stack={:+d}, EMA_str={:+d}, VPIN={:+d}, Vol={:+d}, Funding={:+.4f}%/8h.".format(
+            label, confirmation_score,
+            obi_score, funding_bias, stoch.stoch_bias, vwap_signal,
             no_score, no_bias,
-            ema_20_current, ema_50_current, rsi_value, rsi_regime
+            stoch.stoch_k, stoch.stoch_d, stoch.stoch_crossover_active,
+            ema_alignment, ema_20_current, ema_50_current,
+            vwap_detail,
+            ema_stack.ema_stack_bias, ema_stretch_score, vpin_score, vol_score, avg_funding_rate * 100,
         )
     )
 
@@ -278,16 +517,34 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
         confirmation_score=confirmation_score,
         no_score=no_score,
         obi_score=obi_score,
+        vpin_score=vpin_score,
+        vpin_raw=vpin_raw,
         ema_alignment=ema_alignment,
-        rsi_regime=rsi_regime,
-        rsi_value=rsi_value,
         volume_confirmed=volume_confirmed,
         ema_20_current=ema_20_current,
         ema_50_current=ema_50_current,
         mom_15m_score=mom_15m_score,
         mom_60m_score=mom_60m_score,
         ema_stretch_score=ema_stretch_score,
+        stoch_bias=stoch.stoch_bias,
+        stoch_k=stoch.stoch_k,
+        stoch_d=stoch.stoch_d,
+        stoch_crossover_active=stoch.stoch_crossover_active,
+        ema_stack_bias=ema_stack.ema_stack_bias,
         vol_score=vol_score,
         vwap_score=vwap_score,
+        vwap_signal=vwap_signal,
+        vwap_total=vwap_total,
+        stretch_score=stretch_score,
+        bearish_rejection=bearish_rejection,
+        bullish_rejection=bullish_rejection,
+        vwap_current=vwap_current,
+        vwap_upper_1=vwap_upper_1,
+        vwap_upper_2=vwap_upper_2,
+        vwap_lower_1=vwap_lower_1,
+        vwap_lower_2=vwap_lower_2,
+        distance_pct=distance_pct,
+        funding_bias=funding_bias,
+        avg_funding_rate=avg_funding_rate,
         reason=reason,
     )

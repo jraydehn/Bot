@@ -293,13 +293,13 @@ def main() -> None:
             pm        = c["p_market"]
             if abs(s_k / spot - 1) > 0.01:
                 continue
-            # Skip contracts where BTC is already above the strike (offset <= 0).
-            # NO bets on these contracts have a 12% historical win rate — BTC has
-            # already crossed the level we'd be betting against. YES bets here are
-            # deep ITM and caught by Gate 0's p_model saturation check anyway.
+            # BTC+ETH: skip contracts where asset is already above the strike (offset <= 0).
+            # BTC ITM NO bets win only 12% historically; ITM YES caught by Gate 0.
+            # ETH: no validated ITM edge — force OTM evaluation where edge exists.
+            # SOL: ITM YES wins 90.5%, OTM YES wins 80.6% — both regimes valid.
             offset_c = s_k / spot - 1
-            if offset_c <= 0:
-                print(f"  [scan] Skipping {c['ticker']} — offset={offset_c*100:+.3f}% (BTC above strike)")
+            if args.asset in ("BTC", "ETH") and offset_c <= 0:
+                print(f"  [scan] Skipping {c['ticker']} — offset={offset_c*100:+.3f}% ({args.asset} above strike)")
                 continue
             spread_c  = c["ask"] - c["bid"]
             if spread_c > 0.08:
@@ -319,7 +319,8 @@ def main() -> None:
             dec_c     = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
                                        p_yes_adj_c, pm, args.bankroll,
                                        confirmation_score=confirm.confirmation_score, no_score=confirm.no_score,
-                                       obi_score=confirm.obi_score, vol_score=confirm.vol_score)
+                                       obi_score=confirm.obi_score, vol_score=confirm.vol_score,
+                                       ema_alignment=confirm.ema_alignment, asset=args.asset)
             positions = already_traded_expiries.get(c["close_time"], {"yes": [], "no": []})
             if dec_c.side == "yes" and any(no_k < s_k for no_k in positions["no"]):
                 print(f"  [scan] Skipping {c['ticker']} — YES@{s_k} conflicts with existing NO below it")
@@ -452,6 +453,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import argparse as _ap
+    _loop_parser = _ap.ArgumentParser(add_help=False)
+    _loop_parser.add_argument("--asset", type=str, default="BTC")
+    _loop_args, _ = _loop_parser.parse_known_args()
+    _loop_asset = _loop_args.asset.upper()
+
     loop_count = 0
     _last_hour = datetime.now(timezone.utc).hour
     while True:
@@ -461,14 +468,14 @@ if __name__ == "__main__":
             _SESSION_TRADED.clear()
             print(f"  [session] New hour — already_traded reset.")
             _last_hour = _current_hour
-        if loop_count % 30 == 0:          # refresh OHLCV data every 30 minutes
-            print("  [data] Updating OHLCV parquet files...")
+        if loop_count % 30 == 0:  # each process updates its own asset data
+            print(f"  [data] Updating OHLCV parquet files ({_loop_asset})...")
             try:
-                update_data.main()
+                update_data.main(asset=_loop_asset)
             except Exception as e:
                 print(f"  [data] Update failed (will retry next cycle): {e}")
         if loop_count % 5 == 0:
-            outcome_checker.main()
+            outcome_checker.main(get_csv_path(_loop_asset))
         main()
         loop_count += 1
         time.sleep(60)

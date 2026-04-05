@@ -98,8 +98,9 @@ def compute_vpin(hist_1m: pd.DataFrame) -> tuple:
         volume = h["volume"].values.astype(float)
 
         # Bulk volume classification
-        hl_range = high - low
-        buy_vol  = np.where(hl_range > 0, volume * (close - low) / hl_range, volume / 2.0)
+        hl_range     = high - low
+        safe_hl      = np.where(hl_range > 0, hl_range, 1.0)  # avoid divide-by-zero warning; np.where evals both branches
+        buy_vol      = np.where(hl_range > 0, volume * (close - low) / safe_hl, volume / 2.0)
         sell_vol = volume - buy_vol
 
         # Dynamic bucket size: average bar volume × VPIN_BUCKET_BARS
@@ -378,12 +379,13 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
                         rejection_score = +1   # VWAP acted as support — bullish
 
                 # --- Combine into vwap_total ---
-                # Position and stretch each count once; rejection counts double
-                # because a failed VWAP test is a higher-conviction signal than
-                # simply being above/below the level.
+                # stretch_score alone reaches ±2 at >2σ overextension.
+                # rejection counts double (high-conviction reversal signal).
+                # position_score removed: it always opposes stretch_score (same condition,
+                # opposite sign convention), causing systematic cancellation that prevents
+                # the signal from ever firing when price is in the 1σ–2σ band.
                 vwap_total = (
-                    position_score * VWAP_STRETCH_WEIGHT
-                    + stretch_score * VWAP_STRETCH_WEIGHT
+                    stretch_score * VWAP_STRETCH_WEIGHT
                     + rejection_score * VWAP_REJECTION_WEIGHT
                 )
 

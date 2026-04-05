@@ -209,6 +209,7 @@ def evaluate_trade(
     obi_score: int = 0,
     vol_score: int = 0,
     ema_alignment: str = "neutral",
+    asset: str = "BTC",
 ) -> DecisionResult:
     """
     Evaluate all gates in sequence and produce a final trade decision.
@@ -245,16 +246,18 @@ def evaluate_trade(
     reasons: List[str] = []
 
     # --- Gate 0: Model saturation filter ---
-    # p_model outside [0.05, 0.95] means the strike is so far ITM or OTM that the
-    # log-normal model hits numerical saturation. Any apparent edge vs p_market at
-    # these extremes is noise from stale or illiquid market quotes, not real mispricing.
-    P_MODEL_MIN, P_MODEL_MAX = 0.04, 0.96
+    # p_model outside bounds means the strike is so far ITM or OTM that the log-normal
+    # model hits numerical saturation. BTC uses tighter bounds [0.04, 0.96] since apparent
+    # edge at extremes is typically noise from stale quotes. ETH/SOL use wider bounds
+    # [0.02, 0.98] — ITM YES contracts are a validated edge regime for both assets.
+    P_MODEL_MIN = 0.04 if asset == "BTC" else 0.02
+    P_MODEL_MAX = 0.96 if asset == "BTC" else 0.98
     if not (P_MODEL_MIN <= p_model <= P_MODEL_MAX):
         fee = kalshi_fee(p_market)
         raw_edge = p_model - p_market if (force_side or "yes") == "yes" else p_market - p_model
         net_edge = raw_edge - fee - slippage - spread
         reasons.append(
-            f"Gate 0 FAILED: p_model={p_model:.4f} outside [{P_MODEL_MIN}, {P_MODEL_MAX}] — "
+            f"Gate 0 FAILED: p_model={p_model:.4f} outside [{P_MODEL_MIN}, {P_MODEL_MAX}] ({asset}) — "
             f"strike is too deep ITM or OTM, model is saturated."
         )
         return DecisionResult(
@@ -272,12 +275,12 @@ def evaluate_trade(
                                  bankroll, slippage, spread, min_net_edge,
                                  confirmation_score, no_score, no_bias, force_side="yes",
                                  obi_score=obi_score, vol_score=vol_score,
-                                 ema_alignment=ema_alignment)
+                                 ema_alignment=ema_alignment, asset=asset)
         dec_no  = evaluate_trade(structure_bias, confirmation_bias, p_model, p_market,
                                  bankroll, slippage, spread, min_net_edge,
                                  confirmation_score, no_score, no_bias, force_side="no",
                                  obi_score=obi_score, vol_score=vol_score,
-                                 ema_alignment=ema_alignment)
+                                 ema_alignment=ema_alignment, asset=asset)
         if dec_yes.decision == "trade" and dec_no.decision == "trade":
             return dec_yes if dec_yes.net_edge >= dec_no.net_edge else dec_no
         elif dec_yes.decision == "trade":
@@ -298,28 +301,11 @@ def evaluate_trade(
     raw_edge = p_model - p_market if side == "yes" else p_market - p_model
     net_edge = raw_edge - fee - slippage - spread
 
-    # --- Gate EMA: block neutral EMA alignment ---
-    # Data analysis: ema=neutral produces 16.7% win rate (-$1,079 on 72 trades).
-    # Structure=+1 + ema=neutral wins 0% across 21 trades. Neutral EMA means price
-    # is trapped between the 20 and 50 EMA — no directional conviction, no edge.
-    if ema_alignment == "neutral":
-        reasons.append(
-            f"Gate EMA FAILED: ema_alignment=neutral — price between EMAs, "
-            f"no directional conviction. 16.7% historical win rate."
-        )
-        p_edge, p_ref = (p_model, p_market) if side == "yes" else (p_market, p_model)
-        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
-        return DecisionResult(
-            decision="no_trade", side=side,
-            p_model=p_model, p_market=p_market,
-            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
-            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
-            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
-            was_capped=False, reasons=reasons,
-        )
+    # Gate EMA (neutral block) removed: Gate EMA-Dir + Gate 3 provide sufficient
+    # quality filtering without hard-blocking neutral EMA regimes.
     reasons.append(f"Gate EMA PASSED: ema_alignment={ema_alignment}.")
 
-    # --- Gate EMA-Dir: EMA alignment must oppose the trade direction ---
+    # --- Gate EMA-Dir: EMA alignment must oppose the trade direction (BTC only) ---
     # Paper trade analysis (n=235): ema=bullish+YES wins 0% (n=19); ema=bearish+YES wins 63.5% (n=52).
     # ema=bullish+NO wins 63% (n=46); ema=bearish+NO wins only 37% (n=46, below break-even).
     #
@@ -331,7 +317,8 @@ def evaluate_trade(
     #
     # Rule: ema=bearish → only YES (fade the downtrend, catch the bounce).
     #       ema=bullish → only NO (fade the uptrend, market already priced in continuation).
-    if ema_alignment == "bullish" and side == "yes":
+    # ETH/SOL: different volatility regimes — gate not yet validated; skipped.
+    if asset == "BTC" and ema_alignment == "bullish" and side == "yes":
         reasons.append(
             f"Gate EMA-Dir FAILED: ema=bullish+YES — continuation bet, 0% historical win "
             f"rate (n=19). 1h contracts do not sustain momentum; YES only valid after "
@@ -347,7 +334,7 @@ def evaluate_trade(
             kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
             was_capped=False, reasons=reasons,
         )
-    if ema_alignment == "bearish" and side == "no":
+    if asset == "BTC" and ema_alignment == "bearish" and side == "no":
         reasons.append(
             f"Gate EMA-Dir FAILED: ema=bearish+NO — downtrend continuation bet, 37% win "
             f"rate (n=46, below break-even). Market already prices further decline; "
@@ -363,36 +350,33 @@ def evaluate_trade(
             kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
             was_capped=False, reasons=reasons,
         )
-    reasons.append(
-        f"Gate EMA-Dir PASSED: ema={ema_alignment} opposes {side.upper()} direction (contrarian)."
-    )
+    if asset == "BTC":
+        reasons.append(
+            f"Gate EMA-Dir PASSED: ema={ema_alignment} opposes {side.upper()} direction (contrarian)."
+        )
 
-    # --- Gate PM: p_market must be in the directionally valid range ---
-    # Paper trade analysis cross-tabbed by EMA regime and side:
+    # --- Gate PM: p_market range filter (BTC only) ---
+    # Cross-tab analysis (n=241 resolved BTC trades) by ema x side x p_market:
     #
-    # YES (ema=bearish):
-    #   p_market ≥ 0.55 → 96.4% win rate (n=28)  ← the only YES regime with real edge
-    #   p_market 0.45–0.55 → 33.3% win rate (n=3, coin flip, no edge)
-    #   p_market < 0.45 → 23.5% win rate (n=21)   ← log-normal systematically overestimates OTM
+    # YES (bearish EMA only — bullish+YES blocked by Gate EMA-Dir):
+    #   p_market ≥ 0.55 → 95–100% win (n=29) ← only valid YES regime
+    #   p_market < 0.55 → 23–33% win (n=24)  ← log-normal overestimates OTM probability
     #
-    # NO (ema=bullish):
-    #   p_market ≤ 0.45 → 78–100% win rate (n=32) ← market overprices YES in a declining trend
-    #   p_market 0.45–0.55 → 33.3% win rate (n=9, coin flip, no edge)
-    #   p_market > 0.55 → 20% win rate (n=5)       ← NO on near-ITM contracts is dangerous
+    # NO (bullish EMA or neutral EMA):
+    #   p_market ≤ 0.45 → 71–100% win (n=39) ← contrarian fade of elevated pricing
+    #   p_market > 0.45 → 0–33% win (n=23)   ← near-ATM NO is consistently bad
     #
-    # Mechanism: When YES wins at high p_market, the strike is near/in-the-money — the contract
-    # is fairly priced near certainty and a small model edge is real. When YES is cheap
-    # (p_market < 0.55), the model's log-normal estimate inflates OTM probabilities; the
-    # market is correct that the 0.5% move rarely materialises in an uptrend.
+    # Gate PM replaces Gate NO: p_market ≤ 0.45 for NO is a stronger filter than
+    # no_score ≥ 1, and also unblocks the 207 bullish+NO trades that no_score was blocking.
     P_MARKET_YES_MIN = 0.55
     P_MARKET_NO_MAX  = 0.45
-    if side == "yes" and p_market < P_MARKET_YES_MIN:
+    if asset == "BTC" and side == "yes" and p_market < P_MARKET_YES_MIN:
         p_edge, p_ref = (p_model, p_market)
         pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
         reasons.append(
             f"Gate PM FAILED: p_market={p_market:.3f} < {P_MARKET_YES_MIN} for YES — "
-            f"OTM YES bets in bearish EMA win only 24% (n=21). Log-normal "
-            f"overestimates OTM probability; YES valid only near/in-the-money."
+            f"bearish+YES at low p_market wins only 23–33% (n=24). "
+            f"YES valid only near/in-the-money (p_market ≥ {P_MARKET_YES_MIN})."
         )
         return DecisionResult(
             decision="no_trade", side=side,
@@ -402,13 +386,13 @@ def evaluate_trade(
             kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
             was_capped=False, reasons=reasons,
         )
-    if side == "no" and p_market > P_MARKET_NO_MAX:
+    if asset == "BTC" and side == "no" and p_market > P_MARKET_NO_MAX:
         p_edge, p_ref = (p_market, p_model)
         pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
         reasons.append(
             f"Gate PM FAILED: p_market={p_market:.3f} > {P_MARKET_NO_MAX} for NO — "
-            f"near-ATM NO in bullish EMA wins only 33% (n=9) and ITM NO wins 20% (n=5). "
-            f"NO valid only when YES contract is cheap (p_market ≤ {P_MARKET_NO_MAX})."
+            f"near-ATM NO wins only 0–33% (n=23). "
+            f"NO valid only when YES is cheap (p_market ≤ {P_MARKET_NO_MAX})."
         )
         return DecisionResult(
             decision="no_trade", side=side,
@@ -418,38 +402,21 @@ def evaluate_trade(
             kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
             was_capped=False, reasons=reasons,
         )
-    reasons.append(
-        f"Gate PM PASSED: p_market={p_market:.3f} in valid range for {side.upper()} "
-        f"({'≥' if side == 'yes' else '≤'}{P_MARKET_YES_MIN if side == 'yes' else P_MARKET_NO_MAX})."
-    )
-
-    # --- Gate NO quality: NO trades require no_score >= 1 ---
-    # Data analysis: NO trades with no_score=0 win 39.4% and are consistently
-    # unprofitable. no_score=1 (at least one bearish indicator firing) produces
-    # 46.9% win rate with +$219 PnL. Requires at least one signal supporting NO.
-    if side == "no" and no_score < 1:
+    if asset == "BTC":
         reasons.append(
-            f"Gate NO FAILED: no_score={no_score} < 1 — insufficient bearish signal "
-            f"confirmation for NO trade. no_score=0 historically 39.4% win rate."
+            f"Gate PM PASSED: p_market={p_market:.3f} in valid range for {side.upper()} "
+            f"({'≥' if side == 'yes' else '≤'}"
+            f"{P_MARKET_YES_MIN if side == 'yes' else P_MARKET_NO_MAX})."
         )
-        p_edge, p_ref = (p_market, p_model)
-        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
-        return DecisionResult(
-            decision="no_trade", side=side,
-            p_model=p_model, p_market=p_market,
-            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
-            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
-            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
-            was_capped=False, reasons=reasons,
-        )
-    if side == "no":
-        reasons.append(f"Gate NO PASSED: no_score={no_score} >= 1.")
 
-    # --- Gate 3: Minimum net edge threshold = 5% ---
-    # Data analysis: trades with net_edge < 0.05 collectively lose -$2,136 at ~30% win.
-    # net_edge > 0.05 produces 71.4% win rate (+$435 on 49 trades). The model's
-    # edge calculation is accurate when it fires clearly — trust it.
-    effective_min_edge = 0.05
+    # Gate NO removed: Gate PM (p_market ≤ 0.45 for NO) is a stronger and more
+    # direct quality filter. Gate NO (no_score ≥ 1) was blocking 207 bullish+NO
+    # trades at valid p_market levels — those are the core profitable NO regime.
+
+    # --- Gate 3: Minimum net edge threshold = 3% ---
+    # Lowered from 5% → 3% to increase trade frequency with Gate EMA-Dir active.
+    # Gate EMA-Dir provides directional quality filter; Gate 3 handles edge floor.
+    effective_min_edge = 0.03
     p_edge, p_ref = (p_model, p_market) if side == "yes" else (p_market, p_model)
     pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=effective_min_edge)
     if not pricing.qualifies:
@@ -497,11 +464,9 @@ def evaluate_trade(
     reasons.append(f"Gate R:R PASSED: R:R={rr:.2f} for {side.upper()}.")
 
     # --- All gates passed: compute Kelly sizing ---
-    # Multipliers calibrated from paper trade analysis with EMA-Dir + PM gates applied:
-    #   YES: half Kelly (0.50) — 96.4% win rate (ema=bearish + p_market≥0.55 + edge≥5%)
-    #        Full Kelly ~0.91 at these win rates; capped at half for model uncertainty.
-    #   NO:  half Kelly (0.50) — 78% win rate (ema=bullish + p_market≤0.45 + no_score≥1)
-    #        Raised from 0.25 → 0.50 as the qualifying NO regime improved from 50% to 78%.
+    # Multipliers calibrated from paper trade analysis with EMA-Dir gate applied:
+    #   YES: half Kelly (0.50) — 63.5% win rate (ema=bearish + edge≥5%)
+    #   NO:  half Kelly (0.50) — 63% win rate (ema=bullish + no_score≥1 + edge≥5%)
     kelly_multiplier = 0.50
     kelly = compute_kelly_size(p_model, p_market, bankroll, kelly_multiplier, side=side)
     reasons.append(f"Sizing: {kelly.reason}")

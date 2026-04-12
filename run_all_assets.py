@@ -6,8 +6,14 @@ name so all three streams are readable in one terminal. Crashed subprocesses
 are automatically restarted after a 5-second delay.
 
 Usage:
+    # Paper only
     python3 run_all_assets.py
-    python3 run_all_assets.py --bankroll 1000
+
+    # Live with per-asset bankrolls and loss limits
+    python3 run_all_assets.py --live \
+        --btc-bankroll 250 --btc-loss-limit 50 \
+        --eth-bankroll 100 --eth-loss-limit 20 \
+        --sol-bankroll 100 --sol-loss-limit 20
 """
 
 import argparse
@@ -54,21 +60,38 @@ def run_asset(asset: str, extra_args: list) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run all asset paper traders simultaneously")
-    parser.add_argument("--bankroll", type=float, default=None,
-                        help="Bankroll to pass to each runner (default: runner default)")
+    parser = argparse.ArgumentParser(description="Run all asset traders simultaneously")
+    parser.add_argument("--live", action="store_true",
+                        help="Place real orders on Kalshi (default: paper only)")
+    parser.add_argument("--max-contracts", type=int, default=50)
+
+    # Per-asset bankroll and loss limit
+    parser.add_argument("--btc-bankroll",   type=float, default=250.0)
+    parser.add_argument("--btc-loss-limit", type=float, default=50.0)
+    parser.add_argument("--eth-bankroll",   type=float, default=100.0)
+    parser.add_argument("--eth-loss-limit", type=float, default=20.0)
+    parser.add_argument("--sol-bankroll",   type=float, default=100.0)
+    parser.add_argument("--sol-loss-limit", type=float, default=20.0)
     args = parser.parse_args()
 
-    extra_args = []
-    if args.bankroll is not None:
-        extra_args += ["--bankroll", str(args.bankroll)]
+    asset_args = {
+        "BTC": ["--bankroll", str(args.btc_bankroll), "--daily-loss-limit", str(args.btc_loss_limit)],
+        "ETH": ["--bankroll", str(args.eth_bankroll), "--daily-loss-limit", str(args.eth_loss_limit)],
+        "SOL": ["--bankroll", str(args.sol_bankroll), "--daily-loss-limit", str(args.sol_loss_limit)],
+    }
+    if args.live:
+        for a in ASSETS:
+            asset_args[a] += ["--live", "--max-contracts", str(args.max_contracts)]
 
-    print(f"  Starting paper traders for: {', '.join(ASSETS)}")
-    print(f"  Extra args: {extra_args or 'none'}\n")
+    mode = "LIVE" if args.live else "PAPER"
+    print(f"  Mode: {mode}")
+    for a in ASSETS:
+        print(f"  {a}: {' '.join(asset_args[a])}")
+    print()
 
     threads = []
     for i, asset in enumerate(ASSETS):
-        t = threading.Thread(target=run_asset, args=(asset, extra_args), daemon=True)
+        t = threading.Thread(target=run_asset, args=(asset, asset_args[asset]), daemon=True)
         t.start()
         threads.append(t)
         if i < len(ASSETS) - 1:

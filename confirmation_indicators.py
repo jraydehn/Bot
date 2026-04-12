@@ -158,7 +158,7 @@ def compute_vpin(hist_1m: pd.DataFrame) -> tuple:
         return float("nan"), 0
 
 
-def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_score: int = 0, momentum_enabled: bool = True, funding_bias: int = 0, avg_funding_rate: float = 0.0) -> ConfirmationResult:
+def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_score: int = 0, momentum_enabled: bool = True, funding_bias: int = 0, avg_funding_rate: float = 0.0, sharp_move_pct: float = 0.0, asset: str = "BTC") -> ConfirmationResult:
     """
     Compute EMA alignment, RSI regime, and volume confirmation from 1-hour bars.
 
@@ -458,13 +458,26 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
         except Exception:
             ema_stretch_score = 0
 
+    # --- Stoch bias effective value: flip during sharp directional moves ---
+    # In trending markets stochastic extremes signal continuation, not reversion.
+    # Sharp drop + oversold (stoch_bias=+1): flip to -1 (bearish continuation)
+    # Sharp rally + overbought (stoch_bias=-1): flip to +1 (bullish continuation)
+    _sharp_thresholds = {"BTC": 0.008, "ETH": 0.015, "SOL": 0.020}
+    _sharp_thresh = _sharp_thresholds.get(asset.upper(), 0.008)
+    _eff_stoch_bias = stoch.stoch_bias
+    if abs(sharp_move_pct) > _sharp_thresh:
+        if sharp_move_pct < 0 and stoch.stoch_bias > 0:   # oversold + sharp drop → bearish
+            _eff_stoch_bias = -stoch.stoch_bias
+        elif sharp_move_pct > 0 and stoch.stoch_bias < 0:  # overbought + sharp rally → bullish
+            _eff_stoch_bias = -stoch.stoch_bias
+
     # --- 4-indicator NO score (0–4, where higher = more bearish = better for NO) ---
     # Threshold: 2 of 4 bearish signals required for NO confirmation.
     no_score = 0
-    if obi_score        == -1: no_score += 1   # bearish order book pressure
-    if funding_bias     == -1: no_score += 1   # overcrowded longs → mean reversion down
-    if stoch.stoch_bias == -1: no_score += 1   # overbought or bearish stoch crossover
-    if vwap_signal      == -1: no_score += 1   # price at premium above VWAP
+    if obi_score         == -1: no_score += 1   # bearish order book pressure
+    if funding_bias      == -1: no_score += 1   # overcrowded longs → mean reversion down
+    if _eff_stoch_bias   == -1: no_score += 1   # overbought stoch or bearish continuation
+    if vwap_signal       == -1: no_score += 1   # price at premium above VWAP
 
     if no_score >= 2:
         no_bias = -1   # majority bearish → supports NO bet
@@ -476,10 +489,10 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
     # --- 4-indicator YES score (0–4, where higher = more bullish = better for YES) ---
     # Threshold: 2 of 4 bullish signals required for YES confirmation.
     confirmation_score = 0
-    if obi_score        == +1: confirmation_score += 1   # bullish order book pressure
-    if funding_bias     == +1: confirmation_score += 1   # overcrowded shorts → squeeze up
-    if stoch.stoch_bias == +1: confirmation_score += 1   # oversold or bullish stoch crossover
-    if vwap_signal      == +1: confirmation_score += 1   # price at discount below VWAP
+    if obi_score         == +1: confirmation_score += 1   # bullish order book pressure
+    if funding_bias      == +1: confirmation_score += 1   # overcrowded shorts → squeeze up
+    if _eff_stoch_bias   == +1: confirmation_score += 1   # oversold stoch or bullish continuation
+    if vwap_signal       == +1: confirmation_score += 1   # price at discount below VWAP
 
     if confirmation_score >= 2:
         confirmation_bias = +1

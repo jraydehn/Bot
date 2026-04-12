@@ -1,22 +1,24 @@
 """
-BTC Model Backtester — 2024-01-01 to present.
+Multi-asset model backtester — BTC, ETH, SOL.
 
 Walks through every hourly bar in historical OHLCV data and simulates trade
-decisions using the current model logic (Gate 0, Gate EMA-Dir, Gate PM, Gate 3,
-Gate R:R). Compares model predictions against actual BTC price outcomes.
+decisions using the current model logic. Compares model predictions against
+actual price outcomes to validate calibration and gate effectiveness.
 
 Key outputs:
   1. Model calibration: does p_model=X mean X% actual win rate?
-  2. EMA regime win rates: validates Gate EMA-Dir
-  3. Gate PM threshold analysis: optimises p_market cutoffs
+  2. EMA regime win rates (BTC only — Gate EMA-Dir)
+  3. Gate PM threshold analysis (BTC only)
   4. Offset sweep: which strike distance has the best edge?
-  5. Full P&L simulation with half-Kelly sizing
+  5. Gate contribution: what win% would each gate's blocked trades have had?
+  6. Full P&L simulation with half-Kelly sizing
 
 Usage:
-    python3 backtest_btc.py
-    python3 backtest_btc.py --start 2025-01-01    # shorter window
-    python3 backtest_btc.py --offset 0.005        # single offset
-    python3 backtest_btc.py --no-gates            # raw model, no filters
+    python3 backtest_btc.py                        # BTC default
+    python3 backtest_btc.py --asset ETH            # ETH analysis
+    python3 backtest_btc.py --asset ETH --start 2025-01-01
+    python3 backtest_btc.py --offset 0.005         # single offset
+    python3 backtest_btc.py --no-gates             # raw model, no filters
 """
 
 import argparse
@@ -37,13 +39,67 @@ from pricing_comparison import (
 DATA_DIR = Path(__file__).parent / "data"
 RESULTS_DIR = Path(__file__).parent / "results"
 
-# ── Strike offsets to sweep ────────────────────────────────────────────────
-OFFSETS = [0.002, 0.003, 0.005, 0.008, 0.010, 0.015]
+# ── Per-asset config ──────────────────────────────────────────────────────
+ASSET_CONFIG = {
+    "BTC": {
+        "symbol":       "BTCUSDT",
+        "offsets":      [0.002, 0.003, 0.005, 0.008, 0.010, 0.015],
+        "p_model_min":  0.04,
+        "p_model_max":  0.96,
+        "calibration":  0.65,   # p_model correction factor (backtest-derived)
+        # p_market midpoints: (yes_side, no_side) keyed by abs(offset) bucket
+        "pmarket_map": {
+            0.002: (0.30,  0.35),
+            0.003: (0.30,  0.35),
+            0.005: (0.225, 0.275),
+            0.008: (0.125, 0.18),
+            0.010: (0.125, 0.18),
+            0.015: (0.018, 0.030),
+        },
+    },
+    "SOL": {
+        "symbol":       "SOLUSDT",
+        "offsets":      [-0.005, -0.003, -0.002, 0.002, 0.003, 0.005, 0.008, 0.010],
+        "p_model_min":  0.02,
+        "p_model_max":  0.98,
+        "calibration":  1.0,
+        "pmarket_map":  {},
+    },
+    "ETH": {
+        "symbol":       "ETHUSDT",
+        # Includes negative (ITM) offsets — ETH now allows ITM like SOL
+        "offsets":      [-0.005, -0.003, -0.002, 0.002, 0.003, 0.005, 0.008, 0.010],
+        "p_model_min":  0.02,
+        "p_model_max":  0.98,
+        "calibration":  1.0,    # no correction applied yet — backtest will reveal bias
+        # ITM YES (negative offset): p_market is high (market prices near-certain YES)
+        # OTM YES (positive offset): same ballpark as BTC
+        "pmarket_map": {
+            0.005: (0.80,  0.22),   # ITM: YES priced ~0.80, NO mid ~0.22
+            0.003: (0.72,  0.30),
+            0.002: (0.65,  0.37),
+            0.002: (0.30,  0.35),   # OTM same bucket — handled by sign below
+            0.003: (0.30,  0.35),
+            0.005: (0.225, 0.275),
+            0.008: (0.125, 0.18),
+            0.010: (0.125, 0.18),
+        },
+    },
+}
 
-# ── Realistic deterministic p_market midpoints (from simulate_p_market ranges)
-#    Used for gate evaluation and PnL simulation.
-#    Keys are offset buckets; values are (p_yes_side, p_no_side).
-PMARKET_MAP = {
+# Separate ITM p_market map for ETH (negative offsets → strike below spot)
+ETH_ITM_PMARKET = {
+    # abs(offset) bucket: (p_yes_market, p_no_market)
+    # ITM YES: Kalshi prices 0.75-0.95 depending on depth
+    0.002: (0.65, 0.37),
+    0.003: (0.72, 0.30),
+    0.005: (0.80, 0.22),
+    0.008: (0.87, 0.15),
+    0.010: (0.91, 0.11),
+}
+
+# OTM p_market map shared across assets
+OTM_PMARKET_MAP = {
     0.002: (0.30,  0.35),
     0.003: (0.30,  0.35),
     0.005: (0.225, 0.275),
@@ -53,10 +109,8 @@ PMARKET_MAP = {
 }
 
 # Gate constants (must match decision.py)
-P_MODEL_MIN_BTC = 0.04
-P_MODEL_MAX_BTC = 0.96
-P_MARKET_YES_MIN = 0.55   # Gate PM: YES only when p_market >= this
-P_MARKET_NO_MAX  = 0.45   # Gate PM: NO only when p_market <= this
+P_MARKET_YES_MIN = 0.55   # Gate PM: YES only when p_market >= this (BTC only)
+P_MARKET_NO_MAX  = 0.45   # Gate PM: NO only when p_market <= this  (BTC only)
 MIN_NET_EDGE     = 0.03   # Gate 3: minimum net edge
 RR_MIN           = 0.33   # Gate R:R lower bound
 RR_MAX_NO        = 4.0    # Gate R:R upper bound for NO
@@ -70,10 +124,18 @@ EMA_CONFIRM_BARS = 3
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def nearest_offset_bucket(offset: float) -> float:
-    """Round to nearest key in PMARKET_MAP."""
-    keys = sorted(PMARKET_MAP.keys())
-    return min(keys, key=lambda k: abs(k - offset))
+def get_pmarket(offset: float, asset: str) -> tuple:
+    """Return (p_yes_market, p_no_market) for a given offset and asset."""
+    abs_offset = abs(offset)
+    if asset == "ETH" and offset < 0:
+        # ITM contract (strike below spot): use ITM map
+        keys = sorted(ETH_ITM_PMARKET.keys())
+        bucket = min(keys, key=lambda k: abs(k - abs_offset))
+        return ETH_ITM_PMARKET[bucket]
+    # OTM (positive offset) — shared map
+    keys = sorted(OTM_PMARKET_MAP.keys())
+    bucket = min(keys, key=lambda k: abs(k - abs_offset))
+    return OTM_PMARKET_MAP[bucket]
 
 
 def compute_ema_alignment(close: pd.Series) -> pd.Series:
@@ -114,37 +176,39 @@ def compute_ema_alignment(close: pd.Series) -> pd.Series:
     return pd.Series(alignments, index=close.index)
 
 
-def apply_gates_btc(
+def check_gates(
     p_model: float,
     p_market: float,
     ema_alignment: str,
     side: str,
+    asset: str,
 ) -> tuple[bool, str]:
     """
-    Apply current BTC gates in order. Returns (passed: bool, blocker: str).
-    blocker is the name of the gate that failed, or 'all' if all passed.
+    Apply gates for the given asset. Returns (passed: bool, blocker: str).
+    BTC: Gate 0, Gate EMA-Dir (bullish+YES only), Gate PM, Gate 3, Gate R:R
+    ETH/SOL: Gate 0, Gate 3, Gate R:R  (no EMA-Dir, no Gate PM)
     """
+    cfg = ASSET_CONFIG.get(asset, ASSET_CONFIG["BTC"])
+
     # Gate 0
-    if not (P_MODEL_MIN_BTC <= p_model <= P_MODEL_MAX_BTC):
+    if not (cfg["p_model_min"] <= p_model <= cfg["p_model_max"]):
         return False, "Gate0"
 
     fee = kalshi_fee(p_market)
     raw_edge = p_model - p_market if side == "yes" else p_market - p_model
     net_edge = raw_edge - fee - DEFAULT_SLIPPAGE - DEFAULT_SPREAD
 
-    # Gate EMA-Dir (BTC only)
-    if ema_alignment == "bullish" and side == "yes":
-        return False, "GateEMADir"
-    if ema_alignment == "bearish" and side == "no":
-        return False, "GateEMADir"
+    if asset == "BTC":
+        # Gate EMA-Dir: block bullish+YES only
+        if ema_alignment == "bullish" and side == "yes":
+            return False, "GateEMADir"
+        # Gate PM
+        if side == "yes" and p_market < P_MARKET_YES_MIN:
+            return False, "GatePM"
+        if side == "no" and p_market > P_MARKET_NO_MAX:
+            return False, "GatePM"
 
-    # Gate PM (BTC only)
-    if side == "yes" and p_market < P_MARKET_YES_MIN:
-        return False, "GatePM"
-    if side == "no" and p_market > P_MARKET_NO_MAX:
-        return False, "GatePM"
-
-    # Gate 3 (min net edge)
+    # Gate 3
     if net_edge < MIN_NET_EDGE:
         return False, "Gate3"
 
@@ -183,12 +247,15 @@ def run_backtest(
     offsets: list = None,
     apply_gates: bool = True,
     bankroll: float = 10_000,
+    asset: str = "BTC",
 ) -> pd.DataFrame:
     """
-    Run the backtest. Returns a DataFrame of all trade opportunities.
+    Run the backtest for the given asset. Returns a DataFrame of all trade opportunities.
     """
+    cfg = ASSET_CONFIG.get(asset, ASSET_CONFIG["BTC"])
+    symbol = cfg["symbol"]
     if offsets is None:
-        offsets = OFFSETS
+        offsets = cfg["offsets"]
 
     # ── Load data ────────────────────────────────────────────────────────
     def latest_parquet(pattern):
@@ -199,10 +266,10 @@ def run_backtest(
         matches = [m for m in matches if ".ckpt." not in m.name]
         return matches[-1] if matches else None
 
-    p_1m = latest_parquet("*BTCUSDT_1m_2024-01-01*.parquet")
-    p_1h = latest_parquet("*BTCUSDT_1h_2024-01-01*.parquet")
+    p_1m = latest_parquet(f"*{symbol}_1m_2024-01-01*.parquet")
+    p_1h = latest_parquet(f"*{symbol}_1h_2024-01-01*.parquet")
     if not p_1m or not p_1h:
-        raise FileNotFoundError("BTC 1m / 1h parquet files not found. Run fetch_data.py first.")
+        raise FileNotFoundError(f"{asset} 1m/1h parquet files not found. Run: python3 fetch_data.py --symbol {symbol} --start 2024-01-01")
 
     print(f"  Loading 1m  : {p_1m.name}")
     print(f"  Loading 1h  : {p_1h.name}")
@@ -264,19 +331,22 @@ def run_backtest(
         for offset in offsets:
             strike = spot * (1 + offset)
 
-            # p_model: probability BTC ends above strike in 60 minutes
+            # p_model: probability asset ends above strike in 60 minutes
             try:
                 prob = estimate_probability(spot, strike, TAU, vol_60m)
-                p_model = prob.p_yes
+                p_model_raw = prob.p_yes
             except Exception:
                 continue
 
-            # Actual outcome: did BTC close above strike one hour later?
+            # Apply asset-specific calibration correction
+            p_model = p_model_raw * cfg["calibration"]
+            p_model = max(0.001, min(0.999, p_model))
+
+            # Actual outcome: did asset close above strike one hour later?
             outcome = int(next_close > strike)  # 1 = YES resolved
 
             # Get simulated p_market for each side
-            bucket = nearest_offset_bucket(offset)
-            pm_yes, pm_no = PMARKET_MAP[bucket]
+            pm_yes, pm_no = get_pmarket(offset, asset)
 
             for side, p_market in [("yes", pm_yes), ("no", pm_no)]:
                 fee = kalshi_fee(p_market)
@@ -284,7 +354,7 @@ def run_backtest(
                 net_edge = raw_edge - fee - DEFAULT_SLIPPAGE - DEFAULT_SPREAD
 
                 # Apply gates
-                gate_passed, blocker = apply_gates_btc(p_model, p_market, ema_alignment, side)
+                gate_passed, blocker = check_gates(p_model, p_market, ema_alignment, side, asset)
 
                 # Win condition for this side
                 win = outcome if side == "yes" else (1 - outcome)
@@ -414,16 +484,20 @@ def pmarket_threshold_table(df: pd.DataFrame):
             print(f"  {lbl:<12}  {int(row['n']):>6}  {row['win_pct']:>6.1%}  {tag}")
 
 
-def gate_funnel_table(df: pd.DataFrame):
+def gate_funnel_table(df: pd.DataFrame, asset: str = "BTC"):
     """How many trades each gate passes/blocks and the win rate at each stage."""
     print_separator("GATE FUNNEL (volume and win rate at each stage)")
+    cfg = ASSET_CONFIG.get(asset, ASSET_CONFIG["BTC"])
+    p_min, p_max = cfg["p_model_min"], cfg["p_model_max"]
 
-    sub = df[df["offset"] == 0.005].copy()
-    total = len(sub) // 2  # YES+NO pairs counted once each
+    ref_offset = 0.005
+    sub = df[df["offset"] == ref_offset].copy()
+    if sub.empty:
+        sub = df[df["offset"] == df["offset"].abs().unique()[0]].copy()
 
     stages = [
         ("All signals",    sub),
-        ("Gate0",         sub[~((sub["p_model"] < P_MODEL_MIN_BTC) | (sub["p_model"] > P_MODEL_MAX_BTC))]),
+        ("Gate0",         sub[~((sub["p_model"] < p_min) | (sub["p_model"] > p_max))]),
         ("GateEMADir",    sub[~(((sub["ema_alignment"] == "bullish") & (sub["side"] == "yes")) |
                                ((sub["ema_alignment"] == "bearish") & (sub["side"] == "no")))]),
         ("GatePM",        sub[((sub["side"] == "yes") & (sub["p_market"] >= P_MARKET_YES_MIN)) |
@@ -508,14 +582,18 @@ def pnl_summary(df: pd.DataFrame, bankroll: float):
     print(f"\n  Trade log saved → {out.name}")
 
 
-def gate_contribution_table(df: pd.DataFrame):
+def gate_contribution_table(df: pd.DataFrame, asset: str = "BTC"):
     """For each gate, show what win rate the blocked trades would have had."""
     print_separator("GATE CONTRIBUTION (what win% would blocked trades have had?)")
+    cfg = ASSET_CONFIG.get(asset, ASSET_CONFIG["BTC"])
+    p_min, p_max = cfg["p_model_min"], cfg["p_model_max"]
 
     sub = df[df["offset"] == 0.005].copy()
+    if sub.empty:
+        sub = df.copy()
 
     # Build incremental blocks
-    g0_blocked  = sub[(sub["p_model"] < P_MODEL_MIN_BTC) | (sub["p_model"] > P_MODEL_MAX_BTC)]
+    g0_blocked  = sub[(sub["p_model"] < p_min) | (sub["p_model"] > p_max)]
     ema_blocked = sub[((sub["ema_alignment"] == "bullish") & (sub["side"] == "yes")) |
                       ((sub["ema_alignment"] == "bearish") & (sub["side"] == "no"))]
     pm_blocked  = sub[((sub["side"] == "yes") & (sub["p_market"] < P_MARKET_YES_MIN)) |
@@ -545,7 +623,9 @@ def gate_contribution_table(df: pd.DataFrame):
 # ── Entry point ────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="BTC model backtester")
+    parser = argparse.ArgumentParser(description="Multi-asset model backtester")
+    parser.add_argument("--asset",     default="BTC", choices=["BTC", "ETH", "SOL"],
+                        help="Asset to backtest (default: BTC)")
     parser.add_argument("--start",     default="2024-01-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--offset",    type=float, default=None,
                         help="Single offset to test (e.g. 0.005). Default: sweep all.")
@@ -553,20 +633,24 @@ def main():
     parser.add_argument("--bankroll",  type=float, default=10_000)
     args = parser.parse_args()
 
-    offsets = [args.offset] if args.offset else OFFSETS
+    asset   = args.asset.upper()
+    cfg     = ASSET_CONFIG.get(asset, ASSET_CONFIG["BTC"])
+    offsets = [args.offset] if args.offset else cfg["offsets"]
     apply   = not args.no_gates
 
     print("=" * 64)
-    print("  BTC MODEL BACKTEST")
+    print(f"  {asset} MODEL BACKTEST")
     print("=" * 64)
+    print(f"  Asset       : {asset}")
     print(f"  Start date  : {args.start}")
-    print(f"  Offsets     : {[f'{o:.1%}' for o in offsets]}")
+    print(f"  Offsets     : {[f'{o:+.1%}' for o in offsets]}")
     print(f"  Gates       : {'ON' if apply else 'OFF (raw model)'}")
+    print(f"  Calibration : {cfg['calibration']}×")
     print(f"  Bankroll    : ${args.bankroll:,.0f}")
     print()
 
     df = run_backtest(start_date=args.start, offsets=offsets,
-                      apply_gates=apply, bankroll=args.bankroll)
+                      apply_gates=apply, bankroll=args.bankroll, asset=asset)
 
     if df.empty:
         print("  No data generated.")
@@ -575,8 +659,8 @@ def main():
     calibration_table(df)
     ema_regime_table(df)
     pmarket_threshold_table(df)
-    gate_contribution_table(df)
-    gate_funnel_table(df)
+    gate_contribution_table(df, asset)
+    gate_funnel_table(df, asset)
     offset_sweep_table(df, apply)
     pnl_summary(df, args.bankroll)
 

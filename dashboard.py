@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 RESULTS_DIR     = Path(__file__).parent / "results"
 REFRESH_SECONDS = 60
-DISPLAY_FROM    = "2026-03-29 20:15:00"   # hide BTC trades before this UTC time
+DISPLAY_FROM    = "2026-04-11 05:31:00"   # hide trades before this UTC time (dashboard cleared Apr 10 10:31 PM PDT)
 
 ASSET_CSV = {
     "BTC": RESULTS_DIR / "paper_trades.csv",
@@ -152,6 +152,8 @@ def _fmt(val, fmt, fallback="—"):
 # ---------------------------------------------------------------------------
 
 INDICATORS = [
+    ("composite_trend",   "Composite Trend Score (4h)"),
+    ("composite_rev",     "Composite Reversion Score (1h/15m)"),
     ("obi_score",         "OBI Score"),
     ("vpin_score",        "VPIN Score"),
     ("funding_bias",      "Funding Rate Bias"),
@@ -274,12 +276,9 @@ def render_asset(asset: str):
         st.markdown("<p style='color:#666;text-align:center;padding:30px 0;'>No trades logged yet.</p>", unsafe_allow_html=True)
         return
 
-    # Apply display cutoff for BTC only
-    if asset == "BTC":
-        cutoff = pd.Timestamp(DISPLAY_FROM, tz="UTC").tz_convert("America/Los_Angeles")
-        df = df_all[df_all["logged_at"] >= cutoff].copy()
-    else:
-        df = df_all.copy()
+    # Apply display cutoff for all assets
+    cutoff = pd.Timestamp(DISPLAY_FROM, tz="UTC").tz_convert("America/Los_Angeles")
+    df = df_all[df_all["logged_at"] >= cutoff].copy()
 
     if df.empty:
         st.markdown("<p style='color:#666;text-align:center;padding:30px 0;'>No trades in display window.</p>", unsafe_allow_html=True)
@@ -326,6 +325,19 @@ def render_asset(asset: str):
     ls4.metric("p_market",  _fmt(latest.get("p_market"),    "{:.3f}"))
     ls5.metric("Net edge",  _fmt(latest.get("net_edge"),    "{:+.3f}"))
     ls6.metric("Bet",       _fmt(latest.get("bet_amount"),  "${:,.0f}"))
+
+    # Composite scorer row (all assets)
+    if asset in ("BTC", "ETH", "SOL") and "composite_trend" in df.columns:
+        cs1, cs2, cs3, cs4 = st.columns(4)
+        comp_trend = latest.get("composite_trend", "—")
+        comp_rev   = latest.get("composite_rev",   "—")
+        comp_p_up  = latest.get("composite_p_up",  "—")
+        cs1.metric("Composite Trend",    _fmt(comp_trend, "{:+.0f}"))
+        cs2.metric("Composite Rev",      _fmt(comp_rev,   "{:+.0f}"))
+        cs3.metric("Composite p_up",     _fmt(comp_p_up, "{:.1%}"))
+        _p_up_v = _f(comp_p_up)
+        _edge_vs_base = _p_up_v - 0.504 if _p_up_v == _p_up_v else float("nan")
+        cs4.metric("vs Baseline",        f"{_edge_vs_base:+.1%}" if _edge_vs_base == _edge_vs_base else "—")
 
     lb1, lb2, lb3, lb4 = st.columns(4)
     lb1.metric("Spot",              _fmt(latest.get("spot"),   "${:,.2f}"))
@@ -376,6 +388,7 @@ def render_asset(asset: str):
         display_cols = [
             "logged_at", "contract_ticker", "side", "spot", "strike",
             "tau_minutes", "p_yes_model", "p_market", "net_edge",
+            "composite_trend", "composite_rev", "composite_p_up",
             "structure_bias", "confirmation_score", "no_score", "obi_score", "vpin_score", "funding_bias",
             "stoch_bias", "stoch_k", "stoch_d", "stoch_crossover_active",
             "ema_stack_bias",
@@ -395,6 +408,7 @@ def render_asset(asset: str):
 
         for _nc in ["spot", "strike", "tau_minutes", "p_yes_model", "p_market",
                     "net_edge", "bet_amount", "would_pnl",
+                    "composite_trend", "composite_rev", "composite_p_up",
                     "structure_bias", "confirmation_score", "no_score", "obi_score", "vpin_score", "funding_bias",
                     "stoch_bias", "stoch_k", "stoch_d",
                     "ema_stack_bias",
@@ -413,6 +427,9 @@ def render_asset(asset: str):
             "p_yes_model":       "p_model",
             "p_market":          "p_market",
             "net_edge":          "Net Edge",
+            "composite_trend":   "Trend",
+            "composite_rev":     "Rev",
+            "composite_p_up":    "p_up",
             "structure_bias":    "Struct",
             "confirmation_score":"Conf",
             "no_score":          "NO Score",
@@ -463,7 +480,7 @@ def render_asset(asset: str):
                 pass
             return "color: #888"
 
-        score_cols = [c for c in ["Struct", "Conf", "NO Score", "OBI", "VPIN", "Funding", "Stoch", "EMA Stack", "VWAP", "VWAP Sig", "VWAP Tot", "VWAP Str"] if c in trade_rows.columns]
+        score_cols = [c for c in ["Trend", "Rev", "Struct", "Conf", "NO Score", "OBI", "VPIN", "Funding", "Stoch", "EMA Stack", "VWAP", "VWAP Sig", "VWAP Tot", "VWAP Str"] if c in trade_rows.columns]
 
         styled = (
             trade_rows.style
@@ -477,6 +494,7 @@ def render_asset(asset: str):
                 "p_model":  "{:.3f}",
                 "p_market": "{:.3f}",
                 "Net Edge": "{:+.3f}",
+                "p_up":     "{:.1%}",
                 "Bet ($)":  "${:,.0f}",
                 "P&L ($)":  "${:,.2f}",
                 "τ (min)":  "{:.0f}",
@@ -575,9 +593,8 @@ with tab_cmp:
             if df_a.empty:
                 st.markdown("<p style='color:#555;font-size:0.8rem;'>No data yet.</p>", unsafe_allow_html=True)
                 continue
-            if asset == "BTC":
-                cutoff = pd.Timestamp(DISPLAY_FROM, tz="UTC").tz_convert("America/Los_Angeles")
-                df_a = df_a[df_a["logged_at"] >= cutoff]
+            cutoff = pd.Timestamp(DISPLAY_FROM, tz="UTC").tz_convert("America/Los_Angeles")
+            df_a = df_a[df_a["logged_at"] >= cutoff]
             trades_a   = df_a[(df_a["decision"] == "trade") & (df_a["contract_ticker"].fillna("").str.strip() != "")]
             resolved_a = trades_a.dropna(subset=["would_win"]).copy()
             if not resolved_a.empty:

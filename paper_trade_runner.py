@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import csv
+import math
 import os
 import sys
 import time
@@ -38,7 +39,11 @@ from decision import evaluate_trade
 from funding_rate import fetch_funding_rate, FundingRateResult
 import outcome_checker
 import update_data
+import live_trading
 from kelly_sizing import compute_kelly_size
+from composite_scorer import compute_current_scores, score_to_p_model, composite_to_confirmation, lookup_p_up
+from vol_layer import compute_vol_regime_factor
+from direction_layer import compute_direction_score, side_from_direction
 from live_signal import (
     load_auth, kalshi_get, fetch_live_spot, fetch_current_price, find_live_contract,
     fetch_contracts_for_nearest_expiry, fetch_recent_1m_candles, minutes_to_expiry,
@@ -47,16 +52,33 @@ from live_signal import (
 
 PAPER_TRADES_CSV = Path(__file__).parent / "results" / "paper_trades.csv"
 
+# Trades logged before this UTC timestamp are ignored for session/expiry tracking.
+# Update this when the model is reset to avoid old trades blocking new ones.
+# Matches DISPLAY_FROM in dashboard.py.
+TRADES_FROM = "2026-04-11 05:31:00"
+
 # Funding rate cache — funding updates every 8 hours so re-fetching once per
 # minute is wasteful. Cache the result for 5 minutes (300 seconds).
 _funding_cache: "FundingRateResult | None" = None
 _funding_cache_ts: float = 0.0
 _FUNDING_CACHE_TTL = 300  # seconds
 
-# In-memory set of tickers traded this process run — resets on restart.
-# Prevents re-trading the same contract within a session without blocking
-# re-evaluation after a restart.
-_SESSION_TRADED: set = set()
+# In-memory dict of tickers traded this process run: {ticker: net_edge_at_trade}.
+# Tickers traded this session: {ticker: net_edge}. Hard-blocks re-entry.
+# Seeded once from CSV at startup to survive restarts, then cleared each hour.
+_SESSION_TRADED: dict = {}
+_SESSION_SEEDED: bool = False  # ensures CSV seed only runs once per process
+_SIDE_COOLDOWN: dict = {}  # {(expiry_key, side): datetime} — last trade time per expiry+direction
+
+
+def _expiry_prefix(ticker: str) -> str:
+    """Extract the expiry portion of a contract ticker.
+
+    e.g. 'KXETHD-26APR0701-T2119.99' → 'KXETHD-26APR0701'
+    Used as a consistent key for per-expiry trade counting across live and paper runners.
+    """
+    parts = ticker.rsplit("-T", 1)
+    return parts[0] if len(parts) == 2 else ticker
 
 
 def get_csv_path(asset: str = "BTC") -> Path:
@@ -126,6 +148,12 @@ CSV_COLUMNS = [
     "bet_fraction",
     "bet_amount",
     "bankroll",
+    "composite_trend",  # trend score from composite_scorer (-6 to +6)
+    "composite_rev",    # reversion score from composite_scorer (-15 to +15)
+    "composite_p_up",   # calibrated directional probability from composite scorer
+    "chg_30m",          # 30-minute price change (%) at scan time
+    "sharp_move_active",# True if |chg_30m| exceeded sharp-move threshold (NO preferred)
+    "stoch_flipped",    # True if stoch votes were flipped (sharp move + stoch extreme)
     "resolved_yes",   # filled by outcome_checker.py
     "would_win",      # filled by outcome_checker.py
     "would_pnl",      # filled by outcome_checker.py
@@ -172,19 +200,44 @@ def main() -> None:
     parser.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL)
     parser.add_argument("--sim", action="store_true",
                         help="Use simulated p_market (no auth needed)")
-    parser.add_argument("--asset", type=str, default="BTC",
-                        help="Asset to trade: BTC, ETH, or SOL (default: BTC)")
+    parser.add_argument("--asset", type=str, default=None, required=True,
+                        help="Asset to trade: BTC, ETH, or SOL (required)")
+    parser.add_argument("--live", action="store_true",
+                        help="Place real orders on Kalshi (default: paper-trade only)")
+    parser.add_argument("--daily-loss-limit", type=float, default=100.0,
+                        help="Max dollars to lose live per calendar day before halting (default: 100)")
+    parser.add_argument("--max-contracts", type=int, default=20,
+                        help="Hard cap on contracts per live order (default: 20)")
     args = parser.parse_args()
     args.asset = args.asset.upper()
 
     now_utc = datetime.now(timezone.utc)
     print(f"\n  Run time (UTC): {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
 
+    # --- US-session volatility filter (all assets) ---
+    # Live PnL analysis (n=61 trades, 2026-04-07) shows 0% win rate during US market
+    # open (13-15 UTC = 9-11 AM EST) and US afternoon (17-19 UTC = 1-3 PM EST).
+    # All assets trend rather than range during these windows — extended to ETH/SOL
+    # after ETH took a losing trade at 13:36 UTC on 2026-04-07.
+    # Revert: copy paper_trade_runner_v1.py → paper_trade_runner.py
+    SKIP_HOURS = {14, 18}  # 14:00-14:59 and 18:00-18:59 UTC (US open + afternoon peak)
+    if now_utc.hour in SKIP_HOURS:
+        if getattr(args, 'live', False):
+            print(f"  [vol-filter] LIVE skipping — UTC hour {now_utc.hour} is in high-volatility window (14, 18 UTC).")
+            return
+        print(f"  [vol-filter] PAPER continuing — collecting data in high-volatility window (14, 18 UTC).")
+
+    if args.live:
+        print(f"  *** LIVE MODE *** daily_loss_limit=${args.daily_loss_limit:.0f}  max_contracts={args.max_contracts}")
+
     # Auth
     auth = None
     if not args.sim:
         auth = load_auth()
         if auth is None:
+            if args.live:
+                print("  ERROR: --live requires Kalshi credentials. Set KALSHI_KEY_ID / KALSHI_KEY_PATH.")
+                return
             print("  WARNING: No Kalshi credentials — using simulated p_market.")
 
     # Load OHLCV
@@ -210,9 +263,32 @@ def main() -> None:
     hist_struct  = df_struct.iloc[-120:]
 
     # Fetch fresh 1m candles for realized vol
-    live_1m = fetch_recent_1m_candles(lookback_bars=max(vol_bars * 2, 800), asset=args.asset)
+    # BTC needs 1700 bars: 1440 (σ_kalshi window) + 120 (lag) + buffer for Gate VR
+    _1m_lookback = 1700 if args.asset == "BTC" else max(vol_bars * 2, 800)
+    live_1m = fetch_recent_1m_candles(lookback_bars=_1m_lookback, asset=args.asset)
     vol_src = live_1m if live_1m is not None and len(live_1m) >= vol_bars else df_vol.iloc[-200:]
     vol     = compute_realized_volatility(vol_src)
+
+    # --- Gate VR (BTC only): vol_ratio = σ_model / σ_kalshi > 1.20 → skip scan ---
+    # σ_model  = 60-bar rolling std of 1m log returns (current realized vol)
+    # σ_kalshi = 1440-bar rolling std of 1m log returns, lagged 120 bars
+    #            (simulates Kalshi's 24h implied vol with ~2h delayed update)
+    # When σ_model > σ_kalshi, current vol has spiked above Kalshi's estimate.
+    # In this regime: NO bets are not cheap; edge flips against us.
+    # Out-of-sample backtest (Jan 2025–Apr 2026):
+    #   vol_ratio < 1.20 → 89.8% win rate, +$26,212   (16/16 months profitable)
+    #   vol_ratio > 1.20 → 22.9% win rate, -$15,420   (5/16 months profitable)
+    if args.asset == "BTC" and live_1m is not None and len(live_1m) >= 1600:
+        import numpy as _np
+        _closes = live_1m["close"].values.astype(float)
+        _lr = pd.Series(_np.diff(_np.log(_np.maximum(_closes, 1e-8)), prepend=0.0))
+        _sig_m = float(_lr.rolling(60).std().iloc[-1])
+        _sig_k = float(_lr.rolling(1440).std().iloc[-121])  # 120-bar lag
+        _vr = _sig_m / _sig_k if _sig_k > 0 else 0.0
+        print(f"  [Gate VR] BTC vol_ratio={_vr:.3f} (σ_model/σ_kalshi, threshold=1.20)")
+        if _vr > 1.20:
+            print(f"  [Gate VR] BLOCKED — current vol > Kalshi's lagged vol. Edge flipped. Skipping BTC scan.")
+            return
     struct  = detect_market_structure(hist_struct)
     obi     = fetch_order_book_imbalance(asset=args.asset)
     print(f"  OBI: {obi.obi:+.4f}  score={obi.obi_score:+d}  exchanges={obi.exchanges_used}")
@@ -233,20 +309,89 @@ def main() -> None:
     funding = _funding_cache
     print(f"  Funding: {funding.avg_funding_rate*100:+.4f}%/8h  bias={funding.funding_bias:+d}  ({', '.join(funding.exchanges_used) or 'none'})")
 
+    # --- Sharp move detection: 30m price change from live_1m ---
+    # Used to flip stochastic from mean-reversion to continuation during trending moves.
+    _sharp_move_pct = 0.0
+    if live_1m is not None and len(live_1m) >= 31:
+        _sm_close = live_1m["close"].astype(float)
+        _sharp_move_pct = float(_sm_close.iloc[-1] / _sm_close.iloc[-31] - 1)
+    print(f"  [sharp_move] 30m_chg={_sharp_move_pct*100:+.3f}%  (stoch flip threshold: BTC=0.8%, ETH=1.5%, SOL=2.0%)")
+
     confirm = compute_confirmation(hist_confirm, hist_1m=live_1m, obi_score=obi.obi_score, momentum_enabled=False,
-                                   funding_bias=funding.funding_bias, avg_funding_rate=funding.avg_funding_rate)
+                                   funding_bias=funding.funding_bias, avg_funding_rate=funding.avg_funding_rate,
+                                   sharp_move_pct=_sharp_move_pct, asset=args.asset)
+
+    # --- Composite directional scores (logged to CSV for historical continuity) ---
+    _comp_trend, _comp_rev = 0, 0
+    _asset_baseline = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}.get(args.asset, 0.504)
+    _comp_p_up = _asset_baseline
+    _df_4h_comp = None
+    _df_15m_comp = None
+    if live_1m is not None and len(live_1m) >= 400:
+        try:
+            _df_4h_comp = df_confirm.resample("4h", origin="start_day").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+            ).dropna(subset=["close"])
+            _df_15m_comp = live_1m.resample("15min", origin="start_day").agg(
+                {"high": "max", "low": "min", "close": "last", "volume": "sum"}
+            ).dropna(subset=["close"])
+            _comp_trend, _comp_rev = compute_current_scores(
+                df_confirm, _df_4h_comp, _df_15m_comp,
+                live_1m["close"].astype(float), live_1m["volume"].astype(float),
+            )
+            _comp_p_up = lookup_p_up(_comp_trend, _comp_rev, asset=args.asset)
+            print(f"  [composite] trend={_comp_trend:+d}  rev={_comp_rev:+d}  p_up={_comp_p_up:.1%}")
+        except Exception as _exc:
+            print(f"  [composite] Score error: {_exc}")
+
+    # --- Vol regime layer: adjusts blended sigma before estimate_probability ---
+    _vol_factor = 1.0
+    if live_1m is not None and len(live_1m) >= 400:
+        try:
+            _vol_factor, _vol_score_dir, _vol_details = compute_vol_regime_factor(df_confirm, live_1m, asset=args.asset)
+            print(f"  [vol_layer] score={_vol_score_dir:+d}  factor={_vol_factor:.3f}  {_vol_details.get('votes', {})}")
+        except Exception as _exc:
+            print(f"  [vol_layer] Error: {_exc} — using factor=1.0")
+
+    # --- Direction layer: sets side (YES/NO) from validated OHLCV signals ---
+    _dir_label = "neutral"
+    _dir_score = 0
+    _dir_trend = 0
+    _dir_rev = 0
+    _stoch_flipped = False
+    if live_1m is not None and len(live_1m) >= 400 and _df_4h_comp is not None and _df_15m_comp is not None:
+        try:
+            _dir_trend, _dir_rev, _dir_score, _dir_label, _dir_details = compute_direction_score(
+                df_confirm, _df_4h_comp, _df_15m_comp, live_1m, asset=args.asset,
+                sharp_move_pct=_sharp_move_pct,
+            )
+            _stoch_flipped = _dir_details.get("stoch_flipped", False)
+            print(f"  [direction] trend={_dir_trend:+d}  rev={_dir_rev:+d}  score={_dir_score:+d}  label={_dir_label}"
+                  + (f"  [stoch FLIPPED — sharp {_sharp_move_pct*100:+.2f}%]" if _stoch_flipped else ""))
+        except Exception as _exc:
+            print(f"  [direction] Error: {_exc} — defaulting to neutral")
 
     # --- Funding rate probability adjustment ---
-    # Nudge p_yes_model ±2.5% based on funding bias before edge calculation.
+    # Nudge p_yes_model ±1.5% based on funding bias before edge calculation.
     # Bullish funding (overcrowded shorts → squeeze): p_yes up → YES edge grows.
     # Bearish funding (overcrowded longs → unwind): p_yes down → NO edge grows.
     # Applied symmetrically — does not hardcode a directional preference.
-    FUNDING_P_YES_DELTA = 0.025
+    FUNDING_P_YES_DELTA = 0.015
     funding_delta = FUNDING_P_YES_DELTA * funding.funding_bias
     if funding_delta != 0:
         print(f"  Funding adj: p_yes {'+' if funding_delta > 0 else ''}{funding_delta:.3f} (bias={funding.funding_bias:+d})")
 
     gate_side = "yes" if struct.structure_bias == 1 else "no"
+
+    # --- Sharp move detection: prefer NO when price has moved drastically ---
+    # Data (n=31): during sharp moves (high vol + large VWAP displacement), YES bets
+    # lose at 15% win rate regardless of direction. NO bets win at 83%.
+    # Thresholds match direction_layer._SHARP_MOVE_THRESHOLDS (abs — fires both directions).
+    _SHARP_NO_PREF_THRESHOLDS = {"BTC": 0.008, "ETH": 0.015, "SOL": 0.020}
+    _sharp_no_pref_thresh = _SHARP_NO_PREF_THRESHOLDS.get(args.asset, 0.010)
+    _sharp_move_active = abs(_sharp_move_pct) > _sharp_no_pref_thresh
+    if _sharp_move_active:
+        print(f"  [sharp_move] ACTIVE — 30m_chg={_sharp_move_pct*100:+.2f}% exceeds {_sharp_no_pref_thresh*100:.1f}% threshold. Preferring NO bets.")
 
     # Scan all contracts for nearest expiry; select highest net_edge trade.
     # Falls back to simulated p_market on nearest OTM contract when no auth.
@@ -256,10 +401,16 @@ def main() -> None:
     close_ts          = ""
     strike            = spot * 1.005   # fallback
 
-    best_trade_dec    = None           # best DecisionResult with decision=="trade"
-    best_trade_meta   = {}             # {strike, p_market, prob, contract_ticker, close_ts}
+    best_trade_dec    = None           # final winner between best YES and best NO
+    best_trade_meta   = {}
+    best_yes_dec      = None           # best qualifying YES trade (closest to spot)
+    best_yes_meta     = {}
+    best_no_dec       = None           # best qualifying NO trade (closest to spot)
+    best_no_meta      = {}
     best_any_dec      = None           # best DecisionResult across all contracts (for no_trade log)
     best_any_meta     = {}
+    best_no_trade_dec = None           # best no_trade-only result (safe fallback when trade is cooldown-blocked)
+    best_no_trade_meta = {}
 
     if auth is not None:
         ladder = fetch_contracts_for_nearest_expiry(auth, spot, asset=args.asset)
@@ -268,6 +419,14 @@ def main() -> None:
 
         # Load already-traded tickers and strike positions per expiry to prevent conflicting bets
         csv_path_check = get_csv_path(args.asset)
+        # Live runner tracks its own positions from live_trades.csv to avoid being
+        # blocked by paper-only trades. Paper runner uses paper_trades.csv as before.
+        if hasattr(args, 'live') and args.live:
+            expiry_source_path = live_trading.get_live_csv_path(args.asset)
+            expiry_source_is_live = True
+        else:
+            expiry_source_path = csv_path_check
+            expiry_source_is_live = False
         already_traded = _SESSION_TRADED  # always use session set; CSV failure cannot bypass it
         already_traded_expiries = {}  # {close_ts: {"yes": [strikes], "no": [strikes]}}
         if csv_path_check.exists():
@@ -279,49 +438,180 @@ def main() -> None:
                 traded_rows_all = traded_rows_all[
                     pd.to_datetime(traded_rows_all["close_ts"], utc=True) > pd.Timestamp(now_utc)
                 ]
-                for _, r in traded_rows_all[["close_ts", "side", "strike"]].dropna().iterrows():
-                    bucket = already_traded_expiries.setdefault(r["close_ts"], {"yes": [], "no": []})
-                    bucket[r["side"]].append(float(r["strike"]))
+                # Ignore trades logged before TRADES_FROM cutoff (model reset boundary)
+                traded_rows_all = traded_rows_all[
+                    pd.to_datetime(traded_rows_all["logged_at"], utc=True) >= pd.Timestamp(TRADES_FROM, tz="UTC")
+                ]
+                # Build expiry counts from the runner-specific source
+                if expiry_source_is_live and expiry_source_path.exists():
+                    try:
+                        df_live_exp = pd.read_csv(expiry_source_path)
+                        df_live_exp = df_live_exp[
+                            pd.to_datetime(df_live_exp["logged_at"], utc=True) > pd.Timestamp(now_utc) - pd.Timedelta(hours=2)
+                        ]
+                        for _, r in df_live_exp[["contract_ticker", "side"]].dropna().iterrows():
+                            key = _expiry_prefix(str(r["contract_ticker"]))
+                            bucket = already_traded_expiries.setdefault(key, {"yes": [], "no": []})
+                            bucket[r["side"]].append(0.0)
+                    except Exception:
+                        pass
+                else:
+                    for _, r in traded_rows_all[["contract_ticker", "side", "strike", "logged_at"]].dropna().iterrows():
+                        key = _expiry_prefix(str(r["contract_ticker"]))
+                        bucket = already_traded_expiries.setdefault(key, {"yes": [], "no": []})
+                        bucket[r["side"]].append(float(r["strike"]))
+                # Sync _SESSION_TRADED from CSV every cycle using the 2-hour window.
+                # Running every cycle (not just once at startup) prevents re-entry after
+                # restarts, concurrent processes, or when a prior scan produced no_trade
+                # for a contract that later qualifies as trade in the next scan.
+                # Live runner syncs from live_trades.csv only to avoid being blocked by
+                # paper-only trades.
+                try:
+                    if hasattr(args, 'live') and args.live:
+                        seed_path = live_trading.get_live_csv_path(args.asset)
+                        if seed_path.exists():
+                            df_live = pd.read_csv(seed_path)
+                            df_live = df_live[
+                                pd.to_datetime(df_live["logged_at"], utc=True) >
+                                pd.Timestamp(now_utc) - pd.Timedelta(hours=2)
+                            ]
+                            for ticker in df_live["contract_ticker"].dropna().unique():
+                                if ticker not in _SESSION_TRADED:
+                                    _SESSION_TRADED[ticker] = 0.0
+                    else:
+                        for ticker in traded_rows_all["contract_ticker"].dropna().unique():
+                            if ticker not in _SESSION_TRADED:
+                                _SESSION_TRADED[ticker] = 0.0
+                except Exception:
+                    pass
+                # Seed _SIDE_COOLDOWN from recent trades so restarts preserve cooldown state.
+                # Also runs every cycle so concurrent processes share cooldown awareness.
+                global _SESSION_SEEDED
+                if not _SESSION_SEEDED:
+                    try:
+                        _cooldown_window = pd.Timestamp(now_utc) - pd.Timedelta(seconds=600)
+                        for _, r in traded_rows_all[["contract_ticker", "side", "logged_at"]].dropna().iterrows():
+                            _ts = pd.to_datetime(r["logged_at"], utc=True)
+                            if _ts >= _cooldown_window:
+                                _key = (_expiry_prefix(str(r["contract_ticker"])), r["side"])
+                                if _key not in _SIDE_COOLDOWN or _ts > pd.Timestamp(_SIDE_COOLDOWN[_key]):
+                                    _SIDE_COOLDOWN[_key] = _ts.to_pydatetime()
+                        if _SIDE_COOLDOWN:
+                            print(f"  [session] Seeded {len(_SIDE_COOLDOWN)} cooldown entries from CSV")
+                    except Exception:
+                        pass
+                    _SESSION_SEEDED = True
+                    if _SESSION_TRADED:
+                        print(f"  [session] Seeded {len(_SESSION_TRADED)} open tickers from CSV")
             except Exception:
                 pass
 
         for c in ladder:
-            if c["ticker"] in already_traded:
-                print(f"  [scan] Skipping {c['ticker']} — already traded this ticker")
-                continue
             s_k       = c["floor_strike"]
             pm        = c["p_market"]
-            if abs(s_k / spot - 1) > 0.01:
+            _offset_limit = 0.01 if args.asset == "BTC" else 0.03
+            if abs(s_k / spot - 1) > _offset_limit:
                 continue
-            # BTC+ETH: skip contracts where asset is already above the strike (offset <= 0).
-            # BTC ITM NO bets win only 12% historically; ITM YES caught by Gate 0.
-            # ETH: no validated ITM edge — force OTM evaluation where edge exists.
+            # BTC: skip ITM contracts — ITM NO wins only 12%; ITM YES caught by Gate 0.
+            # ETH: now matches SOL — ITM contracts allowed (trial; revert by changing
+            #      condition back to: args.asset in ("BTC", "ETH"))
             # SOL: ITM YES wins 90.5%, OTM YES wins 80.6% — both regimes valid.
             offset_c = s_k / spot - 1
-            if args.asset in ("BTC", "ETH") and offset_c <= 0:
-                print(f"  [scan] Skipping {c['ticker']} — offset={offset_c*100:+.3f}% ({args.asset} above strike)")
-                continue
             spread_c  = c["ask"] - c["bid"]
-            if spread_c > 0.08:
-                print(f"  [scan] Skipping {c['ticker']} — spread={spread_c:.3f} (stale/illiquid)")
+            # Per-asset spread limits: SOL/ETH naturally wider in volatile conditions
+            _spread_limit = 0.08 if args.asset == "BTC" else 0.20
+            if spread_c > _spread_limit:
+                print(f"  [scan] Skipping {c['ticker']} — spread={spread_c:.3f} (stale/illiquid, limit={_spread_limit})")
                 continue
             tau_c     = minutes_to_expiry(c["close_time"])
             vol_imp_c = implied_vol_from_price(pm, spot, s_k, tau_c)
             vol_ratio_c = vol.vol_multi / vol_imp_c if vol_imp_c and vol_imp_c > 0 else None
-            if vol_ratio_c is not None and vol_ratio_c > 2.0:
-                print(f"  [scan] Skipping {c['ticker']} — vol_ratio={vol_ratio_c:.2f} (realized >> implied)")
+            _vol_ratio_limit = 2.0 if args.asset == "BTC" else 5.0
+            if vol_ratio_c is not None and vol_ratio_c > _vol_ratio_limit:
+                print(f"  [scan] Skipping {c['ticker']} — vol_ratio={vol_ratio_c:.2f} (realized >> implied, limit={_vol_ratio_limit})")
                 continue
             vol_eff_c = blend_vol(vol.vol_multi, vol_imp_c)
-            prob_c    = estimate_probability(spot, s_k, tau_c, vol_eff_c,
+            vol_adj_c = vol_eff_c * _vol_factor  # vol regime factor from vol_layer
+            prob_c    = estimate_probability(spot, s_k, tau_c, vol_adj_c,
                                                structure_bias=0,
-                                               confirmation_score=0)  # pure log-normal; indicators logged separately
+                                               confirmation_score=0)
             p_yes_adj_c = max(0.03, min(0.97, prob_c.p_yes + funding_delta))
+            if c["ticker"] in already_traded:
+                print(f"  [scan] Skipping {c['ticker']} — already traded this session")
+                continue
+            expiry_key = _expiry_prefix(c["ticker"])
+            expiry_positions = already_traded_expiries.get(expiry_key, {"yes": [], "no": []})
+            expiry_trade_count = len(expiry_positions["yes"]) + len(expiry_positions["no"])
+            if expiry_trade_count >= 3:
+                print(f"  [scan] Skipping {c['ticker']} — expiry limit reached ({expiry_trade_count}/3 trades)")
+                continue
+            # Vol layer determines edge on both sides; direction layer filters the result.
+            # evaluate_trade with force_side=None evaluates YES and NO independently,
+            # returning whichever has the higher net_edge and qualifies.
             dec_c     = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
                                        p_yes_adj_c, pm, args.bankroll,
-                                       confirmation_score=confirm.confirmation_score, no_score=confirm.no_score,
-                                       obi_score=confirm.obi_score, vol_score=confirm.vol_score,
-                                       ema_alignment=confirm.ema_alignment, asset=args.asset)
-            positions = already_traded_expiries.get(c["close_time"], {"yes": [], "no": []})
+                                       asset=args.asset,
+                                       offset_pct=offset_c)
+
+            # Direction filter: applied AFTER edge evaluation.
+            # Preferred side must align with direction, OR have overwhelming edge (≥8%) to override.
+            # Neutral: skip near-ATM (no structural range advantage).
+            _DIRECTION_OVERRIDE_EDGE = 0.08
+            if _dir_label == "bullish" and dec_c.side == "no":
+                if dec_c.net_edge < _DIRECTION_OVERRIDE_EDGE:
+                    print(f"  [scan] Skipping {c['ticker']} — NO conflicts with bullish direction "
+                          f"(net={dec_c.net_edge:+.4f} < {_DIRECTION_OVERRIDE_EDGE:.0%} override threshold)")
+                    continue
+            elif _dir_label == "bearish" and dec_c.side == "yes":
+                if dec_c.net_edge < _DIRECTION_OVERRIDE_EDGE:
+                    print(f"  [scan] Skipping {c['ticker']} — YES conflicts with bearish direction "
+                          f"(net={dec_c.net_edge:+.4f} < {_DIRECTION_OVERRIDE_EDGE:.0%} override threshold)")
+                    continue
+
+            # Gate SHARP-MOVE: during drastic price shifts (either direction), prefer NO.
+            # YES bets win only 15% during sharp moves vs 83% for NO (n=31 paper trades).
+            # YES can still override with exceptional edge (≥8%), same bar as direction filter.
+            if _sharp_move_active and dec_c.side == "yes":
+                if dec_c.net_edge < _DIRECTION_OVERRIDE_EDGE:
+                    print(f"  [scan] Skipping {c['ticker']} — YES during sharp move "
+                          f"(30m={_sharp_move_pct*100:+.2f}%, net={dec_c.net_edge:+.4f} < {_DIRECTION_OVERRIDE_EDGE:.0%} override)")
+                    continue
+
+            if dec_c.side == "no" and offset_c <= 0:
+                print(f"  [scan] Skipping {c['ticker']} — ITM NO (offset={offset_c*100:+.3f}%, price already above strike)")
+                continue
+            # Minimum offset filters for NO bets — based on real Kalshi p_market analysis
+            # (2026-04-07 backtest + paper trade archive, real pricing confirmed):
+            #
+            # BTC NO: < 0.10% — live win 54%, need 61%+. Min = 0.10%.
+            # ETH NO: < 0.10% — near-ATM NO consistently loses. Min = 0.10%.
+            #                   NOTE: 0.20% was tested but blocked all ETH trades in practice;
+            #                   keeping at 0.10% to allow trade flow while building data.
+            #                   Gate PM (p_market ≤ 0.35) provides the primary ETH NO filter.
+            # SOL NO: < 0.20% — real Kalshi p_mkt 0.35-0.43 at < 0.20%, win rate 25-44% → losing.
+            #                   ≥ 0.20%: live winners at 0.23-0.24% offset (n=2, 100% win).
+            #                   NOTE: 0.50% was too aggressive — blocked all available SOL contracts.
+            # Revert: copy paper_trade_runner_v3.py → paper_trade_runner.py
+            if dec_c.side == "no" and args.asset == "BTC" and offset_c < 0.001:
+                print(f"  [scan] Skipping {c['ticker']} — BTC NO offset={offset_c*100:+.3f}% < 0.10% minimum")
+                continue
+            if dec_c.side == "no" and args.asset == "ETH" and offset_c < 0.001:
+                print(f"  [scan] Skipping {c['ticker']} — ETH NO offset={offset_c*100:+.3f}% < 0.10% minimum")
+                continue
+            if dec_c.side == "no" and args.asset == "SOL" and offset_c < 0.002:
+                print(f"  [scan] Skipping {c['ticker']} — SOL NO offset={offset_c*100:+.3f}% < 0.20% minimum")
+                continue
+            # Gate OTM-YES-PUP (ETH only): block OTM YES when composite_p_up < 0.60
+            if dec_c.decision == "trade" and dec_c.side == "yes" and offset_c > 0 \
+                    and args.asset == "ETH" and _comp_p_up < 0.60:
+                print(f"  [scan] Skipping {c['ticker']} — ETH OTM YES p_up={_comp_p_up:.3f} < 0.60")
+                continue
+            # Gate OTM-YES-OFFSET (BTC only): block OTM YES when offset > 0.25%
+            if dec_c.decision == "trade" and dec_c.side == "yes" and offset_c > 0.0025 \
+                    and args.asset == "BTC":
+                print(f"  [scan] Skipping {c['ticker']} — BTC OTM YES offset={offset_c*100:+.3f}% > 0.25%")
+                continue
+            positions = already_traded_expiries.get(expiry_key, {"yes": [], "no": []})
             if dec_c.side == "yes" and any(no_k < s_k for no_k in positions["no"]):
                 print(f"  [scan] Skipping {c['ticker']} — YES@{s_k} conflicts with existing NO below it")
                 continue
@@ -329,35 +619,99 @@ def main() -> None:
                 print(f"  [scan] Skipping {c['ticker']} — NO@{s_k} conflicts with existing YES above it")
                 continue
 
+            # Diagnostic: show which gate resolved this contract
+            _last_reason = dec_c.reasons[-1] if dec_c.reasons else "?"
+            print(f"  [gate] {c['ticker']} {dec_c.side.upper()} offset={offset_c*100:+.3f}% "
+                  f"p_mkt={pm:.3f} p_mdl={p_yes_adj_c:.3f} net={dec_c.net_edge:+.4f} "
+                  f"→ {dec_c.decision.upper()} | {_last_reason[:90]}")
+
             meta_c    = {"strike": s_k, "p_market": pm, "prob": prob_c,
                          "contract_ticker": c["ticker"], "close_ts": c["close_time"],
-                         "vol_eff": vol_eff_c, "bid": c["bid"], "ask": c["ask"]}
+                         "vol_eff": vol_adj_c, "bid": c["bid"], "ask": c["ask"],
+                         "offset_pct": offset_c}
+
+            # Selection: track best YES and NO trades independently.
+            # Within each side: prefer closest to spot, net_edge as tiebreaker.
+            # After the full scan, compare best YES vs best NO by net_edge.
+            def _closer_side(new_offset, new_edge, best_meta, best_dec):
+                if best_dec is None:
+                    return True
+                cur = abs(best_meta.get("offset_pct", 1.0))
+                new = abs(new_offset)
+                if new < cur - 0.0001:
+                    return True
+                if new > cur + 0.0001:
+                    return False
+                return new_edge > best_dec.net_edge
+
+            if dec_c.decision == "trade" and dec_c.side == "yes":
+                if _closer_side(offset_c, dec_c.net_edge, best_yes_meta, best_yes_dec):
+                    best_yes_dec  = dec_c
+                    best_yes_meta = meta_c
+
+            if dec_c.decision == "trade" and dec_c.side == "no":
+                if _closer_side(offset_c, dec_c.net_edge, best_no_meta, best_no_dec):
+                    best_no_dec  = dec_c
+                    best_no_meta = meta_c
+
+            if dec_c.decision == "no_trade":
+                if best_no_trade_dec is None or dec_c.net_edge > best_no_trade_dec.net_edge:
+                    best_no_trade_dec  = dec_c
+                    best_no_trade_meta = meta_c
 
             if best_any_dec is None or dec_c.net_edge > best_any_dec.net_edge:
                 best_any_dec  = dec_c
                 best_any_meta = meta_c
 
-            if dec_c.decision == "trade":
-                if best_trade_dec is None or dec_c.net_edge > best_trade_dec.net_edge:
-                    best_trade_dec  = dec_c
-                    best_trade_meta = meta_c
+    # Merge best YES and best NO: pick the one with higher net_edge.
+    # Within each side the closest-to-spot contract was already selected above.
+    if best_yes_dec is not None and best_no_dec is not None:
+        if best_yes_dec.net_edge >= best_no_dec.net_edge:
+            best_trade_dec, best_trade_meta = best_yes_dec, best_yes_meta
+        else:
+            best_trade_dec, best_trade_meta = best_no_dec, best_no_meta
+        print(f"  [scan] YES best: {best_yes_meta.get('contract_ticker','')} net={best_yes_dec.net_edge:+.4f} | "
+              f"NO best: {best_no_meta.get('contract_ticker','')} net={best_no_dec.net_edge:+.4f} → "
+              f"taking {best_trade_dec.side.upper()}")
+    elif best_yes_dec is not None:
+        best_trade_dec, best_trade_meta = best_yes_dec, best_yes_meta
+    elif best_no_dec is not None:
+        best_trade_dec, best_trade_meta = best_no_dec, best_no_meta
 
     # Select final decision
     if best_trade_dec is not None:
-        dec              = best_trade_dec
-        chosen           = best_trade_meta
-        p_market_source  = "real"
-        print(f"  [scan] Best trade: {chosen['contract_ticker']}  "
-              f"strike=${chosen['strike']:,.2f}  net_edge={dec.net_edge:+.4f}  side={dec.side.upper()}")
-    elif best_any_dec is not None:
-        dec              = best_any_dec
-        chosen           = best_any_meta
-        p_market_source  = "real"
-        print(f"  [scan] No trade passes gates. Best seen: {chosen['contract_ticker']}  "
-              f"net_edge={dec.net_edge:+.4f}")
+        # Enforce 10-minute same-direction cooldown per expiry to prevent clustering
+        _best_expiry_key = _expiry_prefix(best_trade_meta["contract_ticker"])
+        _last_same = _SIDE_COOLDOWN.get((_best_expiry_key, best_trade_dec.side))
+        if _last_same is not None:
+            _elapsed = (now_utc - _last_same).total_seconds()
+            if _elapsed < 600:
+                print(f"  [scan] Cooldown active — same-side {best_trade_dec.side.upper()} "
+                      f"traded {_elapsed:.0f}s ago in expiry {_best_expiry_key} (cooldown=600s). Skipping.")
+                best_trade_dec = None
+        if best_trade_dec is None and best_no_trade_dec is not None:
+            dec              = best_no_trade_dec
+            chosen           = best_no_trade_meta
+            p_market_source  = "real"
+            print(f"  [scan] Cooldown blocked trade. Best no_trade: {chosen['contract_ticker']}  "
+                  f"net_edge={dec.net_edge:+.4f}")
+        elif best_trade_dec is None:
+            print("  [scan] Cooldown blocked trade — no fallback no_trade available. Skipping.")
+            return
+        else:
+            dec              = best_trade_dec
+            chosen           = best_trade_meta
+            p_market_source  = "real"
     else:
-        print("  [scan] No real contracts available (auth failed or empty ladder) — skipping.")
-        return
+        if best_any_dec is not None:
+            dec             = best_any_dec
+            chosen          = best_any_meta
+            p_market_source = "real"
+            print(f"  [scan] No trade passes gates. Best seen: {chosen['contract_ticker']}  "
+                  f"net_edge={dec.net_edge:+.4f}")
+        else:
+            print("  [scan] No real contracts available (auth failed or empty ladder) — skipping.")
+            return
 
     strike          = chosen["strike"]
     p_market        = chosen["p_market"]
@@ -433,6 +787,12 @@ def main() -> None:
         "bet_fraction":       round(dec.bet_fraction, 6),
         "bet_amount":         round(dec.bet_amount, 2),
         "bankroll":           round(args.bankroll, 2),
+        "composite_trend":    _comp_trend,
+        "composite_rev":      _comp_rev,
+        "composite_p_up":     round(_comp_p_up, 4),
+        "chg_30m":            round(_sharp_move_pct * 100, 4),
+        "sharp_move_active":  _sharp_move_active,
+        "stoch_flipped":      _stoch_flipped,
         "resolved_yes":       "",
         "would_win":          "",
         "would_pnl":          "",
@@ -445,19 +805,79 @@ def main() -> None:
     if contract_ticker:
         print(f"  Contract: {contract_ticker}  close_ts={close_ts}")
 
-    csv_path = get_csv_path(args.asset)
-    ensure_csv_exists(csv_path)
-    append_row(row, csv_path)
+    # Live runner skips paper CSV logging — the paper runner handles that.
+    # Writing from both processes causes duplicate rows in paper_trades.csv.
+    if not getattr(args, 'live', False):
+        csv_path = get_csv_path(args.asset)
+        ensure_csv_exists(csv_path)
+        append_row(row, csv_path)
     if dec.decision == "trade":
-        _SESSION_TRADED.add(contract_ticker)
+        _SESSION_TRADED[contract_ticker] = dec.net_edge
+        _SIDE_COOLDOWN[(_expiry_prefix(contract_ticker), dec.side)] = now_utc
+
+    # --- Live order placement ---
+    if args.live and dec.decision == "trade" and auth is not None:
+        _live_csv = live_trading.get_live_csv_path(args.asset)
+        if not live_trading.check_daily_loss_limit(args.daily_loss_limit, _live_csv):
+            return  # daily limit hit, skip order
+
+        bid_c = chosen.get("bid", p_market - 0.01)
+        ask_c = chosen.get("ask", p_market + 0.01)
+        yes_price_cents, count = live_trading.compute_order_params(
+            side=dec.side,
+            bet_amount=dec.bet_amount,
+            bid=bid_c,
+            ask=ask_c,
+            max_contracts=args.max_contracts,
+        )
+
+        # Confirm balance before placing
+        balance = live_trading.get_balance(auth)
+        if balance is not None:
+            order_cost = count * (yes_price_cents if dec.side == "yes" else (100 - yes_price_cents)) / 100.0
+            print(f"  [live] Balance: ${balance:.2f}  order cost ≈ ${order_cost:.2f}")
+            if order_cost > balance:
+                print(f"  [live] Insufficient balance — skipping order")
+                return
+
+        order_result = live_trading.place_order(
+            auth=auth,
+            ticker=contract_ticker,
+            side=dec.side,
+            count=count,
+            yes_price=yes_price_cents,
+        )
+        live_trading.log_live_trade(
+            row=row,
+            order_result=order_result,
+            yes_price_cents=yes_price_cents,
+            count=count,
+            side=dec.side,
+            asset=args.asset,
+            csv_path=_live_csv,
+        )
 
 
 if __name__ == "__main__":
     import argparse as _ap
+    import fcntl as _fcntl
+
     _loop_parser = _ap.ArgumentParser(add_help=False)
     _loop_parser.add_argument("--asset", type=str, default="BTC")
+    _loop_parser.add_argument("--live", action="store_true")
     _loop_args, _ = _loop_parser.parse_known_args()
     _loop_asset = _loop_args.asset.upper()
+    _loop_live  = _loop_args.live
+
+    # Enforce single-process-per-asset via lockfile.
+    # A second launch for the same asset exits immediately with a clear error.
+    _lock_path = Path(__file__).parent / f".paper_trade_{_loop_asset}.lock"
+    _lock_fd = open(_lock_path, "w")
+    try:
+        _fcntl.flock(_lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"ERROR: Another {_loop_asset} paper trade process is already running. Exiting.")
+        sys.exit(1)
 
     loop_count = 0
     _last_hour = datetime.now(timezone.utc).hour
@@ -466,9 +886,27 @@ if __name__ == "__main__":
         _current_hour = datetime.now(timezone.utc).hour
         if _current_hour != _last_hour:
             _SESSION_TRADED.clear()
+            _SESSION_SEEDED = False  # allow CSV re-seed so still-open contracts stay blocked
             print(f"  [session] New hour — already_traded reset.")
             _last_hour = _current_hour
-        if loop_count % 30 == 0:  # each process updates its own asset data
+        # Data update: live runner skips unless paper runner's data is stale (>5 min old).
+        # This prevents both processes writing the same parquet simultaneously.
+        _should_update = not _loop_live or loop_count % 30 == 0
+        if _loop_live and loop_count % 30 == 0:
+            # Check age of most recent 1m parquet
+            from live_signal import ASSET_CONFIG as _AC
+            _sym = _AC.get(_loop_asset, _AC["BTC"])["binance_symbol"]
+            _parquets = sorted(
+                (Path(__file__).parent / "data").glob(f"*{_sym}_1m_*.parquet"),
+                key=lambda p: p.stat().st_mtime,
+            )
+            _parquets = [p for p in _parquets if ".ckpt." not in p.name]
+            if _parquets:
+                _age = time.time() - _parquets[-1].stat().st_mtime
+                _should_update = _age > 300  # stale if paper runner hasn't updated in 5 min
+                if not _should_update:
+                    print(f"  [data] Skipping update — paper runner data is fresh ({_age:.0f}s old)")
+        if _should_update:
             print(f"  [data] Updating OHLCV parquet files ({_loop_asset})...")
             try:
                 update_data.main(asset=_loop_asset)
@@ -476,6 +914,10 @@ if __name__ == "__main__":
                 print(f"  [data] Update failed (will retry next cycle): {e}")
         if loop_count % 5 == 0:
             outcome_checker.main(get_csv_path(_loop_asset))
+            if _loop_live:
+                _live_auth = load_auth()
+                if _live_auth:
+                    live_trading.settle_live_trades(_live_auth, live_trading.get_live_csv_path(_loop_asset))
         main()
         loop_count += 1
         time.sleep(60)

@@ -44,6 +44,8 @@ CSV_COLUMNS = [
     "decision", "side", "neutral_gate", "pure_edge_gate",
     "contracts_scanned", "tau_minutes", "gate_blocked",
     "kelly_fraction", "bet_fraction", "bet_amount", "bankroll",
+    "composite_trend", "composite_rev", "composite_p_up",
+    "chg_30m", "sharp_move_active", "stoch_flipped",
     "resolved_yes", "would_win", "would_pnl",
 ]
 

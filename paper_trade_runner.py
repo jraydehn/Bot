@@ -341,6 +341,29 @@ def main() -> None:
         except Exception as _exc:
             print(f"  [vol_layer] Error: {_exc} — using factor=1.0")
 
+    # --- Sharp move detection ---
+    # Compute 30-minute price change from live 1m candles.
+    # During sharp rallies the composite lags (1h/4h data) and generates NO edge
+    # from reversion signals while price is actually continuing up — and vice versa.
+    # Gate: block the counter-trend bet unless edge >= 8% override.
+    #   Sharp rally (chg > +thresh) → skip NO  (continuation, not reversion)
+    #   Sharp drop  (chg < -thresh) → skip YES (continuation, not reversion)
+    _sharp_move_pct = 0.0
+    if live_1m is not None and len(live_1m) >= 31:
+        try:
+            _sm_close = live_1m["close"].astype(float)
+            _sharp_move_pct = float(_sm_close.iloc[-1] / _sm_close.iloc[-31] - 1)
+        except Exception:
+            pass
+    _SHARP_THRESHOLDS = {"BTC": 0.008, "ETH": 0.015, "SOL": 0.020}
+    _sharp_thresh = _SHARP_THRESHOLDS.get(args.asset, 0.008)
+    _sharp_up   = _sharp_move_pct >  _sharp_thresh
+    _sharp_down = _sharp_move_pct < -_sharp_thresh
+    if _sharp_up or _sharp_down:
+        _direction = "rally" if _sharp_up else "drop"
+        _blocks    = "NO"    if _sharp_up else "YES"
+        print(f"  [sharp_move] {_sharp_move_pct*100:+.2f}% 30m — sharp {_direction} detected, blocking {_blocks} bets (override ≥8%)")
+
     # --- Funding rate probability adjustment ---
     # Nudge p_yes_model ±1.5% based on funding bias before edge calculation.
     # Bullish funding (overcrowded shorts → squeeze): p_yes up → YES edge grows.
@@ -553,6 +576,18 @@ def main() -> None:
             if dec_c.side == "no" and args.asset == "SOL" and offset_c < 0.002:
                 print(f"  [scan] Skipping {c['ticker']} — SOL NO offset={offset_c*100:+.3f}% < 0.20% minimum")
                 continue
+            # Gate SHARP-MOVE: block counter-trend bet during sharp price moves.
+            # Composite uses 1h/4h data — lags sharp moves, creating false reversion edge.
+            _SHARP_OVERRIDE_EDGE = 0.08
+            if _sharp_up and dec_c.side == "no" and dec_c.net_edge < _SHARP_OVERRIDE_EDGE:
+                print(f"  [sharp_move] Skipping {c['ticker']} — NO during sharp rally "
+                      f"({_sharp_move_pct*100:+.2f}%, net={dec_c.net_edge:+.4f} < {_SHARP_OVERRIDE_EDGE:.0%} override)")
+                continue
+            if _sharp_down and dec_c.side == "yes" and dec_c.net_edge < _SHARP_OVERRIDE_EDGE:
+                print(f"  [sharp_move] Skipping {c['ticker']} — YES during sharp drop "
+                      f"({_sharp_move_pct*100:+.2f}%, net={dec_c.net_edge:+.4f} < {_SHARP_OVERRIDE_EDGE:.0%} override)")
+                continue
+
             positions = already_traded_expiries.get(expiry_key, {"yes": [], "no": []})
             if dec_c.side == "yes" and any(no_k < s_k for no_k in positions["no"]):
                 print(f"  [scan] Skipping {c['ticker']} — YES@{s_k} conflicts with existing NO below it")

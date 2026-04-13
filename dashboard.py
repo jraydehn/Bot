@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 RESULTS_DIR     = Path(__file__).parent / "results"
 REFRESH_SECONDS = 60
-DISPLAY_FROM    = "2026-04-11 05:31:00"   # hide trades before this UTC time (dashboard cleared Apr 10 10:31 PM PDT)
+DISPLAY_FROM    = "2026-04-13 01:59:00"   # hide trades before this UTC time (dashboard cleared Apr 12 6:59 PM PDT — composite drift model restart)
 
 ASSET_CSV = {
     "BTC": RESULTS_DIR / "paper_trades.csv",

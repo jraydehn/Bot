@@ -42,6 +42,7 @@ import update_data
 import live_trading
 from kelly_sizing import compute_kelly_size
 from composite_scorer import compute_current_scores, score_to_p_model, composite_to_confirmation, lookup_p_up
+from vol_layer import compute_vol_regime_factor
 from live_signal import (
     load_auth, kalshi_get, fetch_live_spot, fetch_current_price, find_live_contract,
     fetch_contracts_for_nearest_expiry, fetch_recent_1m_candles, minutes_to_expiry,
@@ -327,6 +328,19 @@ def main() -> None:
         except Exception as _exc:
             print(f"  [composite] Score error: {_exc} — using pure log-normal fallback")
 
+    # --- Vol regime factor ---
+    # Scales blended sigma before score_to_p_model. Validated on 19,947h of OHLCV data.
+    # High-vol regime → factor > 1.0 → wider sigma → OTM strikes more reachable.
+    # Low-vol regime  → factor < 1.0 → tighter sigma → edge concentrates near ATM.
+    _vol_factor = 1.0
+    _vol_score_dir = 0
+    if live_1m is not None and len(live_1m) >= 400:
+        try:
+            _vol_factor, _vol_score_dir, _vol_details = compute_vol_regime_factor(df_confirm, live_1m, asset=args.asset)
+            print(f"  [vol_layer] score={_vol_score_dir:+d}  factor={_vol_factor:.3f}  {_vol_details.get('votes', {})}")
+        except Exception as _exc:
+            print(f"  [vol_layer] Error: {_exc} — using factor=1.0")
+
     # --- Funding rate probability adjustment ---
     # Nudge p_yes_model ±1.5% based on funding bias before edge calculation.
     # Bullish funding (overcrowded shorts → squeeze): p_yes up → YES edge grows.
@@ -469,14 +483,15 @@ def main() -> None:
                 print(f"  [scan] Skipping {c['ticker']} — vol_ratio={vol_ratio_c:.2f} (realized >> implied, limit={_vol_ratio_limit})")
                 continue
             vol_eff_c = blend_vol(vol.vol_multi, vol_imp_c)
-            prob_c    = estimate_probability(spot, s_k, tau_c, vol_eff_c,
+            vol_adj_c = vol_eff_c * _vol_factor   # vol regime scaling
+            prob_c    = estimate_probability(spot, s_k, tau_c, vol_adj_c,
                                                structure_bias=0,
                                                confirmation_score=0)  # kept for diagnostic fields
             # Composite-adjusted p_model: composite scores shift the log-normal distribution
             # by a calibrated drift derived from empirical win rates on 11,108 test hours.
             # Falls back to pure log-normal (prob_c.p_yes) when composite is unavailable.
             if _composite_computed:
-                sigma_tau_c   = vol_eff_c * math.sqrt(tau_c)
+                sigma_tau_c   = vol_adj_c * math.sqrt(tau_c)
                 p_model_comp  = score_to_p_model(_comp_trend, _comp_rev, spot, s_k, sigma_tau_c, asset=args.asset)
             else:
                 p_model_comp  = prob_c.p_yes

@@ -42,6 +42,8 @@ import update_data
 import live_trading
 from kelly_sizing import compute_kelly_size
 from composite_scorer import compute_current_scores, score_to_p_model, composite_to_confirmation, lookup_p_up
+from vol_layer import compute_vol_regime_factor
+from direction_layer import compute_direction_score, side_from_direction
 from live_signal import (
     load_auth, kalshi_get, fetch_live_spot, fetch_current_price, find_live_contract,
     fetch_contracts_for_nearest_expiry, fetch_recent_1m_candles, minutes_to_expiry,
@@ -49,6 +51,11 @@ from live_signal import (
 )
 
 PAPER_TRADES_CSV = Path(__file__).parent / "results" / "paper_trades.csv"
+
+# Trades logged before this UTC timestamp are ignored for session/expiry tracking.
+# Update this when the model is reset to avoid old trades blocking new ones.
+# Matches DISPLAY_FROM in dashboard.py.
+TRADES_FROM = "2026-04-11 05:31:00"
 
 # Funding rate cache — funding updates every 8 hours so re-fetching once per
 # minute is wasteful. Cache the result for 5 minutes (300 seconds).
@@ -144,6 +151,9 @@ CSV_COLUMNS = [
     "composite_trend",  # trend score from composite_scorer (-6 to +6)
     "composite_rev",    # reversion score from composite_scorer (-15 to +15)
     "composite_p_up",   # calibrated directional probability from composite scorer
+    "chg_30m",          # 30-minute price change (%) at scan time
+    "sharp_move_active",# True if |chg_30m| exceeded sharp-move threshold (NO preferred)
+    "stoch_flipped",    # True if stoch votes were flipped (sharp move + stoch extreme)
     "resolved_yes",   # filled by outcome_checker.py
     "would_win",      # filled by outcome_checker.py
     "would_pnl",      # filled by outcome_checker.py
@@ -299,16 +309,24 @@ def main() -> None:
     funding = _funding_cache
     print(f"  Funding: {funding.avg_funding_rate*100:+.4f}%/8h  bias={funding.funding_bias:+d}  ({', '.join(funding.exchanges_used) or 'none'})")
 
-    confirm = compute_confirmation(hist_confirm, hist_1m=live_1m, obi_score=obi.obi_score, momentum_enabled=False,
-                                   funding_bias=funding.funding_bias, avg_funding_rate=funding.avg_funding_rate)
+    # --- Sharp move detection: 30m price change from live_1m ---
+    # Used to flip stochastic from mean-reversion to continuation during trending moves.
+    _sharp_move_pct = 0.0
+    if live_1m is not None and len(live_1m) >= 31:
+        _sm_close = live_1m["close"].astype(float)
+        _sharp_move_pct = float(_sm_close.iloc[-1] / _sm_close.iloc[-31] - 1)
+    print(f"  [sharp_move] 30m_chg={_sharp_move_pct*100:+.3f}%  (stoch flip threshold: BTC=0.8%, ETH=1.5%, SOL=2.0%)")
 
-    # --- Composite directional scores ---
-    # Compute validated trend (4h) + reversion (1h/15m) scores from historical data.
-    # These replace the unvalidated confirmation_score/no_score in the contract loop.
+    confirm = compute_confirmation(hist_confirm, hist_1m=live_1m, obi_score=obi.obi_score, momentum_enabled=False,
+                                   funding_bias=funding.funding_bias, avg_funding_rate=funding.avg_funding_rate,
+                                   sharp_move_pct=_sharp_move_pct, asset=args.asset)
+
+    # --- Composite directional scores (logged to CSV for historical continuity) ---
     _comp_trend, _comp_rev = 0, 0
     _asset_baseline = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}.get(args.asset, 0.504)
     _comp_p_up = _asset_baseline
-    _composite_computed = False
+    _df_4h_comp = None
+    _df_15m_comp = None
     if live_1m is not None and len(live_1m) >= 400:
         try:
             _df_4h_comp = df_confirm.resample("4h", origin="start_day").agg(
@@ -322,10 +340,36 @@ def main() -> None:
                 live_1m["close"].astype(float), live_1m["volume"].astype(float),
             )
             _comp_p_up = lookup_p_up(_comp_trend, _comp_rev, asset=args.asset)
-            _composite_computed = True
             print(f"  [composite] trend={_comp_trend:+d}  rev={_comp_rev:+d}  p_up={_comp_p_up:.1%}")
         except Exception as _exc:
-            print(f"  [composite] Score error: {_exc} — using pure log-normal fallback")
+            print(f"  [composite] Score error: {_exc}")
+
+    # --- Vol regime layer: adjusts blended sigma before estimate_probability ---
+    _vol_factor = 1.0
+    if live_1m is not None and len(live_1m) >= 400:
+        try:
+            _vol_factor, _vol_score_dir, _vol_details = compute_vol_regime_factor(df_confirm, live_1m, asset=args.asset)
+            print(f"  [vol_layer] score={_vol_score_dir:+d}  factor={_vol_factor:.3f}  {_vol_details.get('votes', {})}")
+        except Exception as _exc:
+            print(f"  [vol_layer] Error: {_exc} — using factor=1.0")
+
+    # --- Direction layer: sets side (YES/NO) from validated OHLCV signals ---
+    _dir_label = "neutral"
+    _dir_score = 0
+    _dir_trend = 0
+    _dir_rev = 0
+    _stoch_flipped = False
+    if live_1m is not None and len(live_1m) >= 400 and _df_4h_comp is not None and _df_15m_comp is not None:
+        try:
+            _dir_trend, _dir_rev, _dir_score, _dir_label, _dir_details = compute_direction_score(
+                df_confirm, _df_4h_comp, _df_15m_comp, live_1m, asset=args.asset,
+                sharp_move_pct=_sharp_move_pct,
+            )
+            _stoch_flipped = _dir_details.get("stoch_flipped", False)
+            print(f"  [direction] trend={_dir_trend:+d}  rev={_dir_rev:+d}  score={_dir_score:+d}  label={_dir_label}"
+                  + (f"  [stoch FLIPPED — sharp {_sharp_move_pct*100:+.2f}%]" if _stoch_flipped else ""))
+        except Exception as _exc:
+            print(f"  [direction] Error: {_exc} — defaulting to neutral")
 
     # --- Funding rate probability adjustment ---
     # Nudge p_yes_model ±1.5% based on funding bias before edge calculation.
@@ -339,6 +383,16 @@ def main() -> None:
 
     gate_side = "yes" if struct.structure_bias == 1 else "no"
 
+    # --- Sharp move detection: prefer NO when price has moved drastically ---
+    # Data (n=31): during sharp moves (high vol + large VWAP displacement), YES bets
+    # lose at 15% win rate regardless of direction. NO bets win at 83%.
+    # Thresholds match direction_layer._SHARP_MOVE_THRESHOLDS (abs — fires both directions).
+    _SHARP_NO_PREF_THRESHOLDS = {"BTC": 0.008, "ETH": 0.015, "SOL": 0.020}
+    _sharp_no_pref_thresh = _SHARP_NO_PREF_THRESHOLDS.get(args.asset, 0.010)
+    _sharp_move_active = abs(_sharp_move_pct) > _sharp_no_pref_thresh
+    if _sharp_move_active:
+        print(f"  [sharp_move] ACTIVE — 30m_chg={_sharp_move_pct*100:+.2f}% exceeds {_sharp_no_pref_thresh*100:.1f}% threshold. Preferring NO bets.")
+
     # Scan all contracts for nearest expiry; select highest net_edge trade.
     # Falls back to simulated p_market on nearest OTM contract when no auth.
     contracts_scanned = 0
@@ -347,8 +401,12 @@ def main() -> None:
     close_ts          = ""
     strike            = spot * 1.005   # fallback
 
-    best_trade_dec    = None           # best DecisionResult with decision=="trade"
-    best_trade_meta   = {}             # {strike, p_market, prob, contract_ticker, close_ts}
+    best_trade_dec    = None           # final winner between best YES and best NO
+    best_trade_meta   = {}
+    best_yes_dec      = None           # best qualifying YES trade (closest to spot)
+    best_yes_meta     = {}
+    best_no_dec       = None           # best qualifying NO trade (closest to spot)
+    best_no_meta      = {}
     best_any_dec      = None           # best DecisionResult across all contracts (for no_trade log)
     best_any_meta     = {}
     best_no_trade_dec = None           # best no_trade-only result (safe fallback when trade is cooldown-blocked)
@@ -379,6 +437,10 @@ def main() -> None:
                 traded_rows_all = df_existing[df_existing["decision"] == "trade"].copy()
                 traded_rows_all = traded_rows_all[
                     pd.to_datetime(traded_rows_all["close_ts"], utc=True) > pd.Timestamp(now_utc)
+                ]
+                # Ignore trades logged before TRADES_FROM cutoff (model reset boundary)
+                traded_rows_all = traded_rows_all[
+                    pd.to_datetime(traded_rows_all["logged_at"], utc=True) >= pd.Timestamp(TRADES_FROM, tz="UTC")
                 ]
                 # Build expiry counts from the runner-specific source
                 if expiry_source_is_live and expiry_source_path.exists():
@@ -447,7 +509,7 @@ def main() -> None:
         for c in ladder:
             s_k       = c["floor_strike"]
             pm        = c["p_market"]
-            _offset_limit = 0.01 if args.asset == "BTC" else 0.05
+            _offset_limit = 0.01 if args.asset == "BTC" else 0.03
             if abs(s_k / spot - 1) > _offset_limit:
                 continue
             # BTC: skip ITM contracts — ITM NO wins only 12%; ITM YES caught by Gate 0.
@@ -469,18 +531,11 @@ def main() -> None:
                 print(f"  [scan] Skipping {c['ticker']} — vol_ratio={vol_ratio_c:.2f} (realized >> implied, limit={_vol_ratio_limit})")
                 continue
             vol_eff_c = blend_vol(vol.vol_multi, vol_imp_c)
-            prob_c    = estimate_probability(spot, s_k, tau_c, vol_eff_c,
+            vol_adj_c = vol_eff_c * _vol_factor  # vol regime factor from vol_layer
+            prob_c    = estimate_probability(spot, s_k, tau_c, vol_adj_c,
                                                structure_bias=0,
-                                               confirmation_score=0)  # kept for diagnostic fields
-            # Composite-adjusted p_model: composite scores shift the log-normal distribution
-            # by a calibrated drift derived from empirical win rates on 11,108 test hours.
-            # Falls back to pure log-normal (prob_c.p_yes) when composite is unavailable.
-            if _composite_computed:
-                sigma_tau_c   = vol_eff_c * math.sqrt(tau_c)
-                p_model_comp  = score_to_p_model(_comp_trend, _comp_rev, spot, s_k, sigma_tau_c, asset=args.asset)
-            else:
-                p_model_comp  = prob_c.p_yes
-            p_yes_adj_c = max(0.03, min(0.97, p_model_comp + funding_delta))
+                                               confirmation_score=0)
+            p_yes_adj_c = max(0.03, min(0.97, prob_c.p_yes + funding_delta))
             if c["ticker"] in already_traded:
                 print(f"  [scan] Skipping {c['ticker']} — already traded this session")
                 continue
@@ -490,30 +545,38 @@ def main() -> None:
             if expiry_trade_count >= 3:
                 print(f"  [scan] Skipping {c['ticker']} — expiry limit reached ({expiry_trade_count}/3 trades)")
                 continue
-            # Use composite-derived confirmation scores for gate evaluation.
-            # composite_to_confirmation() maps validated (trend, rev) signals to the
-            # confirmation_score / no_score / ema_alignment API that evaluate_trade() expects.
-            # Falls back to legacy confirm scores when composite is unavailable (non-BTC).
-            # Use composite confirmation only when composite scoring actually ran
-            # composite_active=True whenever composite successfully computed — including
-            # (0,0) scores. The (0,0) path uses p_up=0.4788 (below baseline) which
-            # produces minimal edge, naturally failing Gate 3 instead of getting a
-            # phantom 12% edge from the legacy 0.65× calibration correction.
-            _composite_active = _composite_computed
-            if _composite_active:
-                _cscore, _nscore, _ema_align = composite_to_confirmation(_comp_trend, _comp_rev)
-            else:
-                _cscore     = confirm.confirmation_score
-                _nscore     = confirm.no_score
-                _ema_align  = confirm.ema_alignment
+            # Vol layer determines edge on both sides; direction layer filters the result.
+            # evaluate_trade with force_side=None evaluates YES and NO independently,
+            # returning whichever has the higher net_edge and qualifies.
             dec_c     = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
                                        p_yes_adj_c, pm, args.bankroll,
-                                       confirmation_score=_cscore, no_score=_nscore,
-                                       obi_score=confirm.obi_score, vol_score=confirm.vol_score,
-                                       ema_alignment=_ema_align, asset=args.asset,
-                                       composite_active=_composite_active,
-                                       composite_p_up=_comp_p_up,
+                                       asset=args.asset,
                                        offset_pct=offset_c)
+
+            # Direction filter: applied AFTER edge evaluation.
+            # Preferred side must align with direction, OR have overwhelming edge (≥8%) to override.
+            # Neutral: skip near-ATM (no structural range advantage).
+            _DIRECTION_OVERRIDE_EDGE = 0.08
+            if _dir_label == "bullish" and dec_c.side == "no":
+                if dec_c.net_edge < _DIRECTION_OVERRIDE_EDGE:
+                    print(f"  [scan] Skipping {c['ticker']} — NO conflicts with bullish direction "
+                          f"(net={dec_c.net_edge:+.4f} < {_DIRECTION_OVERRIDE_EDGE:.0%} override threshold)")
+                    continue
+            elif _dir_label == "bearish" and dec_c.side == "yes":
+                if dec_c.net_edge < _DIRECTION_OVERRIDE_EDGE:
+                    print(f"  [scan] Skipping {c['ticker']} — YES conflicts with bearish direction "
+                          f"(net={dec_c.net_edge:+.4f} < {_DIRECTION_OVERRIDE_EDGE:.0%} override threshold)")
+                    continue
+
+            # Gate SHARP-MOVE: during drastic price shifts (either direction), prefer NO.
+            # YES bets win only 15% during sharp moves vs 83% for NO (n=31 paper trades).
+            # YES can still override with exceptional edge (≥8%), same bar as direction filter.
+            if _sharp_move_active and dec_c.side == "yes":
+                if dec_c.net_edge < _DIRECTION_OVERRIDE_EDGE:
+                    print(f"  [scan] Skipping {c['ticker']} — YES during sharp move "
+                          f"(30m={_sharp_move_pct*100:+.2f}%, net={dec_c.net_edge:+.4f} < {_DIRECTION_OVERRIDE_EDGE:.0%} override)")
+                    continue
+
             if dec_c.side == "no" and offset_c <= 0:
                 print(f"  [scan] Skipping {c['ticker']} — ITM NO (offset={offset_c*100:+.3f}%, price already above strike)")
                 continue
@@ -538,6 +601,16 @@ def main() -> None:
             if dec_c.side == "no" and args.asset == "SOL" and offset_c < 0.002:
                 print(f"  [scan] Skipping {c['ticker']} — SOL NO offset={offset_c*100:+.3f}% < 0.20% minimum")
                 continue
+            # Gate OTM-YES-PUP (ETH only): block OTM YES when composite_p_up < 0.60
+            if dec_c.decision == "trade" and dec_c.side == "yes" and offset_c > 0 \
+                    and args.asset == "ETH" and _comp_p_up < 0.60:
+                print(f"  [scan] Skipping {c['ticker']} — ETH OTM YES p_up={_comp_p_up:.3f} < 0.60")
+                continue
+            # Gate OTM-YES-OFFSET (BTC only): block OTM YES when offset > 0.25%
+            if dec_c.decision == "trade" and dec_c.side == "yes" and offset_c > 0.0025 \
+                    and args.asset == "BTC":
+                print(f"  [scan] Skipping {c['ticker']} — BTC OTM YES offset={offset_c*100:+.3f}% > 0.25%")
+                continue
             positions = already_traded_expiries.get(expiry_key, {"yes": [], "no": []})
             if dec_c.side == "yes" and any(no_k < s_k for no_k in positions["no"]):
                 print(f"  [scan] Skipping {c['ticker']} — YES@{s_k} conflicts with existing NO below it")
@@ -546,23 +619,64 @@ def main() -> None:
                 print(f"  [scan] Skipping {c['ticker']} — NO@{s_k} conflicts with existing YES above it")
                 continue
 
+            # Diagnostic: show which gate resolved this contract
+            _last_reason = dec_c.reasons[-1] if dec_c.reasons else "?"
+            print(f"  [gate] {c['ticker']} {dec_c.side.upper()} offset={offset_c*100:+.3f}% "
+                  f"p_mkt={pm:.3f} p_mdl={p_yes_adj_c:.3f} net={dec_c.net_edge:+.4f} "
+                  f"→ {dec_c.decision.upper()} | {_last_reason[:90]}")
+
             meta_c    = {"strike": s_k, "p_market": pm, "prob": prob_c,
                          "contract_ticker": c["ticker"], "close_ts": c["close_time"],
-                         "vol_eff": vol_eff_c, "bid": c["bid"], "ask": c["ask"]}
+                         "vol_eff": vol_adj_c, "bid": c["bid"], "ask": c["ask"],
+                         "offset_pct": offset_c}
 
-            if best_any_dec is None or dec_c.net_edge > best_any_dec.net_edge:
-                best_any_dec  = dec_c
-                best_any_meta = meta_c
+            # Selection: track best YES and NO trades independently.
+            # Within each side: prefer closest to spot, net_edge as tiebreaker.
+            # After the full scan, compare best YES vs best NO by net_edge.
+            def _closer_side(new_offset, new_edge, best_meta, best_dec):
+                if best_dec is None:
+                    return True
+                cur = abs(best_meta.get("offset_pct", 1.0))
+                new = abs(new_offset)
+                if new < cur - 0.0001:
+                    return True
+                if new > cur + 0.0001:
+                    return False
+                return new_edge > best_dec.net_edge
+
+            if dec_c.decision == "trade" and dec_c.side == "yes":
+                if _closer_side(offset_c, dec_c.net_edge, best_yes_meta, best_yes_dec):
+                    best_yes_dec  = dec_c
+                    best_yes_meta = meta_c
+
+            if dec_c.decision == "trade" and dec_c.side == "no":
+                if _closer_side(offset_c, dec_c.net_edge, best_no_meta, best_no_dec):
+                    best_no_dec  = dec_c
+                    best_no_meta = meta_c
 
             if dec_c.decision == "no_trade":
                 if best_no_trade_dec is None or dec_c.net_edge > best_no_trade_dec.net_edge:
                     best_no_trade_dec  = dec_c
                     best_no_trade_meta = meta_c
 
-            if dec_c.decision == "trade":
-                if best_trade_dec is None or dec_c.net_edge > best_trade_dec.net_edge:
-                    best_trade_dec  = dec_c
-                    best_trade_meta = meta_c
+            if best_any_dec is None or dec_c.net_edge > best_any_dec.net_edge:
+                best_any_dec  = dec_c
+                best_any_meta = meta_c
+
+    # Merge best YES and best NO: pick the one with higher net_edge.
+    # Within each side the closest-to-spot contract was already selected above.
+    if best_yes_dec is not None and best_no_dec is not None:
+        if best_yes_dec.net_edge >= best_no_dec.net_edge:
+            best_trade_dec, best_trade_meta = best_yes_dec, best_yes_meta
+        else:
+            best_trade_dec, best_trade_meta = best_no_dec, best_no_meta
+        print(f"  [scan] YES best: {best_yes_meta.get('contract_ticker','')} net={best_yes_dec.net_edge:+.4f} | "
+              f"NO best: {best_no_meta.get('contract_ticker','')} net={best_no_dec.net_edge:+.4f} → "
+              f"taking {best_trade_dec.side.upper()}")
+    elif best_yes_dec is not None:
+        best_trade_dec, best_trade_meta = best_yes_dec, best_yes_meta
+    elif best_no_dec is not None:
+        best_trade_dec, best_trade_meta = best_no_dec, best_no_meta
 
     # Select final decision
     if best_trade_dec is not None:
@@ -676,6 +790,9 @@ def main() -> None:
         "composite_trend":    _comp_trend,
         "composite_rev":      _comp_rev,
         "composite_p_up":     round(_comp_p_up, 4),
+        "chg_30m":            round(_sharp_move_pct * 100, 4),
+        "sharp_move_active":  _sharp_move_active,
+        "stoch_flipped":      _stoch_flipped,
         "resolved_yes":       "",
         "would_win":          "",
         "would_pnl":          "",

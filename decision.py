@@ -557,17 +557,17 @@ def evaluate_trade(
     # Deep OTM YES contracts have large variance — a small edge is more likely to be
     # noise than genuine mispricing. Standard Gate 3 (1%) is too permissive here.
     # Tiers apply to all assets (composite or legacy path):
-    #   p_market < 0.15 → net_edge ≥ 6%   (extreme OTM, payout ~12x)
-    #   p_market < 0.25 → net_edge ≥ 5%   (very OTM, payout ~4x)
-    #   p_market < 0.35 → net_edge ≥ 4%   (deep OTM, payout ~2x)
+    #   p_market < 0.15 → net_edge ≥ 4%   (extreme OTM, payout ~12x)
+    #   p_market < 0.25 → net_edge ≥ 3%   (very OTM, payout ~4x)
+    #   p_market < 0.35 → net_edge ≥ 2%   (deep OTM, payout ~2x)
     #   p_market ≥ 0.35 → no extra floor  (Gate 3 handles it)
     if side == "yes":
         if p_market < 0.15:
-            _otm_min = 0.06
-        elif p_market < 0.25:
-            _otm_min = 0.05
-        elif p_market < 0.35:
             _otm_min = 0.04
+        elif p_market < 0.25:
+            _otm_min = 0.03
+        elif p_market < 0.35:
+            _otm_min = 0.02
         else:
             _otm_min = 0.0
         if _otm_min > 0:

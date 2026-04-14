@@ -462,18 +462,22 @@ def evaluate_trade(
             )
 
     # --- Gate CI: ITM YES composite directional check ---
-    # Two tiers for ITM YES (offset_pct ≤ 0) when composite is active:
-    #   p_up < 0.45  → hard block: composite is bearish, do not bet YES
-    #   p_up 0.45–0.55 → neutral zone: requires net_edge ≥ 10% to fire
-    COMPOSITE_ITM_BEARISH_MAX  = 0.45
-    COMPOSITE_ITM_NEUTRAL_HI   = 0.55
-    COMPOSITE_ITM_NEUTRAL_EDGE = 0.10
+    # Hard block only: composite_p_up < 0.45 means composite is genuinely bearish —
+    # do not bet ITM YES against a bearish signal.
+    #
+    # The former neutral zone (0.45–0.55 requiring 10% edge) was calibrated for the
+    # old model where p_up was a standalone directional indicator separate from p_model.
+    # In the composite drift model, p_up is already embedded in p_model via
+    # score_to_p_model() — a neutral composite already produces near-zero edge
+    # naturally, which Gate R:R and Gate 3 catch without needing this extra layer.
+    # Applies to all assets (BTC, ETH, SOL).
+    COMPOSITE_ITM_BEARISH_MAX = 0.45
     if composite_active and side == "yes" and offset_pct <= 0:
         if composite_p_up < COMPOSITE_ITM_BEARISH_MAX:
             reasons.append(
                 f"Gate CI FAILED: ITM YES with bearish composite "
                 f"(p_up={composite_p_up:.3f} < {COMPOSITE_ITM_BEARISH_MAX}) — "
-                f"composite signal opposes YES direction. Hard block."
+                f"composite opposes YES direction. Hard block."
             )
             return DecisionResult(
                 decision="no_trade", side=side,
@@ -483,30 +487,10 @@ def evaluate_trade(
                 kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
                 was_capped=False, reasons=reasons,
             )
-        elif composite_p_up <= COMPOSITE_ITM_NEUTRAL_HI:
-            if net_edge < COMPOSITE_ITM_NEUTRAL_EDGE:
-                reasons.append(
-                    f"Gate CI FAILED: ITM YES with neutral composite "
-                    f"(p_up={composite_p_up:.3f} in [{COMPOSITE_ITM_BEARISH_MAX},{COMPOSITE_ITM_NEUTRAL_HI}]) — "
-                    f"net_edge={net_edge:+.4f} < {COMPOSITE_ITM_NEUTRAL_EDGE:.0%} required."
-                )
-                return DecisionResult(
-                    decision="no_trade", side=side,
-                    p_model=p_model, p_market=p_market,
-                    raw_edge=raw_edge, net_edge=net_edge,
-                    structure_bias=structure_bias, confirmation_bias=confirmation_bias,
-                    kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
-                    was_capped=False, reasons=reasons,
-                )
-            reasons.append(
-                f"Gate CI PASSED: ITM YES with neutral composite (p_up={composite_p_up:.3f}) — "
-                f"net_edge={net_edge:+.4f} ≥ {COMPOSITE_ITM_NEUTRAL_EDGE:.0%} required."
-            )
-        else:
-            reasons.append(
-                f"Gate CI PASSED: ITM YES with bullish composite (p_up={composite_p_up:.3f} > {COMPOSITE_ITM_NEUTRAL_HI}) — "
-                f"directional conviction present."
-            )
+        reasons.append(
+            f"Gate CI PASSED: ITM YES — composite_p_up={composite_p_up:.3f} ≥ {COMPOSITE_ITM_BEARISH_MAX} "
+            f"(non-bearish). Gate R:R and Gate 3 apply."
+        )
 
     # --- Gate NS: directional confirmation for NO bets ---
     # When composite_active=True: requires composite_p_up ≤ threshold — calibration

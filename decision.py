@@ -375,47 +375,46 @@ def evaluate_trade(
     elif asset == "ETH":
         yes_min = P_MARKET_ETH_YES_MIN
 
-    if not composite_active:
-        if yes_min is not None and side == "yes" and p_market < yes_min:
-            p_edge, p_ref = (p_model, p_market)
-            pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
-            reasons.append(
-                f"Gate PM FAILED: p_market={p_market:.3f} < {yes_min} for {asset} YES — "
-                f"OTM YES win rate is too low at this p_market level."
-            )
-            return DecisionResult(
-                decision="no_trade", side=side,
-                p_model=p_model, p_market=p_market,
-                raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
-                structure_bias=structure_bias, confirmation_bias=confirmation_bias,
-                kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
-                was_capped=False, reasons=reasons,
-            )
-
-        if asset in ("BTC", "ETH") and side == "no" and p_market > P_MARKET_NO_MAX:
-            p_edge, p_ref = (p_market, p_model)
-            pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
-            reasons.append(
-                f"Gate PM FAILED: p_market={p_market:.3f} > {P_MARKET_NO_MAX} for {asset} NO — "
-                f"near-ATM/high p_market NO is net negative (live+archive analysis 2026-04-07)."
-            )
-            return DecisionResult(
-                decision="no_trade", side=side,
-                p_model=p_model, p_market=p_market,
-                raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
-                structure_bias=structure_bias, confirmation_bias=confirmation_bias,
-                kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
-                was_capped=False, reasons=reasons,
-            )
-
-        if asset in ("BTC", "ETH"):
-            reasons.append(
-                f"Gate PM PASSED: p_market={p_market:.3f} in valid range for {asset} {side.upper()}."
-            )
-    else:
+    # Gate PM applies regardless of composite_active. The p_market thresholds are
+    # structural market facts calibrated on archive data — they are not model-specific.
+    # Skipping Gate PM when composite was active allowed deep-OTM YES bets at
+    # p_market < 0.35 through despite empirical evidence they lose money (ETH archive:
+    # p_market < 0.35 YES → 1/8 wins, -$92; composite model does not change this).
+    if yes_min is not None and side == "yes" and p_market < yes_min:
+        p_edge, p_ref = (p_model, p_market)
+        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
         reasons.append(
-            f"Gate PM SKIPPED: composite_active=True — p_market={p_market:.3f} range filter "
-            f"replaced by composite signal + edge gate."
+            f"Gate PM FAILED: p_market={p_market:.3f} < {yes_min} for {asset} YES — "
+            f"OTM YES win rate is too low at this p_market level."
+        )
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
+
+    if asset in ("BTC", "ETH") and side == "no" and p_market > P_MARKET_NO_MAX:
+        p_edge, p_ref = (p_market, p_model)
+        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
+        reasons.append(
+            f"Gate PM FAILED: p_market={p_market:.3f} > {P_MARKET_NO_MAX} for {asset} NO — "
+            f"near-ATM/high p_market NO is net negative (live+archive analysis 2026-04-07)."
+        )
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
+
+    if asset in ("BTC", "ETH"):
+        reasons.append(
+            f"Gate PM PASSED: p_market={p_market:.3f} in valid range for {asset} {side.upper()}."
         )
 
     # --- Gate CS: composite_p_up ≥ 0.55 for YES bets when composite is active ---

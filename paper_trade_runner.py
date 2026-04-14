@@ -142,9 +142,11 @@ CSV_COLUMNS = [
     "bet_fraction",
     "bet_amount",
     "bankroll",
-    "composite_trend",  # trend score from composite_scorer (-6 to +6)
-    "composite_rev",    # reversion score from composite_scorer (-15 to +15)
-    "composite_p_up",   # calibrated directional probability from composite scorer
+    "composite_trend",    # trend score from composite_scorer (-6 to +6)
+    "composite_rev",      # reversion score from composite_scorer (-15 to +15)
+    "composite_p_up",     # calibrated directional probability from composite scorer
+    "chg_30m",            # 30-minute price change fraction at decision time
+    "sharp_move_active",  # True if sharp move inversion was applied this cycle
     "resolved_yes",   # filled by outcome_checker.py
     "would_win",      # filled by outcome_checker.py
     "would_pnl",      # filled by outcome_checker.py
@@ -359,10 +361,20 @@ def main() -> None:
     _sharp_thresh = _SHARP_THRESHOLDS.get(args.asset, 0.008)
     _sharp_up   = _sharp_move_pct >  _sharp_thresh
     _sharp_down = _sharp_move_pct < -_sharp_thresh
-    if _sharp_up or _sharp_down:
-        _direction = "rally" if _sharp_up else "drop"
-        _blocks    = "NO"    if _sharp_up else "YES"
-        print(f"  [sharp_move] {_sharp_move_pct*100:+.2f}% 30m — sharp {_direction} detected, blocking {_blocks} bets (override ≥8%)")
+    _sharp_move_active = _sharp_up or _sharp_down
+    # When a sharp move is detected, invert the composite scores before feeding
+    # into the pipeline.  The composite uses 1h/4h data and lags sharp moves —
+    # its "reversion" signal is systematically wrong in those periods.
+    # Negating (trend, rev) flips p_up through the calibrated lookup table,
+    # which reverses the drift term in score_to_p_model and swaps YES/NO bias.
+    if _sharp_move_active and _composite_computed:
+        _active_trend = -_comp_trend
+        _active_rev   = -_comp_rev
+        _direction    = "rally" if _sharp_up else "drop"
+        print(f"  [sharp_move] {_sharp_move_pct*100:+.2f}% 30m — sharp {_direction} detected, inverting composite scores ({_comp_trend:+d},{_comp_rev:+d}) → ({_active_trend:+d},{_active_rev:+d})")
+    else:
+        _active_trend = _comp_trend
+        _active_rev   = _comp_rev
 
     # --- Funding rate probability adjustment ---
     # Nudge p_yes_model ±1.5% based on funding bias before edge calculation.
@@ -515,7 +527,7 @@ def main() -> None:
             # Falls back to pure log-normal (prob_c.p_yes) when composite is unavailable.
             if _composite_computed:
                 sigma_tau_c   = vol_adj_c * math.sqrt(tau_c)
-                p_model_comp  = score_to_p_model(_comp_trend, _comp_rev, spot, s_k, sigma_tau_c, asset=args.asset)
+                p_model_comp  = score_to_p_model(_active_trend, _active_rev, spot, s_k, sigma_tau_c, asset=args.asset)
             else:
                 p_model_comp  = prob_c.p_yes
             p_yes_adj_c = max(0.03, min(0.97, p_model_comp + funding_delta))
@@ -539,7 +551,7 @@ def main() -> None:
             # phantom 12% edge from the legacy 0.65× calibration correction.
             _composite_active = _composite_computed
             if _composite_active:
-                _cscore, _nscore, _ema_align = composite_to_confirmation(_comp_trend, _comp_rev)
+                _cscore, _nscore, _ema_align = composite_to_confirmation(_active_trend, _active_rev)
             else:
                 _cscore     = confirm.confirmation_score
                 _nscore     = confirm.no_score
@@ -576,17 +588,8 @@ def main() -> None:
             if dec_c.side == "no" and args.asset == "SOL" and offset_c < 0.002:
                 print(f"  [scan] Skipping {c['ticker']} — SOL NO offset={offset_c*100:+.3f}% < 0.20% minimum")
                 continue
-            # Gate SHARP-MOVE: block counter-trend bet during sharp price moves.
-            # Composite uses 1h/4h data — lags sharp moves, creating false reversion edge.
-            _SHARP_OVERRIDE_EDGE = 0.08
-            if _sharp_up and dec_c.side == "no" and dec_c.net_edge < _SHARP_OVERRIDE_EDGE:
-                print(f"  [sharp_move] Skipping {c['ticker']} — NO during sharp rally "
-                      f"({_sharp_move_pct*100:+.2f}%, net={dec_c.net_edge:+.4f} < {_SHARP_OVERRIDE_EDGE:.0%} override)")
-                continue
-            if _sharp_down and dec_c.side == "yes" and dec_c.net_edge < _SHARP_OVERRIDE_EDGE:
-                print(f"  [sharp_move] Skipping {c['ticker']} — YES during sharp drop "
-                      f"({_sharp_move_pct*100:+.2f}%, net={dec_c.net_edge:+.4f} < {_SHARP_OVERRIDE_EDGE:.0%} override)")
-                continue
+            if _sharp_move_active and dec_c.decision == "trade":
+                print(f"  [sharp_move] {c['ticker']} — inverted composite: side={dec_c.side.upper()} net={dec_c.net_edge:+.4f}")
 
             positions = already_traded_expiries.get(expiry_key, {"yes": [], "no": []})
             if dec_c.side == "yes" and any(no_k < s_k for no_k in positions["no"]):
@@ -726,6 +729,8 @@ def main() -> None:
         "composite_trend":    _comp_trend,
         "composite_rev":      _comp_rev,
         "composite_p_up":     round(_comp_p_up, 4),
+        "chg_30m":            round(_sharp_move_pct * 100, 4),
+        "sharp_move_active":  _sharp_move_active,
         "resolved_yes":       "",
         "would_win":          "",
         "would_pnl":          "",

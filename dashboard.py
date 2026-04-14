@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 RESULTS_DIR     = Path(__file__).parent / "results"
 REFRESH_SECONDS = 60
-DISPLAY_FROM    = "2026-04-13 01:59:00"   # hide trades before this UTC time (dashboard cleared Apr 12 6:59 PM PDT — composite drift model restart)
+DISPLAY_FROM    = "2026-04-13 23:50:00"   # hide trades before this UTC time (dashboard cleared Apr 13 4:50 PM PDT — sharp move gate added)
 
 ASSET_CSV = {
     "BTC": RESULTS_DIR / "paper_trades.csv",
@@ -154,18 +154,14 @@ def _fmt(val, fmt, fallback="—"):
 INDICATORS = [
     ("composite_trend",   "Composite Trend Score (4h)"),
     ("composite_rev",     "Composite Reversion Score (1h/15m)"),
-    ("obi_score",         "OBI Score"),
-    ("vpin_score",        "VPIN Score"),
+    ("confirmation_score","Confirmation Score (from composite)"),
+    ("no_score",          "NO Score (from composite)"),
+    ("obi_score",         "Order Book Imbalance"),
     ("funding_bias",      "Funding Rate Bias"),
-    ("stoch_bias",        "Stochastic"),
-    ("ema_stack_bias",    "EMA Stack"),
-    ("vol_score",         "Vol Score"),
-    ("vwap_score",        "VWAP Score (inverted)"),
-    ("vwap_signal",       "VWAP Signal (raw)"),
-    ("vwap_stretch_score","VWAP Stretch"),
+    ("vol_score",         "Vol Regime Score"),
+    ("vwap_score",        "VWAP Score"),
     ("ema_stretch_score", "EMA Stretch Score"),
-    ("confirmation_score","Confirmation Score"),
-    ("no_score",          "NO Score"),
+    ("vpin_score",        "VPIN Score"),
 ]
 
 TABLE_STYLE = [{"selector": "th", "props": [
@@ -323,27 +319,50 @@ def render_asset(asset: str):
     ls2.metric("Side",      str(latest.get("side", "—")).upper())
     ls3.metric("p_model",   _fmt(latest.get("p_yes_model"), "{:.3f}"))
     ls4.metric("p_market",  _fmt(latest.get("p_market"),    "{:.3f}"))
-    ls5.metric("Net edge",  _fmt(latest.get("net_edge"),    "{:+.3f}"))
+    ls5.metric("Net Edge",  _fmt(latest.get("net_edge"),    "{:+.3f}"))
     ls6.metric("Bet",       _fmt(latest.get("bet_amount"),  "${:,.0f}"))
 
-    # Composite scorer row (all assets)
+    # Composite scorer row
     if asset in ("BTC", "ETH", "SOL") and "composite_trend" in df.columns:
         cs1, cs2, cs3, cs4 = st.columns(4)
         comp_trend = latest.get("composite_trend", "—")
         comp_rev   = latest.get("composite_rev",   "—")
         comp_p_up  = latest.get("composite_p_up",  "—")
-        cs1.metric("Composite Trend",    _fmt(comp_trend, "{:+.0f}"))
-        cs2.metric("Composite Rev",      _fmt(comp_rev,   "{:+.0f}"))
-        cs3.metric("Composite p_up",     _fmt(comp_p_up, "{:.1%}"))
+        cs1.metric("Composite Trend",  _fmt(comp_trend, "{:+.0f}"))
+        cs2.metric("Composite Rev",    _fmt(comp_rev,   "{:+.0f}"))
+        cs3.metric("Composite p_up",   _fmt(comp_p_up,  "{:.1%}"))
         _p_up_v = _f(comp_p_up)
-        _edge_vs_base = _p_up_v - 0.504 if _p_up_v == _p_up_v else float("nan")
-        cs4.metric("vs Baseline",        f"{_edge_vs_base:+.1%}" if _edge_vs_base == _edge_vs_base else "—")
+        _asset_base = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}.get(asset, 0.504)
+        _edge_vs_base = _p_up_v - _asset_base if _p_up_v == _p_up_v else float("nan")
+        cs4.metric("vs Baseline",      f"{_edge_vs_base:+.1%}" if _edge_vs_base == _edge_vs_base else "—")
 
-    lb1, lb2, lb3, lb4 = st.columns(4)
+    # Price / contract context row
+    lb1, lb2, lb3, lb4, lb5 = st.columns(5)
     lb1.metric("Spot",              _fmt(latest.get("spot"),   "${:,.2f}"))
     lb2.metric("Strike",            _fmt(latest.get("strike"), "${:,.2f}"))
-    lb3.metric("Contracts Scanned", int(_f(latest.get("contracts_scanned", 0), 0)))
-    lb4.metric("Contract",          latest.get("contract_ticker", "—") or "—")
+    lb3.metric("Offset %",          _fmt(latest.get("offset_pct"), "{:+.3f}%"))
+    lb4.metric("Vol Eff",           _fmt(latest.get("vol_eff"),    "{:.5f}"))
+    lb5.metric("Contracts Scanned", int(_f(latest.get("contracts_scanned", 0), 0)))
+
+    # Sharp move / gate row
+    _chg30 = _f(latest.get("chg_30m", float("nan")))
+    _sharp_active = str(latest.get("sharp_move_active", "")).strip().lower() in ("true", "1")
+    _sharp_label  = "ACTIVE" if _sharp_active else "off"
+    _sharp_color  = "#f0a500" if _sharp_active else "#555"
+    _gate_blocked = str(latest.get("gate_blocked", "")).strip() or "—"
+    _contract_label = latest.get("contract_ticker", "—") or "—"
+    sm1, sm2, sm3, sm4 = st.columns(4)
+    sm1.metric("30m Price Chg",  f"{_chg30:+.3f}%" if _chg30 == _chg30 else "—")
+    sm2.markdown(f"""
+    <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:10px;
+                padding:20px 24px;margin-bottom:12px;">
+      <div style="color:#666;font-size:0.68rem;letter-spacing:0.1em;
+                  text-transform:uppercase;margin-bottom:8px;">Sharp Inversion</div>
+      <div style="color:{_sharp_color};font-size:2rem;font-weight:800;line-height:1;">{_sharp_label}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    sm3.metric("Gate Blocked",  _gate_blocked)
+    sm4.metric("Contract",      _contract_label)
 
     st.markdown("<hr style='margin:14px 0 14px 0;'>", unsafe_allow_html=True)
 
@@ -386,14 +405,15 @@ def render_asset(asset: str):
     # ── Trade log ───────────────────────────────────────────────────────────
     with t1:
         display_cols = [
-            "logged_at", "contract_ticker", "side", "spot", "strike",
-            "tau_minutes", "p_yes_model", "p_market", "net_edge",
+            "logged_at", "contract_ticker", "side",
+            "offset_pct", "spot", "strike", "tau_minutes",
+            "p_yes_model", "p_market", "net_edge",
             "composite_trend", "composite_rev", "composite_p_up",
-            "structure_bias", "confirmation_score", "no_score", "obi_score", "vpin_score", "funding_bias",
-            "stoch_bias", "stoch_k", "stoch_d", "stoch_crossover_active",
-            "ema_stack_bias",
-            "vwap_score", "vwap_signal", "vwap_total", "vwap_stretch_score", "vwap_distance_pct",
-            "bet_amount", "would_pnl", "would_win",
+            "chg_30m", "sharp_move_active",
+            "confirmation_score", "no_score",
+            "obi_score", "funding_bias", "vol_score", "vwap_score", "ema_stretch_score",
+            "vol_eff",
+            "kelly_fraction", "bet_amount", "would_pnl", "would_win",
         ]
         display_cols = [c for c in display_cols if c in df.columns]
         trade_rows   = trades[display_cols].copy().sort_values("logged_at", ascending=False)
@@ -406,47 +426,47 @@ def render_asset(asset: str):
 
         trade_rows["result"] = trade_rows.apply(fmt_result, axis=1)
 
-        for _nc in ["spot", "strike", "tau_minutes", "p_yes_model", "p_market",
-                    "net_edge", "bet_amount", "would_pnl",
+        for _nc in ["offset_pct", "spot", "strike", "tau_minutes", "p_yes_model", "p_market",
+                    "net_edge", "bet_amount", "would_pnl", "kelly_fraction",
                     "composite_trend", "composite_rev", "composite_p_up",
-                    "structure_bias", "confirmation_score", "no_score", "obi_score", "vpin_score", "funding_bias",
-                    "stoch_bias", "stoch_k", "stoch_d",
-                    "ema_stack_bias",
-                    "vwap_score", "vwap_signal", "vwap_total", "vwap_stretch_score", "vwap_distance_pct"]:
+                    "chg_30m", "confirmation_score", "no_score",
+                    "obi_score", "funding_bias", "vol_score", "vwap_score", "ema_stretch_score", "vol_eff"]:
             if _nc in trade_rows.columns:
                 trade_rows[_nc] = pd.to_numeric(trade_rows[_nc], errors="coerce")
 
         trade_rows = trade_rows.drop(columns=["would_win"], errors="ignore")
+        # sharp_move_active: convert bool string to readable label
+        if "sharp_move_active" in trade_rows.columns:
+            trade_rows["sharp_move_active"] = trade_rows["sharp_move_active"].astype(str).str.lower().map(
+                {"true": "INVERTED", "false": "—", "1": "INVERTED", "0": "—"}
+            ).fillna("—")
+
         trade_rows = trade_rows.rename(columns={
-            "logged_at":         "Time (PT)",
-            "contract_ticker":   "Contract",
-            "side":              "Side",
-            "spot":              "Spot",
-            "strike":            "Strike",
-            "tau_minutes":       "τ (min)",
-            "p_yes_model":       "p_model",
-            "p_market":          "p_market",
-            "net_edge":          "Net Edge",
-            "composite_trend":   "Trend",
-            "composite_rev":     "Rev",
-            "composite_p_up":    "p_up",
-            "structure_bias":    "Struct",
-            "confirmation_score":"Conf",
-            "no_score":          "NO Score",
-            "obi_score":         "OBI",
-            "vpin_score":        "VPIN",
-            "funding_bias":      "Funding",
-            "stoch_bias":        "Stoch",
-            "stoch_k":           "Stoch K",
-            "stoch_d":           "Stoch D",
-            "stoch_crossover_active":"Stoch Xover",
-            "ema_stack_bias":    "EMA Stack",
-            "vwap_score":        "VWAP",
-            "vwap_signal":       "VWAP Sig",
-            "vwap_total":        "VWAP Tot",
-            "vwap_stretch_score":"VWAP Str",
-            "vwap_distance_pct": "VWAP Dist%",
-            "bet_amount":        "Bet ($)",
+            "logged_at":          "Time (PT)",
+            "contract_ticker":    "Contract",
+            "side":               "Side",
+            "offset_pct":         "Offset%",
+            "spot":               "Spot",
+            "strike":             "Strike",
+            "tau_minutes":        "τ (min)",
+            "p_yes_model":        "p_model",
+            "p_market":           "p_market",
+            "net_edge":           "Net Edge",
+            "composite_trend":    "Trend",
+            "composite_rev":      "Rev",
+            "composite_p_up":     "p_up",
+            "chg_30m":            "30m Chg%",
+            "sharp_move_active":  "Inversion",
+            "confirmation_score": "Conf",
+            "no_score":           "NO Score",
+            "obi_score":          "OBI",
+            "funding_bias":       "Funding",
+            "vol_score":          "Vol",
+            "vwap_score":         "VWAP",
+            "ema_stretch_score":  "EMA Str",
+            "vol_eff":            "Vol Eff",
+            "kelly_fraction":     "Kelly",
+            "bet_amount":         "Bet ($)",
             "would_pnl":         "P&L ($)",
             "result":            "Result",
         })
@@ -480,7 +500,7 @@ def render_asset(asset: str):
                 pass
             return "color: #888"
 
-        score_cols = [c for c in ["Trend", "Rev", "Struct", "Conf", "NO Score", "OBI", "VPIN", "Funding", "Stoch", "EMA Stack", "VWAP", "VWAP Sig", "VWAP Tot", "VWAP Str"] if c in trade_rows.columns]
+        score_cols = [c for c in ["Trend", "Rev", "Conf", "NO Score", "OBI", "Funding", "Vol", "VWAP", "EMA Str"] if c in trade_rows.columns]
 
         styled = (
             trade_rows.style
@@ -491,13 +511,17 @@ def render_asset(asset: str):
             .format({
                 "Spot":     "${:,.2f}",
                 "Strike":   "${:,.2f}",
+                "Offset%":  "{:+.3f}%",
+                "τ (min)":  "{:.0f}",
                 "p_model":  "{:.3f}",
                 "p_market": "{:.3f}",
                 "Net Edge": "{:+.3f}",
                 "p_up":     "{:.1%}",
+                "30m Chg%": "{:+.3f}%",
+                "Vol Eff":  "{:.5f}",
+                "Kelly":    "{:.4f}",
                 "Bet ($)":  "${:,.0f}",
                 "P&L ($)":  "${:,.2f}",
-                "τ (min)":  "{:.0f}",
             }, na_rep="—")
             .set_properties(**{"background-color": "#1a1a1a", "color": "#ddd", "border-color": "#2a2a2a"})
             .set_table_styles([
@@ -527,17 +551,22 @@ def render_asset(asset: str):
 
     # Signal breakdown expander
     with st.expander("Signal Breakdown"):
-        sb1, sb2, sb3 = st.columns(3)
-        bias_counts = df["structure_bias"].value_counts()
-        sb1.metric("Bullish Structure",  int(bias_counts.get(1,  0)))
-        sb2.metric("Neutral Structure",  int(bias_counts.get(0,  0)))
-        sb3.metric("Bearish Structure",  int(bias_counts.get(-1, 0)))
+        fb1, fb2, fb3 = st.columns(3)
+        fund_counts = df["funding_bias"].value_counts() if "funding_bias" in df.columns else {}
+        fb1.metric("Bullish Funding",  int(fund_counts.get(1,  0)))
+        fb2.metric("Neutral Funding",  int(fund_counts.get(0,  0)))
+        fb3.metric("Bearish Funding",  int(fund_counts.get(-1, 0)))
 
-        cb1, cb2, cb3 = st.columns(3)
-        conf_counts = df["confirmation_bias"].value_counts()
-        cb1.metric("Bullish Confirmation", int(conf_counts.get(1,  0)))
-        cb2.metric("Neutral Confirmation", int(conf_counts.get(0,  0)))
-        cb3.metric("Bearish Confirmation", int(conf_counts.get(-1, 0)))
+        ob1, ob2, ob3 = st.columns(3)
+        obi_counts = df["obi_score"].value_counts() if "obi_score" in df.columns else {}
+        ob1.metric("Bullish OBI",  int(obi_counts.get(1,  0)))
+        ob2.metric("Neutral OBI",  int(obi_counts.get(0,  0)))
+        ob3.metric("Bearish OBI",  int(obi_counts.get(-1, 0)))
+
+        sm1_b, sm2_b = st.columns(2)
+        _sharp_total = int(df["sharp_move_active"].astype(str).str.lower().isin(["true","1"]).sum()) if "sharp_move_active" in df.columns else 0
+        sm1_b.metric("Cycles w/ Sharp Inversion", _sharp_total)
+        sm2_b.metric("Normal Cycles",             max(0, len(df) - _sharp_total))
 
 
 # ---------------------------------------------------------------------------

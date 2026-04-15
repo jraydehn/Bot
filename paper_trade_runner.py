@@ -146,6 +146,8 @@ CSV_COLUMNS = [
     "composite_rev",      # reversion score from composite_scorer (-15 to +15)
     "composite_p_up",     # calibrated directional probability from composite scorer
     "chg_30m",            # 30-minute price change fraction at decision time
+    "chg_10m",            # 10-minute price change fraction at decision time
+    "chg_5m",             # 5-minute price change fraction at decision time
     "sharp_move_active",  # True if sharp move inversion was applied this cycle
     "resolved_yes",   # filled by outcome_checker.py
     "would_win",      # filled by outcome_checker.py
@@ -344,23 +346,57 @@ def main() -> None:
             print(f"  [vol_layer] Error: {_exc} — using factor=1.0")
 
     # --- Sharp move detection ---
-    # Compute 30-minute price change from live 1m candles.
+    # Compute 30-minute and 10-minute price changes from live 1m candles.
     # During sharp rallies the composite lags (1h/4h data) and generates NO edge
     # from reversion signals while price is actually continuing up — and vice versa.
     # Gate: block the counter-trend bet unless edge >= 8% override.
     #   Sharp rally (chg > +thresh) → skip NO  (continuation, not reversion)
     #   Sharp drop  (chg < -thresh) → skip YES (continuation, not reversion)
+    # Two windows are checked: 30m (catches sustained moves) and 10m (catches
+    # sharp moves masked by a prior move in the opposite direction within the 30m
+    # window, e.g. a rally then sharp drop netting only ~0% over 30m).
     _sharp_move_pct = 0.0
+    _sharp_move_pct_10m = 0.0
+    _sharp_move_pct_5m = 0.0
     if live_1m is not None and len(live_1m) >= 31:
         try:
             _sm_close = live_1m["close"].astype(float)
             _sharp_move_pct = float(_sm_close.iloc[-1] / _sm_close.iloc[-31] - 1)
+            if len(_sm_close) >= 11:
+                _sharp_move_pct_10m = float(_sm_close.iloc[-1] / _sm_close.iloc[-11] - 1)
+            if len(_sm_close) >= 6:
+                _sharp_move_pct_5m = float(_sm_close.iloc[-1] / _sm_close.iloc[-6] - 1)
         except Exception:
             pass
-    _SHARP_THRESHOLDS = {"BTC": 0.008, "ETH": 0.015, "SOL": 0.020}
-    _sharp_thresh = _SHARP_THRESHOLDS.get(args.asset, 0.008)
-    _sharp_up   = _sharp_move_pct >  _sharp_thresh
-    _sharp_down = _sharp_move_pct < -_sharp_thresh
+    # For ETH/SOL: also fetch BTC 1m and check BTC's own sharp move thresholds.
+    # If BTC fires, propagate the same direction to the alt (BTC leads).
+    _btc_sharp_up = False
+    _btc_sharp_down = False
+    if args.asset in ("ETH", "SOL"):
+        try:
+            _btc_1m = fetch_recent_1m_candles(lookback_bars=35, asset="BTC")
+            if _btc_1m is not None and len(_btc_1m) >= 31:
+                _btc_close = _btc_1m["close"].astype(float)
+                _btc_chg_30m = float(_btc_close.iloc[-1] / _btc_close.iloc[-31] - 1)
+                _btc_chg_10m = float(_btc_close.iloc[-1] / _btc_close.iloc[-11] - 1) \
+                               if len(_btc_close) >= 11 else 0.0
+                _btc_sharp_up   = _btc_chg_30m > 0.008 or _btc_chg_10m > 0.005
+                _btc_sharp_down = _btc_chg_30m < -0.008 or _btc_chg_10m < -0.005
+                if _btc_sharp_up or _btc_sharp_down:
+                    _btc_dir = "rally" if _btc_sharp_up else "drop"
+                    _btc_win = "10m" if (abs(_btc_chg_10m) >= 0.005 and abs(_btc_chg_30m) < 0.008) else "30m"
+                    _btc_pct = _btc_chg_10m if _btc_win == "10m" else _btc_chg_30m
+                    print(f"  [sharp_move] BTC {_btc_pct*100:+.2f}% {_btc_win} — leading {_btc_dir} detected for {args.asset}")
+        except Exception:
+            pass
+    _SHARP_THRESHOLDS     = {"BTC": 0.008, "ETH": 0.015, "SOL": 0.020}
+    _SHARP_THRESHOLDS_10M = {"BTC": 0.005, "ETH": 0.010, "SOL": 0.013}
+    _sharp_thresh     = _SHARP_THRESHOLDS.get(args.asset, 0.008)
+    _sharp_thresh_10m = _SHARP_THRESHOLDS_10M.get(args.asset, 0.005)
+    _sharp_up   = (_sharp_move_pct >  _sharp_thresh or _sharp_move_pct_10m >  _sharp_thresh_10m
+                   or _btc_sharp_up)
+    _sharp_down = (_sharp_move_pct < -_sharp_thresh or _sharp_move_pct_10m < -_sharp_thresh_10m
+                   or _btc_sharp_down)
     _sharp_move_active = _sharp_up or _sharp_down
     # When a sharp move is detected, invert the composite scores before feeding
     # into the pipeline.  The composite uses 1h/4h data and lags sharp moves —
@@ -371,7 +407,15 @@ def main() -> None:
         _active_trend = -_comp_trend
         _active_rev   = -_comp_rev
         _direction    = "rally" if _sharp_up else "drop"
-        print(f"  [sharp_move] {_sharp_move_pct*100:+.2f}% 30m — sharp {_direction} detected, inverting composite scores ({_comp_trend:+d},{_comp_rev:+d}) → ({_active_trend:+d},{_active_rev:+d})")
+        _asset_fired  = (_sharp_move_pct >= _sharp_thresh or
+                         _sharp_move_pct_10m >= _sharp_thresh_10m or
+                         _sharp_move_pct <= -_sharp_thresh or
+                         _sharp_move_pct_10m <= -_sharp_thresh_10m)
+        _trigger_src    = args.asset if _asset_fired else "BTC"
+        _trigger_window = "10m" if (abs(_sharp_move_pct_10m) >= _sharp_thresh_10m and
+                                    abs(_sharp_move_pct) < _sharp_thresh) else "30m"
+        _trigger_pct    = _sharp_move_pct_10m if _trigger_window == "10m" else _sharp_move_pct
+        print(f"  [sharp_move] {_trigger_pct*100:+.2f}% {_trigger_window} ({_trigger_src}) — sharp {_direction} detected, inverting composite scores ({_comp_trend:+d},{_comp_rev:+d}) → ({_active_trend:+d},{_active_rev:+d})")
     else:
         _active_trend = _comp_trend
         _active_rev   = _comp_rev
@@ -476,7 +520,7 @@ def main() -> None:
                 global _SESSION_SEEDED
                 if not _SESSION_SEEDED:
                     try:
-                        _cooldown_window = pd.Timestamp(now_utc) - pd.Timedelta(seconds=600)
+                        _cooldown_window = pd.Timestamp(now_utc) - pd.Timedelta(seconds=300)
                         for _, r in traded_rows_all[["contract_ticker", "side", "logged_at"]].dropna().iterrows():
                             _ts = pd.to_datetime(r["logged_at"], utc=True)
                             if _ts >= _cooldown_window:
@@ -506,7 +550,7 @@ def main() -> None:
             offset_c = s_k / spot - 1
             spread_c  = c["ask"] - c["bid"]
             # Per-asset spread limits: SOL/ETH naturally wider in volatile conditions
-            _spread_limit = 0.08 if args.asset == "BTC" else 0.20
+            _spread_limit = 0.08 if args.asset == "BTC" else (0.30 if args.asset == "SOL" else 0.25)
             if spread_c > _spread_limit:
                 print(f"  [scan] Skipping {c['ticker']} — spread={spread_c:.3f} (stale/illiquid, limit={_spread_limit})")
                 continue
@@ -537,8 +581,8 @@ def main() -> None:
             expiry_key = _expiry_prefix(c["ticker"])
             expiry_positions = already_traded_expiries.get(expiry_key, {"yes": [], "no": []})
             expiry_trade_count = len(expiry_positions["yes"]) + len(expiry_positions["no"])
-            if expiry_trade_count >= 3:
-                print(f"  [scan] Skipping {c['ticker']} — expiry limit reached ({expiry_trade_count}/3 trades)")
+            if expiry_trade_count >= 8:
+                print(f"  [scan] Skipping {c['ticker']} — expiry limit reached ({expiry_trade_count}/8 trades)")
                 continue
             # Use composite-derived confirmation scores for gate evaluation.
             # composite_to_confirmation() maps validated (trend, rev) signals to the
@@ -624,9 +668,9 @@ def main() -> None:
         _last_same = _SIDE_COOLDOWN.get((_best_expiry_key, best_trade_dec.side))
         if _last_same is not None:
             _elapsed = (now_utc - _last_same).total_seconds()
-            if _elapsed < 600:
+            if _elapsed < 300:
                 print(f"  [scan] Cooldown active — same-side {best_trade_dec.side.upper()} "
-                      f"traded {_elapsed:.0f}s ago in expiry {_best_expiry_key} (cooldown=600s). Skipping.")
+                      f"traded {_elapsed:.0f}s ago in expiry {_best_expiry_key} (cooldown=300s). Skipping.")
                 best_trade_dec = None
         if best_trade_dec is None and best_no_trade_dec is not None:
             dec              = best_no_trade_dec
@@ -730,6 +774,8 @@ def main() -> None:
         "composite_rev":      _comp_rev,
         "composite_p_up":     round(_comp_p_up, 4),
         "chg_30m":            round(_sharp_move_pct * 100, 4),
+        "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
+        "chg_5m":             round(_sharp_move_pct_5m * 100, 4),
         "sharp_move_active":  _sharp_move_active,
         "resolved_yes":       "",
         "would_win":          "",

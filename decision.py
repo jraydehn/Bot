@@ -590,10 +590,10 @@ def evaluate_trade(
                 f"net_edge={_otm_pricing.net_edge:+.4f} ≥ {_otm_min:.0%} required."
             )
 
-    # --- Gate 3: Minimum net edge threshold = 1% ---
-    # Lowered from 3% → 1% for data collection. Composite gates (CS/NS) and
-    # R:R bounds provide quality filtering; Gate 3 is now a sanity floor only.
-    effective_min_edge = 0.01
+    # --- Gate 3: Minimum net edge threshold ---
+    # ETH: 0.5% — lowered for data collection (0.5-1% bucket is net profitable).
+    # BTC/SOL: 1% — 0.5-1% bucket is net negative for SOL; BTC unchanged.
+    effective_min_edge = 0.005 if asset == "ETH" else 0.01
     p_edge, p_ref = (p_model, p_market) if side == "yes" else (p_market, p_model)
     pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=effective_min_edge)
     if not pricing.qualifies:

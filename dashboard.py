@@ -404,19 +404,31 @@ def render_asset(asset: str):
 
     # ── Trade log ───────────────────────────────────────────────────────────
     with t1:
+        _composite_only = st.checkbox(
+            "Composite drift hybrid only",
+            value=True,
+            help="Show only trades using the composite drift hybrid with vol drift model (composite_p_up populated)",
+        )
+
         display_cols = [
             "logged_at", "contract_ticker", "side",
             "offset_pct", "spot", "strike", "tau_minutes",
             "p_yes_model", "p_market", "net_edge",
+            "would_pnl", "would_win",
             "composite_trend", "composite_rev", "composite_p_up",
-            "chg_30m", "sharp_move_active",
+            "chg_5m", "chg_10m", "chg_30m", "sharp_move_active",
             "confirmation_score", "no_score",
             "obi_score", "funding_bias", "vol_score", "vwap_score", "ema_stretch_score",
             "vol_eff",
-            "kelly_fraction", "bet_amount", "would_pnl", "would_win",
+            "kelly_fraction", "bet_amount",
         ]
         display_cols = [c for c in display_cols if c in df.columns]
-        trade_rows   = trades[display_cols].copy().sort_values("logged_at", ascending=False)
+        _trade_source = trades.copy()
+        if _composite_only and "composite_p_up" in _trade_source.columns:
+            _trade_source = _trade_source[
+                pd.to_numeric(_trade_source["composite_p_up"], errors="coerce").fillna(0) != 0
+            ]
+        trade_rows = _trade_source[display_cols].copy().sort_values("logged_at", ascending=False)
 
         def fmt_result(row):
             w = str(row.get("would_win", "")).lower()
@@ -425,16 +437,15 @@ def render_asset(asset: str):
             return "pending"
 
         trade_rows["result"] = trade_rows.apply(fmt_result, axis=1)
+        trade_rows = trade_rows.drop(columns=["would_win"], errors="ignore")
 
         for _nc in ["offset_pct", "spot", "strike", "tau_minutes", "p_yes_model", "p_market",
                     "net_edge", "bet_amount", "would_pnl", "kelly_fraction",
                     "composite_trend", "composite_rev", "composite_p_up",
-                    "chg_30m", "confirmation_score", "no_score",
+                    "chg_5m", "chg_10m", "chg_30m", "confirmation_score", "no_score",
                     "obi_score", "funding_bias", "vol_score", "vwap_score", "ema_stretch_score", "vol_eff"]:
             if _nc in trade_rows.columns:
                 trade_rows[_nc] = pd.to_numeric(trade_rows[_nc], errors="coerce")
-
-        trade_rows = trade_rows.drop(columns=["would_win"], errors="ignore")
         # sharp_move_active: convert bool string to readable label
         if "sharp_move_active" in trade_rows.columns:
             trade_rows["sharp_move_active"] = trade_rows["sharp_move_active"].astype(str).str.lower().map(
@@ -455,6 +466,8 @@ def render_asset(asset: str):
             "composite_trend":    "Trend",
             "composite_rev":      "Rev",
             "composite_p_up":     "p_up",
+            "chg_5m":             "5m Chg%",
+            "chg_10m":            "10m Chg%",
             "chg_30m":            "30m Chg%",
             "sharp_move_active":  "Inversion",
             "confirmation_score": "Conf",
@@ -470,6 +483,19 @@ def render_asset(asset: str):
             "would_pnl":         "P&L ($)",
             "result":            "Result",
         })
+
+        # Enforce column order — computed columns (Result) append to end by default
+        _ordered = [c for c in [
+            "Time (PT)", "Contract", "Side",
+            "Offset%", "Spot", "Strike", "τ (min)",
+            "p_model", "p_market", "Net Edge",
+            "P&L ($)", "Result",
+            "Trend", "Rev", "p_up",
+            "5m Chg%", "10m Chg%", "30m Chg%", "Inversion",
+            "Conf", "NO Score", "OBI", "Funding", "Vol", "VWAP", "EMA Str",
+            "Vol Eff", "Kelly", "Bet ($)",
+        ] if c in trade_rows.columns]
+        trade_rows = trade_rows[_ordered]
 
         def color_result(val):
             if val == "WIN":     return "color: #00c076; font-weight: 700"
@@ -516,7 +542,11 @@ def render_asset(asset: str):
                 "p_model":  "{:.3f}",
                 "p_market": "{:.3f}",
                 "Net Edge": "{:+.3f}",
+                "Trend":    "{:+.0f}",
+                "Rev":      "{:+.0f}",
                 "p_up":     "{:.1%}",
+                "5m Chg%":  "{:+.3f}%",
+                "10m Chg%": "{:+.3f}%",
                 "30m Chg%": "{:+.3f}%",
                 "Vol Eff":  "{:.5f}",
                 "Kelly":    "{:.4f}",
@@ -533,7 +563,38 @@ def render_asset(asset: str):
                 {"selector": "tr:hover td", "props": [("background-color", "#222")]},
             ])
         )
-        st.dataframe(styled, use_container_width=True, height=450)
+        _col_cfg = {
+            "Time (PT)":  st.column_config.Column(width=140),
+            "Contract":   st.column_config.Column(width=210),
+            "Side":       st.column_config.Column(width=48),
+            "Offset%":    st.column_config.Column(width=75),
+            "Spot":       st.column_config.Column(width=90),
+            "Strike":     st.column_config.Column(width=90),
+            "τ (min)":    st.column_config.Column(width=65),
+            "p_model":    st.column_config.Column(width=62),
+            "p_market":   st.column_config.Column(width=62),
+            "Net Edge":   st.column_config.Column(width=68),
+            "P&L ($)":    st.column_config.Column(width=75),
+            "Result":     st.column_config.Column(width=70),
+            "Trend":      st.column_config.Column(width=55),
+            "Rev":        st.column_config.Column(width=50),
+            "p_up":       st.column_config.Column(width=60),
+            "5m Chg%":    st.column_config.Column(width=75),
+            "10m Chg%":   st.column_config.Column(width=80),
+            "30m Chg%":   st.column_config.Column(width=80),
+            "Inversion":  st.column_config.Column(width=80),
+            "Conf":       st.column_config.Column(width=55),
+            "NO Score":   st.column_config.Column(width=75),
+            "OBI":        st.column_config.Column(width=50),
+            "Funding":    st.column_config.Column(width=65),
+            "Vol":        st.column_config.Column(width=50),
+            "VWAP":       st.column_config.Column(width=55),
+            "EMA Str":    st.column_config.Column(width=65),
+            "Vol Eff":    st.column_config.Column(width=75),
+            "Kelly":      st.column_config.Column(width=65),
+            "Bet ($)":    st.column_config.Column(width=65),
+        }
+        st.dataframe(styled, use_container_width=True, height=450, column_config=_col_cfg)
 
     # ── Indicator Stats ──────────────────────────────────────────────────────
     with t3:

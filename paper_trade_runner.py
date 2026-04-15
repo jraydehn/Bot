@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from kalshi_python_sync import KalshiAuth
 from evaluate_point import load_data
 from market_data import compute_realized_volatility
-from probability_engine import estimate_probability, implied_vol_from_price, blend_vol, REALIZED_VOL_WEIGHT
+from probability_engine import estimate_probability, implied_vol_from_price, blend_vol, REALIZED_VOL_WEIGHT, REALIZED_VOL_WEIGHT_BY_ASSET
 from market_structure import detect_market_structure
 from confirmation_indicators import compute_confirmation
 from order_book import fetch_order_book_imbalance
@@ -561,7 +561,8 @@ def main() -> None:
             if vol_ratio_c is not None and vol_ratio_c > _vol_ratio_limit:
                 print(f"  [scan] Skipping {c['ticker']} — vol_ratio={vol_ratio_c:.2f} (realized >> implied, limit={_vol_ratio_limit})")
                 continue
-            vol_eff_c = blend_vol(vol.vol_multi, vol_imp_c)
+            _vol_weight = REALIZED_VOL_WEIGHT_BY_ASSET.get(args.asset, REALIZED_VOL_WEIGHT)
+            vol_eff_c = blend_vol(vol.vol_multi, vol_imp_c, weight=_vol_weight)
             vol_adj_c = vol_eff_c * _vol_factor   # vol regime scaling
             prob_c    = estimate_probability(spot, s_k, tau_c, vol_adj_c,
                                                structure_bias=0,

@@ -117,8 +117,19 @@ def estimate_probability(
 # Fraction of realized vol in the blend (0 = all implied, 1 = all realized).
 # At 0.35, the model uses 35% realized vol + 65% market-implied vol.
 # Backtest on 489 BTC trades: w=0.35 + vr>=1.5 gate outperforms w=0.6 alone by +$531.
-# Implied vol is forward-looking and more predictive when realized vol spikes post-move.
+# Implied vol is forward-looking and more predictive when BTC realized vol spikes post-move.
+#
+# ETH/SOL use 0.60 — their implied vol is typically HIGHER than realized (ratio ~0.88x),
+# so giving more weight to implied would widen the distribution and inflate p_model for
+# OTM YES bets further, which is the wrong direction for those assets.
 REALIZED_VOL_WEIGHT = 0.35
+
+# Per-asset overrides. Used by paper_trade_runner to pass the correct weight to blend_vol.
+REALIZED_VOL_WEIGHT_BY_ASSET: dict = {
+    "BTC": 0.35,
+    "ETH": 0.60,
+    "SOL": 0.60,
+}
 
 
 def blend_vol(

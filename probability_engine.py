@@ -115,8 +115,10 @@ def estimate_probability(
 
 
 # Fraction of realized vol in the blend (0 = all implied, 1 = all realized).
-# At 0.3, the model uses 30% realized vol + 70% market-implied vol.
-REALIZED_VOL_WEIGHT = 0.6
+# At 0.35, the model uses 35% realized vol + 65% market-implied vol.
+# Backtest on 489 BTC trades: w=0.35 + vr>=1.5 gate outperforms w=0.6 alone by +$531.
+# Implied vol is forward-looking and more predictive when realized vol spikes post-move.
+REALIZED_VOL_WEIGHT = 0.35
 
 
 def blend_vol(

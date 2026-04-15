@@ -557,7 +557,7 @@ def main() -> None:
             tau_c     = minutes_to_expiry(c["close_time"])
             vol_imp_c = implied_vol_from_price(pm, spot, s_k, tau_c)
             vol_ratio_c = vol.vol_multi / vol_imp_c if vol_imp_c and vol_imp_c > 0 else None
-            _vol_ratio_limit = 2.0 if args.asset == "BTC" else 5.0
+            _vol_ratio_limit = 1.5 if args.asset == "BTC" else 5.0
             if vol_ratio_c is not None and vol_ratio_c > _vol_ratio_limit:
                 print(f"  [scan] Skipping {c['ticker']} — vol_ratio={vol_ratio_c:.2f} (realized >> implied, limit={_vol_ratio_limit})")
                 continue

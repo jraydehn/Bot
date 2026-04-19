@@ -60,15 +60,6 @@ SMOOTHING_N = 30      # minimum sample for full weight; below this blend toward 
 # Per-asset baselines (measured on test set Jan 2025–Apr 2026)
 ASSET_BASELINES = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}
 
-# Per-asset drift multiplier applied to z_drift in score_to_p_model().
-# Fit on 15-month window (Jan 2025 – Apr 2026, 11k bars × 6 offsets) by minimizing
-# weighted mean |bias| across p_model bins. Improvements vs k=1.0 baseline:
-#   BTC: err 0.0374 → 0.0206   (drift under-applied; asset responds more than Φ⁻¹(p_up) implies)
-#   ETH: err 0.0218 → 0.0196   (marginal — residual 0.4-0.6 bias is structural vol noise)
-#   SOL: err 0.0472 → 0.0106   (drift over-applied; SOL is vol-dominated, composite direction
-#                               matters much less than raw distribution)
-DRIFT_MULTIPLIER = {"BTC": 1.40, "ETH": 0.80, "SOL": 0.20}
-
 
 # ════════════════════════════════════════════════════════════════════════════════
 # INDICATOR HELPERS
@@ -477,16 +468,14 @@ def score_to_p_model(trend_score: int, reversion_score: int,
     Convert composite scores into a calibrated p_model for a specific contract.
 
     Applies the empirically-calibrated p_up as a drift term in the log-normal model:
-        z_strike = log(K / S) / sigma_tau           — pure log-normal distance to strike
-        z_drift  = Φ⁻¹(p_up) * DRIFT_MULTIPLIER     — composite signal in z-units,
-                                                      per-asset scaled
+        z_strike = log(K / S) / sigma_tau      — pure log-normal distance to strike
+        z_drift  = Φ⁻¹(p_up)                  — composite signal in z-units
         z_adj    = z_strike - z_drift
         p_model  = 1 - Φ(z_adj)
 
-    DRIFT_MULTIPLIER is fit per-asset against 15mo data to minimize mean calibration bias:
-      BTC=1.40 (drift under-applied at k=1.0)
-      ETH=0.80 (drift slightly over-applied)
-      SOL=0.20 (SOL is vol-dominated; composite direction matters much less)
+    When p_up = baseline (50.4%), z_drift ≈ 0.01 and p_model ≈ pure log-normal.
+    When p_up = 72.7% (strong YES signal), z_drift ≈ 0.60 — shifts p_model upward.
+    When p_up = 33.5% (strong NO signal),  z_drift ≈ -0.43 — shifts p_model downward.
 
     Args:
         trend_score     : int, -6 to +6
@@ -502,8 +491,7 @@ def score_to_p_model(trend_score: int, reversion_score: int,
         return 0.5
     p_up     = lookup_p_up(trend_score, reversion_score, asset=asset)
     z_strike = math.log(strike / spot) / sigma_tau
-    k_drift  = DRIFT_MULTIPLIER.get(asset.upper(), 1.0)
-    z_drift  = norm.ppf(p_up) * k_drift
+    z_drift  = norm.ppf(p_up)
     z_adj    = z_strike - z_drift
     return float(np.clip(1 - norm.cdf(z_adj), 0.01, 0.99))
 

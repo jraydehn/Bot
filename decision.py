@@ -305,24 +305,6 @@ def evaluate_trade(
     side = force_side
     required_bias = +1 if side == "yes" else -1
 
-    # --- BTC p_model calibration correction (applied once, in force_side path) ---
-    # Calibration is now side-specific:
-    #
-    # NO bets (0.65×): validated against 15-month backtest and live paper trade simulation.
-    #   Blocked trades (72% win) vs pass trades (59% win) confirmed 0.65 is correct for NO.
-    #
-    # YES bets (0.90×): 0.65 was systematically blocking ALL YES trades because calibrated
-    #   p_model always fell below p_market even for ITM contracts. Walk-forward backtest
-    #   calib factor across all bets was 0.9831 (~1.0). 0.90 is a conservative correction
-    #   for YES — allows ITM YES edge to surface while still discounting OTM YES slightly.
-    #
-    # ETH/SOL: NOT applied — their model is validated as-is.
-    if asset == "BTC" and not composite_active:
-        if side == "no":
-            p_model = p_model * 0.65
-        else:  # yes
-            p_model = p_model * 0.90
-
     # Direction-aware edge:
     #   YES bet: we profit when market underprices YES → edge = p_model - p_market
     #   NO  bet: we profit when market overprices YES  → edge = p_market - p_model

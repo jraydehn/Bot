@@ -42,6 +42,7 @@ import update_data
 import live_trading
 from kelly_sizing import compute_kelly_size
 from composite_scorer import compute_current_scores, score_to_p_model, composite_to_confirmation, lookup_p_up
+import direct_p_model
 from vol_layer import compute_vol_regime_factor
 from live_signal import (
     load_auth, kalshi_get, fetch_live_spot, fetch_current_price, find_live_contract,
@@ -199,10 +200,12 @@ def main() -> None:
                         help="Asset to trade: BTC, ETH, or SOL (required)")
     parser.add_argument("--live", action="store_true",
                         help="Place real orders on Kalshi (default: paper-trade only)")
+    parser.add_argument("--dual", action="store_true",
+                        help="Single process: fetch data once, log to both paper and live CSVs, place real orders")
     parser.add_argument("--daily-loss-limit", type=float, default=100.0,
                         help="Max dollars to lose live per calendar day before halting (default: 100)")
-    parser.add_argument("--max-contracts", type=int, default=20,
-                        help="Hard cap on contracts per live order (default: 20)")
+    parser.add_argument("--max-contracts", type=int, default=500,
+                        help="Hard cap on contracts per live order (default: 500 — size controlled by Kelly dollar amount)")
     args = parser.parse_args()
     args.asset = args.asset.upper()
 
@@ -215,23 +218,25 @@ def main() -> None:
     # All assets trend rather than range during these windows — extended to ETH/SOL
     # after ETH took a losing trade at 13:36 UTC on 2026-04-07.
     # Revert: copy paper_trade_runner_v1.py → paper_trade_runner.py
-    SKIP_HOURS = {14, 18}  # 14:00-14:59 and 18:00-18:59 UTC (US open + afternoon peak)
-    if now_utc.hour in SKIP_HOURS:
-        if getattr(args, 'live', False):
-            print(f"  [vol-filter] LIVE skipping — UTC hour {now_utc.hour} is in high-volatility window (14, 18 UTC).")
+    SKIP_HOURS = {12, 13, 18}  # 12-13 UTC (pre/NY market open) + 18:00 UTC (afternoon peak)
+    if now_utc.hour in SKIP_HOURS and now_utc.weekday() < 5:  # 0=Mon…4=Fri; skip filter on weekends
+        if args.live or getattr(args, 'dual', False):
+            print(f"  [vol-filter] Skipping — UTC hour {now_utc.hour} is in high-volatility window {SKIP_HOURS}.")
             return
-        print(f"  [vol-filter] PAPER continuing — collecting data in high-volatility window (14, 18 UTC).")
+        print(f"  [vol-filter] PAPER continuing — collecting data in high-volatility window {SKIP_HOURS}.")
 
-    if args.live:
-        print(f"  *** LIVE MODE *** daily_loss_limit=${args.daily_loss_limit:.0f}  max_contracts={args.max_contracts}")
+    _is_live_or_dual = args.live or getattr(args, 'dual', False)
+    if _is_live_or_dual:
+        _mode_label = "DUAL" if getattr(args, 'dual', False) else "LIVE"
+        print(f"  *** {_mode_label} MODE *** daily_loss_limit=${args.daily_loss_limit:.0f}  max_contracts={args.max_contracts}")
 
     # Auth
     auth = None
     if not args.sim:
         auth = load_auth()
         if auth is None:
-            if args.live:
-                print("  ERROR: --live requires Kalshi credentials. Set KALSHI_KEY_ID / KALSHI_KEY_PATH.")
+            if _is_live_or_dual:
+                print("  ERROR: --live/--dual requires Kalshi credentials. Set KALSHI_KEY_ID / KALSHI_KEY_PATH.")
                 return
             print("  WARNING: No Kalshi credentials — using simulated p_market.")
 
@@ -331,6 +336,62 @@ def main() -> None:
             print(f"  [composite] trend={_comp_trend:+d}  rev={_comp_rev:+d}  p_up={_comp_p_up:.1%}")
         except Exception as _exc:
             print(f"  [composite] Score error: {_exc} — using pure log-normal fallback")
+
+    # --- Trend Z (diagnostic) ---
+    # Multi-timeframe trend strength: log-return over N bars / rolling vol (Z-score).
+    # Captures sustained directional displacement at 12h, 24h, 48h horizons.
+    # Positive = sustained upward pressure; negative = sustained downward pressure.
+    # Logged only — no gating yet. Used to develop regime-adaptive model adjustments.
+    _trend_z = float("nan")
+    try:
+        import numpy as _tz_np
+        _tz_close = df_confirm["close"]
+        _tz_log   = _tz_np.log(_tz_close / _tz_close.shift(1))
+        _tzs = []
+        for _N in [12, 24, 48]:
+            _lr    = _tz_np.log(_tz_close.iloc[-1] / _tz_close.iloc[-1 - _N])
+            _vol_N = _tz_log.iloc[-_N:].std() * (_N ** 0.5)
+            if _vol_N > 0:
+                _tzs.append(_lr / _vol_N)
+        if _tzs:
+            _trend_z = sum(_tzs) / len(_tzs)
+        print(f"  [trend_z] {_trend_z:+.3f}  (12h/24h/48h composite — diagnostic only)")
+    except Exception as _exc:
+        print(f"  [trend_z] Error: {_exc}")
+
+    # --- SMC signals (diagnostic) ---
+    # Smart Money Concepts: Break of Structure, Change of Character, Supply/Demand Zones.
+    # 4h BOS = structural regime (persistent, changes rarely).
+    # 1h BOS = tactical signal (changes within a session).
+    # 4h zones = key price levels where institutions previously acted.
+    # ChoCH flags a regime flip before EMA/composite indicators confirm it.
+    # Logged only — no gating yet. Used to build regime-adaptive model adjustments.
+    if _composite_computed:
+        try:
+            from smc_signals import get_smc_signals as _get_smc
+            _smc = _get_smc(df_confirm, _df_4h_comp, spot)
+            _choch_str = ""
+            if _smc.choch_4h and _smc.choch_1h:
+                _choch_str = "  *** ChoCH BOTH tf ***"
+            elif _smc.choch_4h:
+                _choch_str = "  * ChoCH 4h"
+            elif _smc.choch_1h:
+                _choch_str = "  * ChoCH 1h"
+            print(f"  [smc] 4h={_smc.bos_4h}  1h={_smc.bos_1h}{_choch_str}")
+            print(f"  [smc] sh_4h={_smc.swing_high_4h}  sl_4h={_smc.swing_low_4h}  "
+                  f"sh_1h={_smc.swing_high_1h}  sl_1h={_smc.swing_low_1h}")
+            _sup_str = f"+{_smc.nearest_supply_pct:.2f}%" if _smc.nearest_supply_pct is not None else "none"
+            _dem_str = f"-{_smc.nearest_demand_pct:.2f}%" if _smc.nearest_demand_pct is not None else "none"
+            _zone_flags = []
+            if _smc.in_supply_zone:
+                _zone_flags.append("IN_SUPPLY")
+            if _smc.in_demand_zone:
+                _zone_flags.append("IN_DEMAND")
+            _zone_str = "  [" + ", ".join(_zone_flags) + "]" if _zone_flags else ""
+            print(f"  [smc] supply={_sup_str} ({_smc.n_supply_zones} zones)  "
+                  f"demand={_dem_str} ({_smc.n_demand_zones} zones){_zone_str}")
+        except Exception as _smc_exc:
+            print(f"  [smc] Error: {_smc_exc}")
 
     # --- Vol regime factor ---
     # Scales blended sigma before score_to_p_model. Validated on 19,947h of OHLCV data.
@@ -432,6 +493,55 @@ def main() -> None:
 
     gate_side = "yes" if struct.structure_bias == 1 else "no"
 
+    # --- 30m streak trend gate (BTC only) ---
+    # Block YES when 2 consecutive bearish 30m closes and stoch_k <= 70.
+    # Block NO when 2 consecutive bullish 30m closes and stoch_k in [30, 60].
+    # Excludes the last (possibly incomplete) 30m bar; uses the 2 bars before it.
+    _streak30 = None  # 'bearish', 'bullish', or None
+    if args.asset == "BTC" and live_1m is not None and len(live_1m) >= 62:
+        try:
+            _df30_close = live_1m['close'].resample('30min').last()
+            _chg30 = _df30_close.pct_change()
+            _last2 = _chg30.iloc[-3:-1]
+            if len(_last2) == 2:
+                if all(x < -0.0005 for x in _last2):
+                    _streak30 = 'bearish'
+                elif all(x > 0.0005 for x in _last2):
+                    _streak30 = 'bullish'
+        except Exception as _exc:
+            print(f"  [streak_gate] Error computing 30m streak: {_exc}")
+    if _streak30:
+        _stoch_k_disp = f"{confirm.stoch_k:.1f}" if confirm.stoch_k == confirm.stoch_k else "NaN"
+        print(f"  [streak_gate] BTC 30m streak: {_streak30} | stoch_k={_stoch_k_disp}")
+
+    # --- Counter-tape severity gate (hybrid hard-block + Kelly dampener) ---
+    # Block or shrink bets that fight recent realized price movement. Addresses
+    # slow-grind regime mismatches that the streak gate (2-consecutive-bar pattern)
+    # misses when the grind has alternating sub-threshold candles.
+    #
+    # severity = max over 5m/10m/30m windows of (counter-tape fraction / threshold)
+    #   severity < 0.5           → full Kelly
+    #   0.5 ≤ severity < 1.5     → Kelly scaled to max(0.25, 1 - (sev-0.5)*0.75)
+    #   severity ≥ 1.5           → hard block
+    #
+    # Thresholds calibrated against paper-trade archive:
+    #   BTC: +$172 delta, blocks 10 (4W/6L)
+    #   ETH: +$192 delta, blocks 17 (8W/9L)
+    #   SOL: +$156 delta, blocks 1 — naturally quiet at wider thresholds
+    _COUNTER_TAPE_THR = {
+        "BTC": (0.0016, 0.0024, 0.0040),
+        "ETH": (0.0015, 0.0025, 0.0040),
+        "SOL": (0.0025, 0.0040, 0.0065),
+    }
+
+    def _counter_tape_severity(side: str) -> float:
+        thr = _COUNTER_TAPE_THR.get(args.asset)
+        if thr is None:
+            return 0.0
+        sign = -1.0 if side == "yes" else 1.0
+        c5, c10, c30 = sign * _sharp_move_pct_5m, sign * _sharp_move_pct_10m, sign * _sharp_move_pct
+        return max(0.0, c5 / thr[0], c10 / thr[1], c30 / thr[2])
+
     # Scan all contracts for nearest expiry; select highest net_edge trade.
     # Falls back to simulated p_market on nearest OTM contract when no auth.
     contracts_scanned = 0
@@ -456,7 +566,7 @@ def main() -> None:
         csv_path_check = get_csv_path(args.asset)
         # Live runner tracks its own positions from live_trades.csv to avoid being
         # blocked by paper-only trades. Paper runner uses paper_trades.csv as before.
-        if hasattr(args, 'live') and args.live:
+        if args.live or getattr(args, 'dual', False):
             expiry_source_path = live_trading.get_live_csv_path(args.asset)
             expiry_source_is_live = True
         else:
@@ -480,10 +590,13 @@ def main() -> None:
                         df_live_exp = df_live_exp[
                             pd.to_datetime(df_live_exp["logged_at"], utc=True) > pd.Timestamp(now_utc) - pd.Timedelta(hours=2)
                         ]
-                        for _, r in df_live_exp[["contract_ticker", "side"]].dropna().iterrows():
+                        for _, r in df_live_exp[["contract_ticker", "side", "strike"]].dropna().iterrows():
                             key = _expiry_prefix(str(r["contract_ticker"]))
                             bucket = already_traded_expiries.setdefault(key, {"yes": [], "no": []})
-                            bucket[r["side"]].append(0.0)
+                            try:
+                                bucket[r["side"]].append(float(r["strike"]))
+                            except (ValueError, TypeError):
+                                bucket[r["side"]].append(0.0)
                     except Exception:
                         pass
                 else:
@@ -498,7 +611,7 @@ def main() -> None:
                 # Live runner syncs from live_trades.csv only to avoid being blocked by
                 # paper-only trades.
                 try:
-                    if hasattr(args, 'live') and args.live:
+                    if args.live or getattr(args, 'dual', False):
                         seed_path = live_trading.get_live_csv_path(args.asset)
                         if seed_path.exists():
                             df_live = pd.read_csv(seed_path)
@@ -516,12 +629,24 @@ def main() -> None:
                 except Exception:
                     pass
                 # Seed _SIDE_COOLDOWN from recent trades so restarts preserve cooldown state.
-                # Also runs every cycle so concurrent processes share cooldown awareness.
+                # Live runner seeds from live_trades.csv only — paper trades must not
+                # influence live cooldowns (they are independent processes).
                 global _SESSION_SEEDED
                 if not _SESSION_SEEDED:
                     try:
                         _cooldown_window = pd.Timestamp(now_utc) - pd.Timedelta(seconds=300)
-                        for _, r in traded_rows_all[["contract_ticker", "side", "logged_at"]].dropna().iterrows():
+                        if args.live or getattr(args, 'dual', False):
+                            _cd_source = pd.DataFrame()
+                            _cd_path = live_trading.get_live_csv_path(args.asset)
+                            if _cd_path.exists():
+                                _cd_df = pd.read_csv(_cd_path)
+                                _cd_source = _cd_df[
+                                    pd.to_datetime(_cd_df["logged_at"], utc=True) >= _cooldown_window
+                                ]
+                            _cd_rows = _cd_source[["contract_ticker", "side", "logged_at"]].dropna() if not _cd_source.empty else pd.DataFrame()
+                        else:
+                            _cd_rows = traded_rows_all[["contract_ticker", "side", "logged_at"]].dropna()
+                        for _, r in _cd_rows.iterrows():
                             _ts = pd.to_datetime(r["logged_at"], utc=True)
                             if _ts >= _cooldown_window:
                                 _key = (_expiry_prefix(str(r["contract_ticker"])), r["side"])
@@ -572,7 +697,24 @@ def main() -> None:
             # Falls back to pure log-normal (prob_c.p_yes) when composite is unavailable.
             if _composite_computed:
                 sigma_tau_c   = vol_adj_c * math.sqrt(tau_c)
-                p_model_comp  = score_to_p_model(_active_trend, _active_rev, spot, s_k, sigma_tau_c, asset=args.asset)
+                p_model_comp  = None
+                # ETH / SOL: use trained strike-hit model (validated +$467 ETH, +$3,780 SOL on test)
+                # BTC: direct model regressed on test — stay on legacy score_to_p_model
+                if direct_p_model.asset_supported(args.asset):
+                    try:
+                        p_model_comp = direct_p_model.compute_p_model_direct(
+                            asset=args.asset,
+                            df_1m=live_1m, df_1h=df_confirm,
+                            df_4h=_df_4h_comp, df_15m=_df_15m_comp,
+                            offset_pct=offset_c,
+                            composite_trend=float(_active_trend),
+                            composite_rev=float(_active_rev),
+                        )
+                    except Exception as _e:
+                        print(f"  [direct_p_model] inference error ({args.asset}): {_e} — falling back")
+                        p_model_comp = None
+                if p_model_comp is None:
+                    p_model_comp = score_to_p_model(_active_trend, _active_rev, spot, s_k, sigma_tau_c, asset=args.asset)
             else:
                 p_model_comp  = prob_c.p_yes
             p_yes_adj_c = max(0.03, min(0.97, p_model_comp + funding_delta))
@@ -582,8 +724,8 @@ def main() -> None:
             expiry_key = _expiry_prefix(c["ticker"])
             expiry_positions = already_traded_expiries.get(expiry_key, {"yes": [], "no": []})
             expiry_trade_count = len(expiry_positions["yes"]) + len(expiry_positions["no"])
-            if expiry_trade_count >= 8:
-                print(f"  [scan] Skipping {c['ticker']} — expiry limit reached ({expiry_trade_count}/8 trades)")
+            if expiry_trade_count >= 6:
+                print(f"  [scan] Skipping {c['ticker']} — expiry limit reached ({expiry_trade_count}/6 trades)")
                 continue
             # Use composite-derived confirmation scores for gate evaluation.
             # composite_to_confirmation() maps validated (trend, rev) signals to the
@@ -646,7 +788,8 @@ def main() -> None:
 
             meta_c    = {"strike": s_k, "p_market": pm, "prob": prob_c,
                          "contract_ticker": c["ticker"], "close_ts": c["close_time"],
-                         "vol_eff": vol_eff_c, "bid": c["bid"], "ask": c["ask"]}
+                         "vol_eff": vol_eff_c, "bid": c["bid"], "ask": c["ask"],
+                         "p_model_comp": p_model_comp}
 
             if best_any_dec is None or dec_c.net_edge > best_any_dec.net_edge:
                 best_any_dec  = dec_c
@@ -656,6 +799,32 @@ def main() -> None:
                 if best_no_trade_dec is None or dec_c.net_edge > best_no_trade_dec.net_edge:
                     best_no_trade_dec  = dec_c
                     best_no_trade_meta = meta_c
+
+            # 30m streak gate: only blocks contracts that would trade
+            if dec_c.decision == "trade" and _streak30 is not None:
+                _sk = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
+                _gate = False
+                if dec_c.side == "yes" and _streak30 == "bearish" and _sk <= 70:
+                    _gate = True
+                elif dec_c.side == "no" and _streak30 == "bullish" and 30 <= _sk <= 60:
+                    _gate = True
+                if _gate:
+                    print(f"  [streak_gate] Blocked {dec_c.side.upper()} {c['ticker']} — streak30={_streak30}, stoch_k={_sk:.1f}")
+                    continue
+
+            # Counter-tape severity gate: hard block or dampen by severity zone
+            if dec_c.decision == "trade":
+                _sev = _counter_tape_severity(dec_c.side)
+                if _sev >= 1.5:
+                    print(f"  [counter_tape] BLOCK {dec_c.side.upper()} {c['ticker']} — severity={_sev:.2f} "
+                          f"(chg_5m={_sharp_move_pct_5m*100:+.2f}% 10m={_sharp_move_pct_10m*100:+.2f}% 30m={_sharp_move_pct*100:+.2f}%)")
+                    continue
+                elif _sev >= 0.5:
+                    _scale = max(0.25, 1.0 - (_sev - 0.5) * 0.75)
+                    dec_c.bet_amount   = round(dec_c.bet_amount * _scale, 2)
+                    dec_c.bet_fraction = dec_c.bet_fraction * _scale
+                    print(f"  [counter_tape] DAMPEN {dec_c.side.upper()} {c['ticker']} — severity={_sev:.2f} "
+                          f"kelly_scale={_scale:.2f} → bet=${dec_c.bet_amount:.2f}")
 
             if dec_c.decision == "trade":
                 if best_trade_dec is None or dec_c.net_edge > best_trade_dec.net_edge:
@@ -688,6 +857,20 @@ def main() -> None:
             p_market_source  = "real"
     else:
         if best_any_dec is not None:
+            # Re-check streak gate before using fallback — the streak gate uses continue
+            # to skip best_trade_dec, but best_any_dec was already set before the gate ran.
+            _sk_fb = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
+            if (best_any_dec.side == "yes" and _streak30 == "bearish" and _sk_fb <= 70) or \
+               (best_any_dec.side == "no"  and _streak30 == "bullish" and 30 <= _sk_fb <= 60):
+                print(f"  [scan] Streak gate blocked fallback {best_any_dec.side.upper()} "
+                      f"({best_any_meta['contract_ticker'] if best_any_meta else ''}) — skipping.")
+                return
+            # Re-check counter-tape severity on fallback (hard block only; dampening doesn't apply to no_trade)
+            _sev_fb = _counter_tape_severity(best_any_dec.side)
+            if _sev_fb >= 1.5:
+                print(f"  [scan] Counter-tape blocked fallback {best_any_dec.side.upper()} "
+                      f"({best_any_meta['contract_ticker'] if best_any_meta else ''}) — severity={_sev_fb:.2f}. Skipping.")
+                return
             dec             = best_any_dec
             chosen          = best_any_meta
             p_market_source = "real"
@@ -722,7 +905,7 @@ def main() -> None:
         "offset_pct":         round(effective_offset * 100, 4),
         "p_market":           round(p_market, 6),
         "p_market_source":    p_market_source,
-        "p_yes_model":        round(prob.p_yes, 6),
+        "p_yes_model":        round(chosen.get("p_model_comp", prob.p_yes), 6),
         "z_score":            round(prob.z_score, 4),
         "vol_60m":            round(vol.vol_60m, 8),
         "vol_60m_model":      round(vol.vol_multi, 8),
@@ -790,21 +973,21 @@ def main() -> None:
     if contract_ticker:
         print(f"  Contract: {contract_ticker}  close_ts={close_ts}")
 
-    # Live runner skips paper CSV logging — the paper runner handles that.
-    # Writing from both processes causes duplicate rows in paper_trades.csv.
-    if not getattr(args, 'live', False):
-        csv_path = get_csv_path(args.asset)
-        ensure_csv_exists(csv_path)
-        append_row(row, csv_path)
-    if dec.decision == "trade":
-        _SESSION_TRADED[contract_ticker] = dec.net_edge
-        _SIDE_COOLDOWN[(_expiry_prefix(contract_ticker), dec.side)] = now_utc
+    # --- Logging and live order placement ---
+    # Dual mode: paper and live must always match.
+    #   - no_trade: log to paper immediately (no live action needed).
+    #   - trade: validate all live checks first, then mark session state + log both CSVs.
+    #            If any live check fails, skip session state update too — contract stays
+    #            eligible for future cycles.
+    # Paper-only mode: always log to paper and update session state.
+    # Pure live mode: never log to paper (separate paper process handles it).
+    _is_dual = getattr(args, 'dual', False)
 
-    # --- Live order placement ---
-    if args.live and dec.decision == "trade" and auth is not None:
+    if _is_live_or_dual and dec.decision == "trade" and auth is not None:
         _live_csv = live_trading.get_live_csv_path(args.asset)
         if not live_trading.check_daily_loss_limit(args.daily_loss_limit, _live_csv):
-            return  # daily limit hit, skip order
+            print("  [dual] Daily limit hit — skipping paper log too (live/paper must match).")
+            return
 
         bid_c = chosen.get("bid", p_market - 0.01)
         ask_c = chosen.get("ask", p_market + 0.01)
@@ -815,6 +998,11 @@ def main() -> None:
             ask=ask_c,
             max_contracts=args.max_contracts,
         )
+        if count == 0:
+            print(f"  [live] Bet amount ${dec.bet_amount:.2f} < single contract cost — skipping order")
+            if _is_dual:
+                print("  [dual] Skipping paper log and session state update (live/paper must match).")
+            return
 
         # Confirm balance before placing
         balance = live_trading.get_balance(auth)
@@ -823,6 +1011,8 @@ def main() -> None:
             print(f"  [live] Balance: ${balance:.2f}  order cost ≈ ${order_cost:.2f}")
             if order_cost > balance:
                 print(f"  [live] Insufficient balance — skipping order")
+                if _is_dual:
+                    print("  [dual] Skipping paper log and session state update (live/paper must match).")
                 return
 
         order_result = live_trading.place_order(
@@ -841,6 +1031,23 @@ def main() -> None:
             asset=args.asset,
             csv_path=_live_csv,
         )
+        # Update session state only after live order is confirmed placed
+        _SESSION_TRADED[contract_ticker] = dec.net_edge
+        _SIDE_COOLDOWN[(_expiry_prefix(contract_ticker), dec.side)] = now_utc
+        # Log to paper CSV only after live order succeeds (dual mode keeps CSVs in sync)
+        if _is_dual:
+            csv_path = get_csv_path(args.asset)
+            ensure_csv_exists(csv_path)
+            append_row(row, csv_path)
+
+    elif not args.live:
+        # Pure paper mode OR dual no_trade: log to paper CSV and update session state
+        if dec.decision == "trade":
+            _SESSION_TRADED[contract_ticker] = dec.net_edge
+            _SIDE_COOLDOWN[(_expiry_prefix(contract_ticker), dec.side)] = now_utc
+        csv_path = get_csv_path(args.asset)
+        ensure_csv_exists(csv_path)
+        append_row(row, csv_path)
 
 
 if __name__ == "__main__":
@@ -850,18 +1057,24 @@ if __name__ == "__main__":
     _loop_parser = _ap.ArgumentParser(add_help=False)
     _loop_parser.add_argument("--asset", type=str, default="BTC")
     _loop_parser.add_argument("--live", action="store_true")
+    _loop_parser.add_argument("--dual", action="store_true")
     _loop_args, _ = _loop_parser.parse_known_args()
     _loop_asset = _loop_args.asset.upper()
     _loop_live  = _loop_args.live
+    _loop_dual  = getattr(_loop_args, 'dual', False)
+    _loop_is_live_mode = _loop_live or _loop_dual  # dual places real orders like live
 
     # Enforce single-process-per-asset via lockfile.
+    # Dual mode uses "live_trade" prefix — it places real orders and is the authoritative process.
     # A second launch for the same asset exits immediately with a clear error.
-    _lock_path = Path(__file__).parent / f".paper_trade_{_loop_asset}.lock"
+    _lock_prefix = "live_trade" if _loop_is_live_mode else "paper_trade"
+    _lock_path = Path(__file__).parent / f".{_lock_prefix}_{_loop_asset}.lock"
     _lock_fd = open(_lock_path, "w")
     try:
         _fcntl.flock(_lock_fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
     except BlockingIOError:
-        print(f"ERROR: Another {_loop_asset} paper trade process is already running. Exiting.")
+        _mode_str = "dual" if _loop_dual else ("live" if _loop_live else "paper")
+        print(f"ERROR: Another {_loop_asset} {_mode_str} trade process is already running. Exiting.")
         sys.exit(1)
 
     loop_count = 0
@@ -874,11 +1087,10 @@ if __name__ == "__main__":
             _SESSION_SEEDED = False  # allow CSV re-seed so still-open contracts stay blocked
             print(f"  [session] New hour — already_traded reset.")
             _last_hour = _current_hour
-        # Data update: live runner skips unless paper runner's data is stale (>5 min old).
-        # This prevents both processes writing the same parquet simultaneously.
-        _should_update = not _loop_live or loop_count % 30 == 0
-        if _loop_live and loop_count % 30 == 0:
-            # Check age of most recent 1m parquet
+        # Data update: dual/paper runner always updates. Pure live runner defers to paper runner.
+        _should_update = not _loop_live or _loop_dual or loop_count % 30 == 0
+        if _loop_live and not _loop_dual and loop_count % 30 == 0:
+            # Pure live runner: check age of most recent 1m parquet before updating
             from live_signal import ASSET_CONFIG as _AC
             _sym = _AC.get(_loop_asset, _AC["BTC"])["binance_symbol"]
             _parquets = sorted(
@@ -899,7 +1111,7 @@ if __name__ == "__main__":
                 print(f"  [data] Update failed (will retry next cycle): {e}")
         if loop_count % 5 == 0:
             outcome_checker.main(get_csv_path(_loop_asset))
-            if _loop_live:
+            if _loop_is_live_mode:
                 _live_auth = load_auth()
                 if _live_auth:
                     live_trading.settle_live_trades(_live_auth, live_trading.get_live_csv_path(_loop_asset))

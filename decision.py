@@ -305,6 +305,24 @@ def evaluate_trade(
     side = force_side
     required_bias = +1 if side == "yes" else -1
 
+    # --- BTC p_model calibration correction (applied once, in force_side path) ---
+    # Calibration is side-specific:
+    #
+    # NO bets (0.65×): validated against 15-month backtest and live paper trade simulation.
+    #   Blocked trades (72% win) vs pass trades (59% win) confirmed 0.65 is correct for NO.
+    #
+    # YES bets (0.90×): 0.65 was systematically blocking ALL YES trades because calibrated
+    #   p_model always fell below p_market even for ITM contracts. Walk-forward backtest
+    #   calib factor across all bets was 0.9831 (~1.0). 0.90 is a conservative correction
+    #   for YES — allows ITM YES edge to surface while still discounting OTM YES slightly.
+    #
+    # ETH/SOL: NOT applied — their model is validated as-is.
+    if asset == "BTC" and not composite_active:
+        if side == "no":
+            p_model = p_model * 0.65
+        else:  # yes
+            p_model = p_model * 0.90
+
     # Direction-aware edge:
     #   YES bet: we profit when market underprices YES → edge = p_model - p_market
     #   NO  bet: we profit when market overprices YES  → edge = p_market - p_model
@@ -593,9 +611,10 @@ def evaluate_trade(
     # --- Gate R:R: filter by risk-to-reward ratio ---
     # Formula:
     #   YES: rr = p_market / (1 - p_market)
-    #        Upper bound: rr > 3.0 blocks high p_market YES (pm > 0.75) where
-    #        you risk a lot to win little — mirrors NO lower bound.
-    #        Exception: net_edge >= 0.08 overrides (strong edge justifies poor R:R).
+    #        Upper bound: rr > 3.0 blocks YES at p_market > 0.75 unconditionally.
+    #        Archive data (75%+ YES): 8 trades, 62.5% WR, -$89 net even with avg 9% edge.
+    #        R:R math: at pm=0.76, breakeven WR = 76%. Getting 62.5%. No edge exception —
+    #        the data shows the exception was losing money.
     #
     #   NO:  rr = (1 - p_market) / p_market
     #        Lower bound: rr < 0.33 blocks near-ATM NO (pm > 0.75).
@@ -607,17 +626,17 @@ def evaluate_trade(
     RR_EDGE_EXCEPTION = 0.08
     rr = p_market / (1 - p_market) if side == "yes" else (1 - p_market) / p_market
     if side == "yes":
-        rr_fail = rr > RR_MAX_YES and pricing.net_edge < RR_EDGE_EXCEPTION
+        rr_fail = rr > RR_MAX_YES  # no edge exception — archive shows it loses regardless
     else:
         rr_fail = (rr < RR_MIN_NO or rr > RR_MAX_NO) and pricing.net_edge < RR_EDGE_EXCEPTION
     if rr_fail:
         if side == "yes":
-            bound = f"> {RR_MAX_YES} (high p_market YES)"
+            bound = f"> {RR_MAX_YES} (p_market > 0.75 — poor R:R, blocked unconditionally)"
         else:
             bound = f"< {RR_MIN_NO} (near-ATM NO)" if rr < RR_MIN_NO else f"> {RR_MAX_NO} (cheap NO)"
+        edge_clause = "" if side == "yes" else f" and net_edge={pricing.net_edge:+.4f} < {RR_EDGE_EXCEPTION:.0%} exception threshold"
         reasons.append(
-            f"Gate R:R FAILED: R:R={rr:.2f} {bound} for {side.upper()} at p_market={p_market:.3f} "
-            f"and net_edge={pricing.net_edge:+.4f} < {RR_EDGE_EXCEPTION:.0%} exception threshold."
+            f"Gate R:R FAILED: R:R={rr:.2f} {bound} for {side.upper()} at p_market={p_market:.3f}{edge_clause}."
         )
         return DecisionResult(
             decision="no_trade", side=side,
@@ -648,8 +667,15 @@ def evaluate_trade(
     # Multipliers calibrated from paper trade analysis with EMA-Dir gate applied:
     #   YES: half Kelly (0.50) — 63.5% win rate (ema=bearish + edge≥5%)
     #   NO:  half Kelly (0.50) — 63% win rate (ema=bullish + no_score≥1 + edge≥5%)
+    #
+    # ITM YES (p_market > 0.75): cap at 2% of bankroll.
+    # These bets are profitable (84% WR, +$47 archive) but the payout ratio is poor
+    # — at pm=0.84 you risk $16.80 to win $3.20. Capping at 2% keeps the trade but
+    # limits single-trade exposure to ~$8 at a $400 bankroll.
     kelly_multiplier = 0.50
-    kelly = compute_kelly_size(p_model, p_market, bankroll, kelly_multiplier, side=side)
+    _max_bet = 0.02 if (side == "yes" and p_market > 0.75) else 0.05
+    kelly = compute_kelly_size(p_model, p_market, bankroll, kelly_multiplier, side=side,
+                               max_bet_fraction=_max_bet)
     reasons.append(f"Sizing: {kelly.reason}")
 
     return DecisionResult(

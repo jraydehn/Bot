@@ -45,6 +45,7 @@ def compute_kelly_size(
     bankroll: float,
     kelly_multiplier: float = 0.25,
     side: str = "yes",
+    max_bet_fraction: float = MAX_BET_FRACTION,
 ) -> KellyResult:
     """
     Compute optimal bet size using the Kelly criterion for a binary event contract.
@@ -103,10 +104,10 @@ def compute_kelly_size(
             reason="Kelly fraction is zero or negative — no edge, do not bet.",
         )
 
-    # Scale by kelly_multiplier, then hard cap at 5%
+    # Scale by kelly_multiplier, then hard cap at max_bet_fraction (default 5%)
     scaled_f = f * kelly_multiplier
-    was_capped = scaled_f > MAX_BET_FRACTION
-    bet_fraction = min(scaled_f, MAX_BET_FRACTION)
+    was_capped = scaled_f > max_bet_fraction
+    bet_fraction = min(scaled_f, max_bet_fraction)
     bet_amount = round(bet_fraction * bankroll, 2)
 
     multiplier_pct = int(kelly_multiplier * 100)

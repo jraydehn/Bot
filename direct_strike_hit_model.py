@@ -26,6 +26,7 @@ import pandas as pd
 from scipy.stats import norm, rankdata
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss, roc_auc_score
 warnings.filterwarnings("ignore")
 
@@ -41,11 +42,20 @@ RESULTS_DIR = Path(__file__).parent / "results"
 OUT_DIR = Path(__file__).parent / "reform_results"
 OUT_DIR.mkdir(exist_ok=True)
 
-TRAIN_START = pd.Timestamp("2025-01-01", tz="UTC")
+TRAIN_START = pd.Timestamp("2025-01-01", tz="UTC")   # default; overridden per-asset below
 TRAIN_END   = pd.Timestamp("2026-01-01", tz="UTC")
 VAL_START   = pd.Timestamp("2026-01-01", tz="UTC")
 VAL_END     = pd.Timestamp("2026-03-16", tz="UTC")
 TEST_START  = pd.Timestamp("2026-03-16", tz="UTC")
+
+# ETH uses a shorter training window to drop the 2025 bull-run OTM YES hit patterns.
+# Those patterns inflate OTM YES probability estimates that don't hold in the current
+# bear/sideways regime (2026). Jul 2025 is after the ETH cycle peak (~May-Jun 2025).
+ASSET_TRAIN_START = {
+    "BTC": pd.Timestamp("2025-01-01", tz="UTC"),
+    "ETH": pd.Timestamp("2025-07-01", tz="UTC"),
+    "SOL": pd.Timestamp("2025-01-01", tz="UTC"),
+}
 
 BANKROLL_0 = 1000.0
 KELLY_MULT = 0.50
@@ -86,7 +96,7 @@ def load_asset(sym):
 
 
 def extract_indicator_values(d_1m, d_15m, d_1h, d_4h):
-    """Continuous values of all 14 composite indicators on 1h bars."""
+    """Continuous values of all composite indicators on 1h bars."""
     idx = d_1h.index
     out = pd.DataFrame(index=idx)
     # Trend (4h)
@@ -109,9 +119,26 @@ def extract_indicator_values(d_1m, d_15m, d_1h, d_4h):
     out["rev_dc_15m"]    = _dc_pct(d_15m["high"], d_15m["low"], d_15m["close"], 20).resample("1h", origin="start_day").last().reindex(idx, method="ffill")
     out["rev_wpr_1h"]    = _wpr(d_1h["high"], d_1h["low"], d_1h["close"], 14)
     # Move z-score (1h return / 24h rolling std)
-    lr = np.log(d_1h["close"]/d_1h["close"].shift(1))
-    roll_vol = lr.rolling(24).std()
-    out["rev_move_z"] = lr / roll_vol.replace(0, float("nan"))
+    lr_1h = np.log(d_1h["close"]/d_1h["close"].shift(1))
+    roll_vol = lr_1h.rolling(24).std()
+    out["rev_move_z"] = lr_1h / roll_vol.replace(0, float("nan"))
+
+    # trend_z_24h: 24h log return normalised by 24h rolling vol × sqrt(24)
+    lr_24h = np.log(d_1h["close"] / d_1h["close"].shift(24))
+    out["trend_z_24h"] = lr_24h / (roll_vol.replace(0, float("nan")) * math.sqrt(24))
+
+    # composite_trend / composite_rev: aggregated vote counts from the full scoring engine
+    print("    computing composite scores (includes VWAP — may take a moment)...", flush=True)
+    trend_votes, rev_votes = compute_scores(
+        d_1h["close"], d_1h["high"], d_1h["low"], d_1h["volume"],
+        d_4h["close"], d_4h["high"], d_4h["low"], d_4h["volume"],
+        d_15m["close"], d_15m["high"], d_15m["low"],
+        d_1m["close"], d_1m["volume"],
+        ts_1h=idx,
+    )
+    out["composite_trend"] = trend_votes
+    out["composite_rev"]   = rev_votes
+
     return out
 
 
@@ -131,10 +158,14 @@ def build_dataset(asset, sym):
 
     offsets = ASSET_OFFSET_GRIDS[asset]
     rows = []
+    sigma_1h = indicators["vol_pm"] * math.sqrt(60)  # 1h lognormal std for z_strike
     for off in offsets:
         target = (next_close > close * (1 + off)).astype(int)
         block = indicators.copy()
         block["offset_pct"] = off
+        # z_strike: how many 1h sigma units to the strike (key lognormal regime feature)
+        log_off = math.log(1.0 + off) if abs(off) < 0.99 else 0.0
+        block["z_strike"] = log_off / sigma_1h.replace(0, float("nan"))
         block["target"] = target
         block = block.dropna()
         rows.append(block)
@@ -150,6 +181,7 @@ FEATURE_COLUMNS = [
     "rev_rsi_1h", "rev_rsi_4h", "rev_stoch_15m", "rev_stoch_1h",
     "rev_keltner_15m", "rev_dc_15m", "rev_wpr_1h", "rev_move_z",
     "offset_pct", "vol_pm",
+    "z_strike", "composite_trend", "composite_rev", "trend_z_24h",
 ]
 
 
@@ -157,24 +189,30 @@ def train_model(asset, sym):
     print(f"\n{'─'*78}\n  [{asset}] building dataset...\n{'─'*78}", flush=True)
     t0 = time.time()
     ds = build_dataset(asset, sym)
-    tr_mask = (ds.index >= TRAIN_START) & (ds.index < TRAIN_END)
+    asset_train_start = ASSET_TRAIN_START.get(asset, TRAIN_START)
+    tr_mask = (ds.index >= asset_train_start) & (ds.index < TRAIN_END)
     va_mask = (ds.index >= VAL_START) & (ds.index < VAL_END)
     tr = ds[tr_mask]
     va = ds[va_mask]
-    print(f"  Train: {len(tr):,} (bar, offset) rows / Val: {len(va):,} rows", flush=True)
+    print(f"  Train: {len(tr):,} rows (from {asset_train_start.date()}) / Val: {len(va):,} rows", flush=True)
     X_tr = tr[FEATURE_COLUMNS].values; y_tr = tr["target"].values
     X_va = va[FEATURE_COLUMNS].values; y_va = va["target"].values
 
-    print(f"  Training HistGradientBoostingClassifier...", flush=True)
+    # Exponential recency weighting: most-recent training samples weighted ~7x more than oldest.
+    RECENCY_K = 2.0
+    t_vals = np.array([t.timestamp() for t in tr.index])
+    t_min, t_max = t_vals.min(), t_vals.max()
+    t_range = t_max - t_min
+    sample_weights = np.exp(RECENCY_K * (t_vals - t_min) / t_range) if t_range > 0 else np.ones(len(tr))
+
+    print(f"  Training HistGradientBoostingClassifier (recency-weighted, k={RECENCY_K})...", flush=True)
     clf = HistGradientBoostingClassifier(
         max_iter=300, learning_rate=0.05, max_depth=5,
         l2_regularization=1.0, early_stopping=True,
-        validation_fraction=None,  # we supply our own val via early stopping monitor
+        validation_fraction=None,
         random_state=42,
     )
-    # sklearn's built-in early stopping uses an internal val split; we pass full train.
-    # For explicit external val eval, we iterate with staged_predict_proba — simpler: train on train only.
-    clf.fit(X_tr, y_tr)
+    clf.fit(X_tr, y_tr, sample_weight=sample_weights)
     p_tr = clf.predict_proba(X_tr)[:, 1]
     p_va_raw = clf.predict_proba(X_va)[:, 1]
     auc_tr = roc_auc_score(y_tr, p_tr)
@@ -183,7 +221,7 @@ def train_model(asset, sym):
     print(f"  Train AUC: {auc_tr:.4f}  |  Val AUC: {auc_va:.4f}  (log_loss: {ll_va:.4f})", flush=True)
     print(f"  Train→Val gap: {auc_tr - auc_va:+.4f}", flush=True)
 
-    # Isotonic calibration on val
+    # Unified isotonic calibration (fallback)
     iso = IsotonicRegression(out_of_bounds='clip', y_min=0.0, y_max=1.0)
     iso.fit(p_va_raw, y_va)
     p_va_cal = iso.predict(p_va_raw)
@@ -191,8 +229,33 @@ def train_model(asset, sym):
     ll_va_cal = log_loss(y_va, np.clip(p_va_cal, 1e-6, 1-1e-6), labels=[0,1])
     print(f"  Val AUC after isotonic: {auc_va_cal:.4f} (log_loss: {ll_va_cal:.4f})", flush=True)
 
+    # Split isotonic calibration by offset sign (OTM vs ITM).
+    # OTM and ITM bets have fundamentally different hit-rate dynamics; a single calibrator
+    # averages over them, systematically overcorrecting one at the expense of the other.
+    # ETH additionally benefits from this because the bull-era OTM hit rates in 2025
+    # inflate the unified calibrator's OTM YES estimates.
+    va_otm_mask = va["offset_pct"] > 0
+    va_itm_mask = ~va_otm_mask
+    iso_otm, iso_itm = None, None
+
+    if va_otm_mask.sum() >= 20:
+        iso_otm = IsotonicRegression(out_of_bounds='clip', y_min=0.0, y_max=1.0)
+        iso_otm.fit(p_va_raw[va_otm_mask], y_va[va_otm_mask])
+        p_otm_cal = iso_otm.predict(p_va_raw[va_otm_mask])
+        ll_otm = log_loss(y_va[va_otm_mask], np.clip(p_otm_cal, 1e-6, 1-1e-6), labels=[0,1])
+        print(f"  iso_otm: {va_otm_mask.sum()} val samples  log_loss={ll_otm:.4f}", flush=True)
+
+    if va_itm_mask.sum() >= 20:
+        iso_itm = IsotonicRegression(out_of_bounds='clip', y_min=0.0, y_max=1.0)
+        iso_itm.fit(p_va_raw[va_itm_mask], y_va[va_itm_mask])
+        p_itm_cal = iso_itm.predict(p_va_raw[va_itm_mask])
+        ll_itm = log_loss(y_va[va_itm_mask], np.clip(p_itm_cal, 1e-6, 1-1e-6), labels=[0,1])
+        print(f"  iso_itm: {va_itm_mask.sum()} val samples  log_loss={ll_itm:.4f}", flush=True)
+
     # Save
-    pipe = {"asset": asset, "clf": clf, "iso": iso, "features": FEATURE_COLUMNS,
+    pipe = {"asset": asset, "clf": clf, "iso": iso,
+            "iso_otm": iso_otm, "iso_itm": iso_itm,
+            "features": FEATURE_COLUMNS,
             "auc_tr": auc_tr, "auc_va": auc_va, "auc_va_cal": auc_va_cal}
     with open(OUT_DIR / f"direct_model_{asset}.pkl", "wb") as f:
         pickle.dump(pipe, f)
@@ -333,21 +396,35 @@ def run_bt(asset, scans_df, mode, pipe=None, feature_cache=None):
                 # Direct model: predict P(close > strike) from features
                 dt_floor = pd.Timestamp(dt).floor("1h")
                 if dt_floor not in feature_cache.index: continue
-                feats = feature_cache.loc[dt_floor][[c for c in FEATURE_COLUMNS if c not in ("offset_pct", "vol_pm")]]
                 offset_pct = (row["strike"] - row["spot"]) / row["spot"]
-                # Build feature vector
-                vec = np.array([[*feats.values, offset_pct, feats.name if False else feature_cache.loc[dt_floor, "vol_pm"]]])
-                # vec order must match FEATURE_COLUMNS
+                vol_pm_bar = float(feature_cache.loc[dt_floor, "vol_pm"])
+                sigma_1h = vol_pm_bar * math.sqrt(60)
+                log_off = math.log(1.0 + offset_pct) if abs(offset_pct) < 0.99 else 0.0
+                z_strike_val = log_off / sigma_1h if sigma_1h > 0 else 0.0
+                # Build feature vector — z_strike computed per-contract since it depends on offset
                 try:
                     vec = np.array([[
-                        feature_cache.loc[dt_floor, c] if c not in ("offset_pct",) else offset_pct
+                        feature_cache.loc[dt_floor, c] if c not in ("offset_pct", "z_strike")
+                        else (offset_pct if c == "offset_pct" else z_strike_val)
                         for c in FEATURE_COLUMNS
                     ]])
                 except KeyError:
                     continue
                 if np.any(np.isnan(vec)): continue
                 p_raw = float(pipe["clf"].predict_proba(vec)[0, 1])
-                p_mv = float(np.clip(pipe["iso"].predict([p_raw])[0], 0.01, 0.99))
+                if offset_pct > 0 and pipe.get("iso_otm") is not None:
+                    p_mv = float(np.clip(pipe["iso_otm"].predict([p_raw])[0], 0.01, 0.99))
+                elif offset_pct <= 0 and pipe.get("iso_itm") is not None:
+                    p_mv = float(np.clip(pipe["iso_itm"].predict([p_raw])[0], 0.01, 0.99))
+                else:
+                    p_mv = float(np.clip(pipe["iso"].predict([p_raw])[0], 0.01, 0.99))
+                if pipe.get("platt") is not None:
+                    try:
+                        p_c = float(np.clip(p_mv, 1e-6, 1 - 1e-6))
+                        lo = math.log(p_c / (1 - p_c))
+                        p_mv = float(pipe["platt"].predict_proba([[lo]])[0, 1])
+                    except Exception:
+                        pass
             cand = evaluate_row(row, p_mv, p_up_v, params)
             if cand is None: continue
             if best is None or cand["net"] > best["net"]:
@@ -372,19 +449,127 @@ def run_bt(asset, scans_df, mode, pipe=None, feature_cache=None):
                 n_no=sum(1 for s in sides if s=="no"))
 
 
+def fit_live_calibration(asset, sym, pipe, feature_cache):
+    """
+    Second-stage Platt scaling using resolved live trades from the test window.
+
+    Rationale: the isotonic calibration is fitted on the val set (Jan–Mar 2026).
+    If the current live period has different hit-rate dynamics (e.g. sustained ETH
+    downtrend), the model's probability outputs will be systematically biased relative
+    to live outcomes. Platt scaling (logistic regression on log-odds of the model's
+    output vs actual resolved_yes) corrects this distributional shift without blocking
+    any bet class — the model retains full adaptability.
+
+    Fitted per-asset on all resolved live trades (both YES and NO sides).
+    Stored as pipe["platt"]. Applied in compute_p_model_direct() after isotonic cal.
+    """
+    if asset == "ETH":
+        patterns = ["paper_trades_eth_archive_*.csv", "paper_trades_eth.csv"]
+    elif asset == "SOL":
+        patterns = ["paper_trades_sol_archive_*.csv", "paper_trades_sol.csv"]
+    else:
+        return None  # BTC not using direct model
+
+    files = []
+    for pat in patterns:
+        files.extend(sorted(RESULTS_DIR.glob(pat)))
+    dfs = []
+    for f in files:
+        try: dfs.append(pd.read_csv(f, low_memory=False))
+        except Exception: pass
+    if not dfs: return None
+
+    raw = pd.concat(dfs, ignore_index=True)
+    raw["decision_time"] = pd.to_datetime(raw["decision_time"], utc=True, errors="coerce")
+    raw = raw.dropna(subset=["decision_time", "spot", "strike", "resolved_yes"])
+    bool_map = {"True": 1, "False": 0, "true": 1, "false": 0, "1": 1, "0": 0}
+    raw["resolved_yes"] = raw["resolved_yes"].astype(str).map(bool_map)
+    raw = raw.dropna(subset=["resolved_yes"])
+    raw = raw[raw["decision_time"] >= TEST_START]
+    raw = raw.drop_duplicates(subset=["decision_time", "contract_ticker"], keep="last")
+    raw["spot"] = pd.to_numeric(raw["spot"], errors="coerce")
+    raw["strike"] = pd.to_numeric(raw["strike"], errors="coerce")
+    raw = raw.dropna(subset=["spot", "strike"])
+
+    if len(raw) < 20:
+        print(f"  [{asset}] Too few live trades ({len(raw)}) — skipping live calibration", flush=True)
+        return None
+
+    # Re-run new model on each resolved trade to get fresh predictions
+    preds, actuals = [], []
+    for _, row in raw.iterrows():
+        dt_floor = row["decision_time"].floor("1h")
+        if dt_floor not in feature_cache.index: continue
+        spot = float(row["spot"]); strike = float(row["strike"])
+        if spot <= 0: continue
+        offset_pct = (strike - spot) / spot
+        vol_pm_bar = float(feature_cache.loc[dt_floor, "vol_pm"])
+        sigma_1h = vol_pm_bar * math.sqrt(60)
+        log_off = math.log(1.0 + offset_pct) if abs(offset_pct) < 0.99 else 0.0
+        z_strike_val = log_off / sigma_1h if sigma_1h > 0 else 0.0
+        try:
+            vec = np.array([[
+                feature_cache.loc[dt_floor, c] if c not in ("offset_pct", "z_strike")
+                else (offset_pct if c == "offset_pct" else z_strike_val)
+                for c in FEATURE_COLUMNS
+            ]])
+        except KeyError:
+            continue
+        if np.any(np.isnan(vec)): continue
+        p_raw = float(pipe["clf"].predict_proba(vec)[0, 1])
+        p_cal = float(np.clip(pipe["iso"].predict([p_raw])[0], 0.01, 0.99))
+        preds.append(p_cal)
+        actuals.append(int(row["resolved_yes"]))
+
+    if len(preds) < 20:
+        print(f"  [{asset}] Too few matched predictions ({len(preds)}) — skipping live calibration", flush=True)
+        return None
+
+    preds_arr = np.clip(np.array(preds), 1e-6, 1 - 1e-6)
+    actuals_arr = np.array(actuals)
+    log_odds = np.log(preds_arr / (1 - preds_arr)).reshape(-1, 1)
+
+    platt = LogisticRegression(C=1.0, max_iter=300)
+    platt.fit(log_odds, actuals_arr)
+
+    p_platt = platt.predict_proba(log_odds)[:, 1]
+    ll_before = log_loss(actuals_arr, preds_arr)
+    ll_after  = log_loss(actuals_arr, np.clip(p_platt, 1e-6, 1 - 1e-6))
+    print(f"  [{asset}] Live Platt calibration: {len(preds)} samples", flush=True)
+    print(f"  [{asset}] Platt coef={platt.coef_[0][0]:.3f}  intercept={platt.intercept_[0]:.3f}", flush=True)
+    print(f"  [{asset}] Log-loss: {ll_before:.4f} → {ll_after:.4f} ({ll_after - ll_before:+.4f})", flush=True)
+    return platt
+
+
 def main():
     print(f"\n{'='*78}\n  DIRECT STRIKE-HIT MODEL — train + test vs baseline\n{'='*78}", flush=True)
 
     pipelines = {}
+    feature_caches = {}
     for asset, sym in [("BTC","BTCUSDT"), ("ETH","ETHUSDT"), ("SOL","SOLUSDT")]:
         pipelines[asset] = train_model(asset, sym)
+
+    # Live Platt calibration — fitted on resolved live trades, per ETH/SOL
+    print(f"\n{'='*78}\n  LIVE PLATT CALIBRATION\n{'='*78}", flush=True)
+    for asset, sym in [("ETH","ETHUSDT"), ("SOL","SOLUSDT")]:
+        print(f"\n  [{asset}] Building feature cache...", flush=True)
+        fcache = build_feature_cache(asset, sym)
+        feature_caches[asset] = fcache
+        platt = fit_live_calibration(asset, sym, pipelines[asset], fcache)
+        if platt is not None:
+            pipelines[asset]["platt"] = platt
+            with open(OUT_DIR / f"direct_model_{asset}.pkl", "wb") as f:
+                pickle.dump(pipelines[asset], f)
+            print(f"  [{asset}] Updated pickle with Platt calibration", flush=True)
 
     print(f"\n{'='*78}\n  PnL BACKTEST on TEST window (2026-03-16 → present)\n{'='*78}", flush=True)
     for asset, sym in [("BTC","BTCUSDT"), ("ETH","ETHUSDT"), ("SOL","SOLUSDT")]:
         scans = load_archive(asset)
         if scans.empty: print(f"  [{asset}] no scans"); continue
-        print(f"\n  [{asset}] Building feature cache for test window...", flush=True)
-        fcache = build_feature_cache(asset, sym)
+        if asset not in feature_caches:
+            print(f"\n  [{asset}] Building feature cache for test window...", flush=True)
+            feature_caches[asset] = build_feature_cache(asset, sym)
+        fcache = feature_caches[asset]
         r_base = run_bt(asset, scans, mode="baseline")
         r_dir = run_bt(asset, scans, mode="direct", pipe=pipelines[asset], feature_cache=fcache)
         def fmt(r):

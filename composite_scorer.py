@@ -67,7 +67,7 @@ ASSET_BASELINES = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}
 #   ETH: err 0.0218 → 0.0196   (marginal — residual 0.4-0.6 bias is structural vol noise)
 #   SOL: err 0.0472 → 0.0106   (drift over-applied; SOL is vol-dominated, composite direction
 #                               matters much less than raw distribution)
-DRIFT_MULTIPLIER = {"BTC": 1.40, "ETH": 0.80, "SOL": 0.20}
+DRIFT_MULTIPLIER = {"BTC": 1.00, "ETH": 0.80, "SOL": 0.20}
 
 
 # ════════════════════════════════════════════════════════════════════════════════

@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 RESULTS_DIR     = Path(__file__).parent / "results"
 REFRESH_SECONDS = 60
-DISPLAY_FROM    = "2026-04-13 23:50:00"   # hide trades before this UTC time (dashboard cleared Apr 13 4:50 PM PDT — sharp move gate added)
+DISPLAY_FROM    = "2026-04-21 03:40:00"   # hide trades before this UTC time (dashboard cleared Apr 20 8:40 PM PDT — BTC drift multiplier reverted to k=1.0, 0.65×/0.90× restored)
 
 ASSET_CSV = {
     "BTC": RESULTS_DIR / "paper_trades.csv",
@@ -407,6 +407,7 @@ def render_asset(asset: str):
         _composite_only = st.checkbox(
             "Composite drift hybrid only",
             value=True,
+            key=f"composite_only_{asset}",
             help="Show only trades using the composite drift hybrid with vol drift model (composite_p_up populated)",
         )
 

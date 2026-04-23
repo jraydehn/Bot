@@ -742,26 +742,36 @@ def main() -> None:
                 p_model_comp  = prob_c.p_yes
 
             # BTC isotonic calibration: correct lognormal overconfidence before edge calc.
-            # For NO bets where calibration flips edge negative, allow through when
-            # composite_p_up < 0.50 (model is bearish — NO bet is directionally coherent).
+            # Rescue conditions keep the original p_model when calibration kills edge
+            # but directional signals confirm the bet is coherent:
+            #   NO rescue:  composite_p_up < 0.50 — model is bearish, NO is directional
+            #   YES rescue: stoch_k < 35 AND chg_5m > 0 — oversold + price already ticking
+            #               up = mean reversion recovery underway for ITM YES
             if args.asset == "BTC":
                 _iso_cal = _load_btc_iso()
                 if _iso_cal is not None:
                     _p_cal = float(_iso_cal["iso"].predict([p_model_comp])[0])
-                    _edge_orig_no = (1 - p_model_comp) - (1 - pm)
-                    _edge_cal_no  = (1 - _p_cal) - (1 - pm)
+                    _edge_orig_no  = (1 - p_model_comp) - (1 - pm)
+                    _edge_cal_no   = (1 - _p_cal) - (1 - pm)
                     _edge_orig_yes = p_model_comp - pm
                     _edge_cal_yes  = _p_cal - pm
-                    # Rescue: if NO edge flips negative but p_up < 0.50, keep original p_model
-                    _is_no_rescue = (_edge_orig_no > 0 and _edge_cal_no <= 0 and _comp_p_up < 0.50)
-                    if not _is_no_rescue:
+                    _sk_iso = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
+                    _is_no_rescue  = (_edge_orig_no  > 0 and _edge_cal_no  <= 0
+                                      and _comp_p_up < 0.50)
+                    _is_yes_rescue = (_edge_orig_yes > 0 and _edge_cal_yes <= 0
+                                      and _sk_iso < 35 and _sharp_move_pct_5m > 0)
+                    if _is_no_rescue:
+                        print(f"  [btc_iso] NO rescue: p_up={_comp_p_up:.3f}<0.50, "
+                              f"keeping p_model={p_model_comp:.3f} (cal={_p_cal:.3f})")
+                    elif _is_yes_rescue:
+                        print(f"  [btc_iso] YES rescue: stoch_k={_sk_iso:.1f}<35 + "
+                              f"chg_5m={_sharp_move_pct_5m*100:+.2f}%>0, "
+                              f"keeping p_model={p_model_comp:.3f} (cal={_p_cal:.3f})")
+                    else:
                         if abs(_p_cal - p_model_comp) > 0.01:
                             print(f"  [btc_iso] p_model {p_model_comp:.3f} -> {_p_cal:.3f}  "
                                   f"(offset={offset_c*100:+.2f}%  pm={pm:.3f})")
                         p_model_comp = _p_cal
-                    else:
-                        print(f"  [btc_iso] NO rescue: p_up={_comp_p_up:.3f}<0.50, "
-                              f"keeping p_model={p_model_comp:.3f} (cal={_p_cal:.3f})")
 
             p_yes_adj_c = max(0.03, min(0.97, p_model_comp + funding_delta))
             if c["ticker"] in already_traded:

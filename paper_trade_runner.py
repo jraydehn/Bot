@@ -43,7 +43,30 @@ import live_trading
 from kelly_sizing import compute_kelly_size
 from composite_scorer import compute_current_scores, score_to_p_model, composite_to_confirmation, lookup_p_up
 import direct_p_model
+import pickle as _pickle
 from vol_layer import compute_vol_regime_factor
+
+# BTC isotonic calibration: corrects lognormal p_model overconfidence at extremes.
+# Trained on 490 resolved BTC paper trades. Reduces NO bet losses in 20–30% p_market
+# range where formula overestimates P(NO wins). Loaded lazily at first BTC scan.
+_BTC_ISO_CAL: "dict | None | str" = "unloaded"
+
+def _load_btc_iso() -> "dict | None":
+    global _BTC_ISO_CAL
+    if _BTC_ISO_CAL != "unloaded":
+        return _BTC_ISO_CAL
+    path = Path(__file__).parent / "reform_results" / "btc_iso_calibration.pkl"
+    if not path.exists():
+        _BTC_ISO_CAL = None
+        return None
+    try:
+        with open(path, "rb") as _f:
+            _BTC_ISO_CAL = _pickle.load(_f)
+        print(f"  [btc_iso] Loaded calibrator (n={_BTC_ISO_CAL['n_train']} trades)")
+    except Exception as _e:
+        print(f"  [btc_iso] Failed to load: {_e}")
+        _BTC_ISO_CAL = None
+    return _BTC_ISO_CAL
 from live_signal import (
     load_auth, kalshi_get, fetch_live_spot, fetch_current_price, find_live_contract,
     fetch_contracts_for_nearest_expiry, fetch_recent_1m_candles, minutes_to_expiry,
@@ -717,6 +740,29 @@ def main() -> None:
                     p_model_comp = score_to_p_model(_active_trend, _active_rev, spot, s_k, sigma_tau_c, asset=args.asset)
             else:
                 p_model_comp  = prob_c.p_yes
+
+            # BTC isotonic calibration: correct lognormal overconfidence before edge calc.
+            # For NO bets where calibration flips edge negative, allow through when
+            # composite_p_up < 0.50 (model is bearish — NO bet is directionally coherent).
+            if args.asset == "BTC":
+                _iso_cal = _load_btc_iso()
+                if _iso_cal is not None:
+                    _p_cal = float(_iso_cal["iso"].predict([p_model_comp])[0])
+                    _edge_orig_no = (1 - p_model_comp) - (1 - pm)
+                    _edge_cal_no  = (1 - _p_cal) - (1 - pm)
+                    _edge_orig_yes = p_model_comp - pm
+                    _edge_cal_yes  = _p_cal - pm
+                    # Rescue: if NO edge flips negative but p_up < 0.50, keep original p_model
+                    _is_no_rescue = (_edge_orig_no > 0 and _edge_cal_no <= 0 and _comp_p_up < 0.50)
+                    if not _is_no_rescue:
+                        if abs(_p_cal - p_model_comp) > 0.01:
+                            print(f"  [btc_iso] p_model {p_model_comp:.3f} -> {_p_cal:.3f}  "
+                                  f"(offset={offset_c*100:+.2f}%  pm={pm:.3f})")
+                        p_model_comp = _p_cal
+                    else:
+                        print(f"  [btc_iso] NO rescue: p_up={_comp_p_up:.3f}<0.50, "
+                              f"keeping p_model={p_model_comp:.3f} (cal={_p_cal:.3f})")
+
             p_yes_adj_c = max(0.03, min(0.97, p_model_comp + funding_delta))
             if c["ticker"] in already_traded:
                 print(f"  [scan] Skipping {c['ticker']} — already traded this session")

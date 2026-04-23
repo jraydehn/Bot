@@ -173,6 +173,15 @@ CSV_COLUMNS = [
     "chg_10m",            # 10-minute price change fraction at decision time
     "chg_5m",             # 5-minute price change fraction at decision time
     "sharp_move_active",  # True if sharp move inversion was applied this cycle
+    "smc_4h",             # SMC 4h structure: bullish / bearish / neutral
+    "smc_1h",             # SMC 1h structure: bullish / bearish / neutral
+    "choch_1h",           # True if 1h ChoCH fired in the last 5 bars (regime flip)
+    "choch_4h",           # True if 4h ChoCH fired in the last 3 bars (regime flip)
+    "supply_pct",         # % above nearest supply zone (None if no zone)
+    "demand_pct",         # % below nearest demand zone (None if no zone)
+    "in_supply_zone",     # True if price is currently inside a supply zone
+    "in_demand_zone",     # True if price is currently inside a demand zone
+    "stoch_flipped",      # retained for backward compatibility
     "resolved_yes",   # filled by outcome_checker.py
     "would_win",      # filled by outcome_checker.py
     "would_pnl",      # filled by outcome_checker.py
@@ -382,13 +391,13 @@ def main() -> None:
     except Exception as _exc:
         print(f"  [trend_z] Error: {_exc}")
 
-    # --- SMC signals (diagnostic) ---
+    # --- SMC signals ---
     # Smart Money Concepts: Break of Structure, Change of Character, Supply/Demand Zones.
     # 4h BOS = structural regime (persistent, changes rarely).
     # 1h BOS = tactical signal (changes within a session).
-    # 4h zones = key price levels where institutions previously acted.
-    # ChoCH flags a regime flip before EMA/composite indicators confirm it.
-    # Logged only — no gating yet. Used to build regime-adaptive model adjustments.
+    # ChoCH: logged as persistent state (last two BOS events reversed) — see smc_signals.py.
+    # All fields written to CSV for post-hoc correlation analysis.
+    _smc = None
     if _composite_computed:
         try:
             from smc_signals import get_smc_signals as _get_smc
@@ -415,6 +424,7 @@ def main() -> None:
                   f"demand={_dem_str} ({_smc.n_demand_zones} zones){_zone_str}")
         except Exception as _smc_exc:
             print(f"  [smc] Error: {_smc_exc}")
+            _smc = None
 
     # --- Vol regime factor ---
     # Scales blended sigma before score_to_p_model. Validated on 19,947h of OHLCV data.
@@ -1017,6 +1027,15 @@ def main() -> None:
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),
         "sharp_move_active":  _sharp_move_active,
+        "smc_4h":             _smc.bos_4h if _smc else "",
+        "smc_1h":             _smc.bos_1h if _smc else "",
+        "choch_1h":           _smc.choch_1h if _smc else "",
+        "choch_4h":           _smc.choch_4h if _smc else "",
+        "supply_pct":         round(_smc.nearest_supply_pct, 4) if (_smc and _smc.nearest_supply_pct is not None) else "",
+        "demand_pct":         round(_smc.nearest_demand_pct, 4) if (_smc and _smc.nearest_demand_pct is not None) else "",
+        "in_supply_zone":     _smc.in_supply_zone if _smc else "",
+        "in_demand_zone":     _smc.in_demand_zone if _smc else "",
+        "stoch_flipped":      "",
         "resolved_yes":       "",
         "would_win":          "",
         "would_pnl":          "",

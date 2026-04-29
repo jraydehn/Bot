@@ -137,6 +137,8 @@ CSV_COLUMNS = [
     "funding_bias",
     "avg_funding_rate",
     "vol_score",
+    "cmf_raw",
+    "cmf_score",
     "vwap_score",
     "vwap_signal",
     "vwap_total",
@@ -217,9 +219,12 @@ def ensure_csv_exists(csv_path: Path = None) -> None:
 
 def append_row(row: dict, csv_path: Path = None) -> None:
     path = csv_path or PAPER_TRADES_CSV
+    # Sanitize string values: newlines in a field break CSV row alignment.
+    clean = {k: (v.replace("\n", " ").replace("\r", " ") if isinstance(v, str) else v)
+             for k, v in row.items()}
     with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        writer.writerow(row)
+        writer.writerow(clean)
     print(f"  Logged → {path}")
 
 
@@ -561,9 +566,19 @@ def main() -> None:
     #   BTC: +$172 delta, blocks 10 (4W/6L)
     #   ETH: +$192 delta, blocks 17 (8W/9L)
     #   SOL: +$156 delta, blocks 1 — naturally quiet at wider thresholds
+    #
+    # 2026-04-28 retune (gate_attribution.py per-asset threshold sweep):
+    # Original ×1.0 turned out to sit at a local minimum on BTC and was too loose on ETH.
+    # Sweep results (joint full-stack PnL, drawdown):
+    #   BTC: ×0.75 +$1,721 / 47% DD  vs  ×1.0 +$1,391 / 46%  vs  OFF +$1,864 / 50%
+    #        → ×0.75 best risk-adjusted; multipliers tightened by 0.75
+    #   ETH: ×0.75 +$3,584 / 20% DD  vs  ×1.0 +$3,142 / 24%  vs  OFF +$3,384 / 27%
+    #        → ×0.75 best on both PnL and DD; multipliers tightened by 0.75
+    #   SOL: gate is flat in ±$50 across ×0.75–×1.5 → unchanged
+    # Revert: restore the prior tuple values below.
     _COUNTER_TAPE_THR = {
-        "BTC": (0.0016, 0.0024, 0.0040),
-        "ETH": (0.0015, 0.0025, 0.0040),
+        "BTC": (0.0012, 0.0018, 0.0030),    # was (0.0016, 0.0024, 0.0040)
+        "ETH": (0.001125, 0.001875, 0.0030), # was (0.0015, 0.0025, 0.0040)
         "SOL": (0.0025, 0.0040, 0.0065),
     }
 
@@ -816,7 +831,12 @@ def main() -> None:
                                        ema_alignment=_ema_align, asset=args.asset,
                                        composite_active=_composite_active,
                                        composite_p_up=_comp_p_up,
-                                       offset_pct=offset_c)
+                                       offset_pct=offset_c,
+                                       p_market_bid=c["bid"], p_market_ask=c["ask"])
+            # Update pm to side-specific fill-price reference:
+            # YES bet fills at YES ask; NO bet fills at 1 - YES bid (so YES bid is reference).
+            # Using bid/ask (not mid) prevents edge inflation on wide-spread contracts.
+            pm = c["bid"] if dec_c.side == "no" else c["ask"]
             if dec_c.side == "no" and offset_c <= 0:
                 print(f"  [scan] Skipping {c['ticker']} — ITM NO (offset={offset_c*100:+.3f}%, price already above strike)")
                 continue
@@ -843,6 +863,102 @@ def main() -> None:
                 continue
             if _sharp_move_active and dec_c.decision == "trade":
                 print(f"  [sharp_move] {c['ticker']} — inverted composite: side={dec_c.side.upper()} net={dec_c.net_edge:+.4f}")
+
+            # [EXPERIMENTAL — 2026-04-23] BTC YES p_up gate with causal rescue.
+            # Block YES bets when composite_p_up < 0.52 (isotonic calibration shows
+            # raw p_up < 0.52 maps to calibrated p_up ~0.376 — genuinely bearish).
+            #
+            # Causal mechanism: funding_bias=1 + bearish p_up = crowded long liquidation
+            # cascade that drives price through ITM strikes (38.5% WR observed).
+            # Rescue conditions restore the bet when the cascade mechanism is absent:
+            #   (A) funding_bias==0 AND structure_bias>=0 — no crowded longs to unwind,
+            #       no structural downtrend reinforcing the bearish p_up signal
+            #   (B) composite_rev>0 — independent oversold/reversion signal fires,
+            #       overriding mild p_up bearishness regardless of funding/structure
+            #
+            # In-sample simulation: +$582 net vs baseline (all-time BTC resolved trades).
+            # EXPERIMENTAL: rescue logic derived partly from in-sample analysis.
+            # Revisit after 200+ live observations on this gate. Revert: remove this block.
+            if (args.asset == "BTC" and dec_c.side == "yes"
+                    and _comp_p_up < 0.52):
+                _fund_ok   = (confirm.funding_bias == 0)
+                _struct_ok = (struct.structure_bias >= 0)
+                _rev_ok    = (_comp_rev > 0)
+                _pup_rescue = (_fund_ok and _struct_ok) or _rev_ok
+                if not _pup_rescue:
+                    print(f"  [btc_pup_gate] BLOCK YES p_up={_comp_p_up:.3f}<0.52 "
+                          f"fund={confirm.funding_bias} struct={struct.structure_bias} "
+                          f"rev={_comp_rev}")
+                    continue
+                else:
+                    _rescue_reason = []
+                    if _fund_ok and _struct_ok:
+                        _rescue_reason.append("fund=0+struct>=0")
+                    if _rev_ok:
+                        _rescue_reason.append("rev>0")
+                    print(f"  [btc_pup_gate] RESCUE YES p_up={_comp_p_up:.3f}<0.52 "
+                          f"via {'+'.join(_rescue_reason)} "
+                          f"fund={confirm.funding_bias} struct={struct.structure_bias} "
+                          f"rev={_comp_rev}")
+
+            # [EXPERIMENTAL — 2026-04-25] BTC YES vol_score=1 gate with rescue.
+            # Block YES bets when vol_score=1 (last completed 1h bar: high volume + price up).
+            # Mechanism: high-vol up bar = move already happened; YES bet is chasing into a
+            # likely fade. All-time: 33 trades at 30.3% WR (-$644) vs 61.6% WR otherwise.
+            #
+            # Rescue (allow through) when:
+            #   ema_stack_bias == 1 AND (confirmation_score == 0 OR funding_bias == 0)
+            # Logic: bullish EMA structure (trend intact) + either no directional noise
+            # (conf=0 = pure ITM price-proximity bet) OR clean funding (no crowded longs).
+            # Currently both conditions fire on the same 4 trades (conf=0 and funding=0
+            # are perfectly correlated in this bucket). Using OR to collect data on each
+            # arm independently — revisit after 30+ new vol=1 YES observations to determine
+            # which signal (conf or funding) is the true driver.
+            #
+            # In-sample: blocked 29 trades (WR=20.7%, -$733), rescued 4 (WR=100%, +$89).
+            # Net vs baseline: +$733. Revert: remove this block.
+            if (args.asset == "BTC" and dec_c.side == "yes"
+                    and _vol_score_dir == 1):
+                _ema_bullish  = (confirm.ema_stack_bias == 1)
+                _conf_zero    = (_cscore == 0)
+                _fund_neutral = (confirm.funding_bias == 0)
+                _vol_rescue   = _ema_bullish and (_conf_zero or _fund_neutral)
+                if not _vol_rescue:
+                    print(f"  [btc_vol1_gate] BLOCK YES vol=1 "
+                          f"ema_stack={confirm.ema_stack_bias} "
+                          f"conf={_cscore} fund={confirm.funding_bias}")
+                    continue
+                else:
+                    _vol_rescue_reason = []
+                    if _conf_zero:
+                        _vol_rescue_reason.append("conf=0")
+                    if _fund_neutral:
+                        _vol_rescue_reason.append("fund=0")
+                    print(f"  [btc_vol1_gate] RESCUE YES vol=1 "
+                          f"via ema=1+{'+'.join(_vol_rescue_reason)} "
+                          f"ema_stack={confirm.ema_stack_bias} "
+                          f"conf={_cscore} fund={confirm.funding_bias}")
+
+            # [2026-04-27] BTC YES extreme OTM hard block.
+            # 31 historical trades at p_market < 0.15 had 3.2% WR (-$969 net) despite
+            # composite_p_up >= 0.55 and net_edge >= 4%. Model is overconfident at extreme
+            # OTM: these strikes are 15–58% above spot — structurally implausible in hours
+            # regardless of composite signal. Simulation: +$969 net (30 losses blocked,
+            # 1 winner sacrificed). Revert: remove this block.
+            if args.asset == "BTC" and dec_c.side == "yes" and pm < 0.15:
+                print(f"  [btc_otm_gate] BLOCK YES p_market={pm:.3f}<0.15 — extreme OTM hard block")
+                continue
+
+            # [2026-04-27] ETH YES OTM hard block: p_market < 0.45 when strike > spot.
+            # 32 historical OTM YES trades at pm<0.45 had 6.2% WR (-$1,203 net) across all
+            # p_up levels (0.55–0.70+). High composite_p_up does not rescue these — model is
+            # directionally correct but strikes 10–52% above spot are unreachable in ~50m.
+            # Conditioned on offset_pct > 0 (OTM) to protect future ITM edge cases where a
+            # sharp drop pushes pm below 0.45 on a technically in-the-money contract.
+            # Simulation: +$1,203 (32 losses blocked, 0 winners). Revert: remove this block.
+            if args.asset == "ETH" and dec_c.side == "yes" and offset_c > 0 and pm < 0.45:
+                print(f"  [eth_otm_gate] BLOCK OTM YES p_market={pm:.3f}<0.45 offset={offset_c:+.3f} — unreachable strike")
+                continue
 
             positions = already_traded_expiries.get(expiry_key, {"yes": [], "no": []})
             if dec_c.side == "yes" and any(no_k < s_k for no_k in positions["no"]):
@@ -991,6 +1107,8 @@ def main() -> None:
         "funding_bias":       confirm.funding_bias,
         "avg_funding_rate":   round(confirm.avg_funding_rate, 8),
         "vol_score":          confirm.vol_score,
+        "cmf_raw":            round(confirm.cmf_raw, 4) if confirm.cmf_raw == confirm.cmf_raw else "",
+        "cmf_score":          confirm.cmf_score,
         "vwap_score":         confirm.vwap_score,
         "vwap_signal":        confirm.vwap_signal,
         "vwap_total":         confirm.vwap_total,

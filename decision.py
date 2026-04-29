@@ -194,6 +194,8 @@ def evaluate_trade(
     composite_active: bool = False,
     composite_p_up: float = 0.504,
     offset_pct: float = 0.0,
+    p_market_bid: float = None,
+    p_market_ask: float = None,
 ) -> DecisionResult:
     """
     Evaluate all gates in sequence and produce a final trade decision.
@@ -275,8 +277,12 @@ def evaluate_trade(
 
     # Always evaluate both directions; return whichever qualifies with higher net edge.
     # Pass raw p_model so calibration is applied exactly once in the force_side path.
+    # Side-aware p_market: YES bet cost = ask, NO bet cost = 1 - bid (so bid is the
+    # reference YES price). Using mid (average) inflates edge for wide-spread contracts.
     if force_side is None:
-        dec_yes = evaluate_trade(structure_bias, confirmation_bias, p_model, p_market,
+        _pm_yes = p_market_ask if p_market_ask is not None else p_market
+        _pm_no  = p_market_bid if p_market_bid is not None else p_market
+        dec_yes = evaluate_trade(structure_bias, confirmation_bias, p_model, _pm_yes,
                                  bankroll, slippage, spread, min_net_edge,
                                  confirmation_score, no_score, no_bias, force_side="yes",
                                  obi_score=obi_score, vol_score=vol_score,
@@ -284,7 +290,7 @@ def evaluate_trade(
                                  composite_active=composite_active,
                                  composite_p_up=composite_p_up,
                                  offset_pct=offset_pct)
-        dec_no  = evaluate_trade(structure_bias, confirmation_bias, p_model, p_market,
+        dec_no  = evaluate_trade(structure_bias, confirmation_bias, p_model, _pm_no,
                                  bankroll, slippage, spread, min_net_edge,
                                  confirmation_score, no_score, no_bias, force_side="no",
                                  obi_score=obi_score, vol_score=vol_score,
@@ -504,7 +510,23 @@ def evaluate_trade(
     # When composite_active=False (legacy path, BTC only): requires no_score ≥ 1.
     #   no_score=0 NO: 55.3% win — below break-even at p_market 0.20–0.35
     #   no_score=1 NO: 73.4% win — profitable at every p_market bin tested
-    COMPOSITE_NO_P_UP_MAX = 0.40 if asset == "BTC" else 0.45
+    # BTC raised 0.40→0.50: p_up 0.40–0.50 = neutral/slightly bearish = NO bets directionally
+    # aligned. Historical sim: 273 blocked trades at 77.7% WR (+$803). Threshold 0.40 was
+    # cutting into aligned NO bets; neutral baseline is ~0.504 so 0.40–0.50 is bearish lean.
+    # ETH raised 0.45→0.55: p_up 0.45–0.55 NO bets win at 79–82% WR (+$364). ETH NO bets
+    # profitable regardless of composite direction; threshold 0.45 was over-blocking.
+    # ETH lowered 0.55→0.50 (2026-04-28): full-stack joint replay (gate_attribution.py)
+    # showed 0.50 peak at +$3,436 vs 0.55 +$3,142 (Δ=+$294, 2 fewer trades, drawdown
+    # 20.0% vs 24.1%). Bucket-level +$364 was masking opportunity cost — joint PnL is
+    # the test.
+    # SOL reverted to 0.45 (2026-04-28): silently moved 0.45→0.55 on 04-27 when the
+    # ETH-side else branch was widened. Joint replay strictly monotonic — every
+    # loosening added losing trades: 0.45 +$10,696, 0.50 +$9,167, 0.55 +$7,749
+    # (cost ~$2,947 on archive). Restored to original documented threshold.
+    if asset == "SOL":
+        COMPOSITE_NO_P_UP_MAX = 0.45
+    else:  # BTC or ETH
+        COMPOSITE_NO_P_UP_MAX = 0.50
     if asset in ("BTC", "ETH", "SOL") and side == "no":
         if composite_active:
             if offset_pct < 0 and composite_p_up > COMPOSITE_NO_P_UP_MAX:

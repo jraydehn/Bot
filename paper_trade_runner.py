@@ -256,11 +256,18 @@ def main() -> None:
     # after ETH took a losing trade at 13:36 UTC on 2026-04-07.
     # Revert: copy paper_trade_runner_v1.py → paper_trade_runner.py
     SKIP_HOURS = {12, 13, 18}  # 12-13 UTC (pre/NY market open) + 18:00 UTC (afternoon peak)
+    _vol_skip_live = False
     if now_utc.hour in SKIP_HOURS and now_utc.weekday() < 5:  # 0=Mon…4=Fri; skip filter on weekends
-        if args.live or getattr(args, 'dual', False):
+        if args.live and not getattr(args, 'dual', False):
+            # Pure live mode: skip entirely
             print(f"  [vol-filter] Skipping — UTC hour {now_utc.hour} is in high-volatility window {SKIP_HOURS}.")
             return
-        print(f"  [vol-filter] PAPER continuing — collecting data in high-volatility window {SKIP_HOURS}.")
+        elif getattr(args, 'dual', False):
+            # Dual mode: skip live order but continue for paper data collection
+            _vol_skip_live = True
+            print(f"  [vol-filter] Skipping live order — UTC hour {now_utc.hour} in {SKIP_HOURS}. Paper continues.")
+        else:
+            print(f"  [vol-filter] PAPER continuing — collecting data in high-volatility window {SKIP_HOURS}.")
 
     _is_live_or_dual = args.live or getattr(args, 'dual', False)
     if _is_live_or_dual:
@@ -356,11 +363,16 @@ def main() -> None:
     _asset_baseline = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}.get(args.asset, 0.504)
     _comp_p_up = _asset_baseline
     _composite_computed = False
+    # _df_4h_comp computed unconditionally so SMC can always use it
+    _df_4h_comp = None
+    try:
+        _df_4h_comp = df_confirm.resample("4h", origin="start_day").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).dropna(subset=["close"])
+    except Exception:
+        pass
     if live_1m is not None and len(live_1m) >= 400:
         try:
-            _df_4h_comp = df_confirm.resample("4h", origin="start_day").agg(
-                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-            ).dropna(subset=["close"])
             _df_15m_comp = live_1m.resample("15min", origin="start_day").agg(
                 {"high": "max", "low": "min", "close": "last", "volume": "sum"}
             ).dropna(subset=["close"])
@@ -401,9 +413,10 @@ def main() -> None:
     # 4h BOS = structural regime (persistent, changes rarely).
     # 1h BOS = tactical signal (changes within a session).
     # ChoCH: logged as persistent state (last two BOS events reversed) — see smc_signals.py.
+    # Computed unconditionally (not gated on _composite_computed) so all CSV rows are populated.
     # All fields written to CSV for post-hoc correlation analysis.
     _smc = None
-    if _composite_computed:
+    if _df_4h_comp is not None:
         try:
             from smc_signals import get_smc_signals as _get_smc
             _smc = _get_smc(df_confirm, _df_4h_comp, spot)
@@ -568,17 +581,24 @@ def main() -> None:
     #   SOL: +$156 delta, blocks 1 — naturally quiet at wider thresholds
     #
     # 2026-04-28 retune (gate_attribution.py per-asset threshold sweep):
-    # Original ×1.0 turned out to sit at a local minimum on BTC and was too loose on ETH.
-    # Sweep results (joint full-stack PnL, drawdown):
-    #   BTC: ×0.75 +$1,721 / 47% DD  vs  ×1.0 +$1,391 / 46%  vs  OFF +$1,864 / 50%
-    #        → ×0.75 best risk-adjusted; multipliers tightened by 0.75
-    #   ETH: ×0.75 +$3,584 / 20% DD  vs  ×1.0 +$3,142 / 24%  vs  OFF +$3,384 / 27%
-    #        → ×0.75 best on both PnL and DD; multipliers tightened by 0.75
-    #   SOL: gate is flat in ±$50 across ×0.75–×1.5 → unchanged
-    # Revert: restore the prior tuple values below.
+    # Original ×1.0 appeared to sit at a local minimum on BTC and too loose on ETH.
+    # Multipliers tightened ×0.75 for BTC/ETH.
+    #
+    # 2026-04-28 PARTIAL REVERT — the v1 harness was using recomputed log-normal+drift
+    # for ETH/SOL p_model, but production uses HistGradientBoosting (direct_p_model.py)
+    # for those assets. v2 harness (gate_attribution_v2.py) using LOGGED p_yes_model
+    # from the archive (the actual production model output at decision time) plus a
+    # FLAT $1k bankroll showed:
+    #   BTC: peak at ×0.9–×1.0 (+$348). ×0.75 is at +$220 — losing $128 vs original.
+    #        → revert BTC to ×1.0 (the documented original).
+    #   ETH: monotonic — looser is better, OFF (+$1,570) beats every multiplier.
+    #        → ETH disabled (not in dict; severity returns 0).
+    #   SOL: gate is flat — unchanged.
+    # Lesson: bucket-level / recomputed-model PnL deltas don't substitute for joint
+    # full-stack replay using the logged production p_model.
     _COUNTER_TAPE_THR = {
-        "BTC": (0.0012, 0.0018, 0.0030),    # was (0.0016, 0.0024, 0.0040)
-        "ETH": (0.001125, 0.001875, 0.0030), # was (0.0015, 0.0025, 0.0040)
+        "BTC": (0.0016, 0.0024, 0.0040),    # restored from (0.0012, 0.0018, 0.0030)
+        # ETH: disabled — monotonic sweep showed OFF beats every multiplier (+$280 vs ×0.75)
         "SOL": (0.0025, 0.0040, 0.0065),
     }
 
@@ -939,14 +959,13 @@ def main() -> None:
                           f"ema_stack={confirm.ema_stack_bias} "
                           f"conf={_cscore} fund={confirm.funding_bias}")
 
-            # [2026-04-27] BTC YES extreme OTM hard block.
-            # 31 historical trades at p_market < 0.15 had 3.2% WR (-$969 net) despite
-            # composite_p_up >= 0.55 and net_edge >= 4%. Model is overconfident at extreme
-            # OTM: these strikes are 15–58% above spot — structurally implausible in hours
-            # regardless of composite signal. Simulation: +$969 net (30 losses blocked,
-            # 1 winner sacrificed). Revert: remove this block.
-            if args.asset == "BTC" and dec_c.side == "yes" and pm < 0.15:
-                print(f"  [btc_otm_gate] BLOCK YES p_market={pm:.3f}<0.15 — extreme OTM hard block")
+            # [2026-04-27] BTC YES OTM hard block.
+            # Threshold raised 0.15 → 0.20 (2026-04-28): sim shows 46 trades at pm<0.20
+            # have 10.9% WR (-$540 net). [0.15-0.20) bucket extends the same pattern as
+            # the original [0.05-0.15) block — structurally implausible in hours regardless
+            # of composite signal. Revert: change threshold back to 0.15.
+            if args.asset == "BTC" and dec_c.side == "yes" and pm < 0.20:
+                print(f"  [btc_otm_gate] BLOCK YES p_market={pm:.3f}<0.20 — OTM hard block")
                 continue
 
             # [2026-04-27] ETH YES OTM hard block: p_market < 0.45 when strike > spot.
@@ -959,6 +978,72 @@ def main() -> None:
             if args.asset == "ETH" and dec_c.side == "yes" and offset_c > 0 and pm < 0.45:
                 print(f"  [eth_otm_gate] BLOCK OTM YES p_market={pm:.3f}<0.45 offset={offset_c:+.3f} — unreachable strike")
                 continue
+
+            # [2026-04-28] BTC NO high-p_up block.
+            # Sim: 41 NO trades with composite_p_up >= 0.52 → 53.7% WR, -$430.
+            # Model says price going UP — betting NO into a bullish composite loses.
+            # Revert: remove this block.
+            if args.asset == "BTC" and dec_c.side == "no" and dec_c.decision == "trade" and _comp_p_up >= 0.52:
+                print(f"  [btc_no_pup_gate] BLOCK NO p_up={_comp_p_up:.3f}>=0.52 — bullish composite")
+                continue
+
+            # [2026-04-28] BTC NO marginal edge gate with rescue.
+            # Sim: NO trades with net_edge [1-2%) have 66.7% WR but P&L=-$248 (69 trades).
+            # Rescue: composite_rev<=-1 AND vol_ratio>=1.0 → 19W 6L (76%, +$59).
+            # Revert: remove this block.
+            if args.asset == "BTC" and dec_c.side == "no" and dec_c.decision == "trade" and dec_c.net_edge < 0.02:
+                _no_edge_rescue = (
+                    _comp_rev <= -1 and
+                    vol_ratio_c is not None and vol_ratio_c >= 1.0
+                )
+                _vr_str = f"{vol_ratio_c:.2f}" if vol_ratio_c is not None else "N/A"
+                if not _no_edge_rescue:
+                    print(f"  [btc_no_edge_gate] BLOCK NO net_edge={dec_c.net_edge:.4f}<0.02 "
+                          f"comp_rev={_comp_rev:.1f} vol_ratio={_vr_str}")
+                    continue
+                else:
+                    print(f"  [btc_no_edge_gate] RESCUED NO net_edge={dec_c.net_edge:.4f}<0.02 "
+                          f"comp_rev={_comp_rev:.1f}<=-1 vol_ratio={_vr_str}>=1.0")
+
+            # [2026-04-28] BTC spread tightness gate with rescue.
+            # Sim: trades with spread >= 0.04 → WR deteriorates, P&L=-$242 (49 trades).
+            # Rescue: chg_10m direction-aligned AND net_edge >= 0.07 → 7W 2L (77.8%, +$64).
+            # Revert: remove this block.
+            if args.asset == "BTC" and dec_c.decision == "trade" and spread_c >= 0.04:
+                _chg10m_aligned = (
+                    (dec_c.side == "yes" and _sharp_move_pct_10m > 0) or
+                    (dec_c.side == "no"  and _sharp_move_pct_10m < 0)
+                )
+                _spread_rescue = _chg10m_aligned and dec_c.net_edge >= 0.07
+                if not _spread_rescue:
+                    print(f"  [btc_spread_gate] BLOCK {dec_c.side.upper()} spread={spread_c:.3f}>=0.04 "
+                          f"chg_10m={_sharp_move_pct_10m*100:+.2f}% net_edge={dec_c.net_edge:.4f}")
+                    continue
+                else:
+                    print(f"  [btc_spread_gate] RESCUED {dec_c.side.upper()} spread={spread_c:.3f} "
+                          f"chg_10m={_sharp_move_pct_10m*100:+.2f}% aligned, net_edge={dec_c.net_edge:.4f}>=0.07")
+
+            # [2026-04-28] BTC tau < 30 directional conviction gate with rescue.
+            # Sim: tau<30 trades = 75W 52L (59.1% WR), -$609. Rescue: trades with directional
+            # composite conviction (p_up>=0.52 YES / <=0.48 NO) = 50W 3L (94.3% WR), +$745.
+            # Near-neutral p_up rescue: kelly_fraction>=0.15 AND spread<=0.02 → 20W 5L (80%, +$99).
+            # Revert: remove this block.
+            if args.asset == "BTC" and dec_c.decision == "trade" and tau_c < 30:
+                _tau_conviction = (
+                    (dec_c.side == "yes" and _comp_p_up >= 0.52) or
+                    (dec_c.side == "no"  and _comp_p_up <= 0.48)
+                )
+                _tau_rescue = dec_c.kelly_fraction >= 0.15 and spread_c <= 0.02
+                if not _tau_conviction and not _tau_rescue:
+                    print(f"  [btc_tau_gate] BLOCK {dec_c.side.upper()} tau={tau_c:.1f}min<30 "
+                          f"p_up={_comp_p_up:.3f} kelly={dec_c.kelly_fraction:.3f} spread={spread_c:.3f}")
+                    continue
+                elif _tau_conviction:
+                    print(f"  [btc_tau_gate] PASS {dec_c.side.upper()} tau={tau_c:.1f}min<30 "
+                          f"p_up={_comp_p_up:.3f} (directional conviction)")
+                else:
+                    print(f"  [btc_tau_gate] RESCUED {dec_c.side.upper()} tau={tau_c:.1f}min<30 "
+                          f"p_up={_comp_p_up:.3f} kelly={dec_c.kelly_fraction:.3f}>=0.15 spread={spread_c:.3f}<=0.02")
 
             positions = already_traded_expiries.get(expiry_key, {"yes": [], "no": []})
             if dec_c.side == "yes" and any(no_k < s_k for no_k in positions["no"]):
@@ -983,15 +1068,40 @@ def main() -> None:
                     best_no_trade_meta = meta_c
 
             # 30m streak gate: only blocks contracts that would trade
+            # Gate 1 (YES bearish streak rescue): BTC + ETH only — SOL wins at 80%+ WR when stoch<70
+            # Gate 2 (NO bullish streak stoch 30-60): BTC + ETH only — SOL 94.4% WR when blocked
+            #   BTC rescue: chg_5m < 0 (5m already reversing) → 83.3% WR, +$122
+            #   ETH rescue: stoch_k >= 45 (upper band) → 83.3% WR, +$75
+            # Gate 3 (NO stoch<20 block): BTC only — ETH/SOL both win 79-83% WR in this bucket
             if dec_c.decision == "trade" and _streak30 is not None:
                 _sk = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
                 _gate = False
-                if dec_c.side == "yes" and _streak30 == "bearish" and _sk <= 70:
-                    _gate = True
-                elif dec_c.side == "no" and _streak30 == "bullish" and 30 <= _sk <= 60:
-                    _gate = True
+                _gate_reason = ""
+                if dec_c.side == "yes" and _streak30 == "bearish" and _sk <= 70 and args.asset != "SOL":
+                    if _sharp_move_pct_10m <= 0:
+                        _gate = True
+                        _gate_reason = f"streak30=bearish, stoch_k={_sk:.1f}, chg_10m={_sharp_move_pct_10m*100:+.2f}% (no bounce)"
+                    else:
+                        print(f"  [streak_gate] RESCUED YES {c['ticker']} — streak30=bearish, stoch_k={_sk:.1f}, chg_10m={_sharp_move_pct_10m*100:+.2f}% (bounce active)")
+                elif dec_c.side == "no" and _streak30 == "bullish" and 30 <= _sk <= 60 and args.asset != "SOL":
+                    _rescued = False
+                    if args.asset == "BTC" and _sharp_move_pct_5m < 0:
+                        _rescued = True
+                        print(f"  [streak_gate] RESCUED NO {c['ticker']} — streak30=bullish, stoch_k={_sk:.1f}, chg_5m={_sharp_move_pct_5m*100:+.2f}% (reversing)")
+                    elif args.asset == "ETH" and _sk >= 45:
+                        _rescued = True
+                        print(f"  [streak_gate] RESCUED NO {c['ticker']} — streak30=bullish, stoch_k={_sk:.1f}>=45 (upper band, mean-reversion entry)")
+                    if not _rescued:
+                        _gate = True
+                        _gate_reason = f"streak30=bullish, stoch_k={_sk:.1f}, chg_5m={_sharp_move_pct_5m*100:+.2f}%"
+                elif dec_c.side == "no" and _sk < 20 and args.asset == "BTC":
+                    if _sharp_move_pct <= 0:
+                        _gate = True
+                        _gate_reason = f"stoch_k={_sk:.1f}<20, chg_30m={_sharp_move_pct*100:+.2f}% (no bounce)"
+                    else:
+                        print(f"  [streak_gate] RESCUED NO {c['ticker']} — stoch_k={_sk:.1f}<20, chg_30m={_sharp_move_pct*100:+.2f}% (bounce active)")
                 if _gate:
-                    print(f"  [streak_gate] Blocked {dec_c.side.upper()} {c['ticker']} — streak30={_streak30}, stoch_k={_sk:.1f}")
+                    print(f"  [streak_gate] Blocked {dec_c.side.upper()} {c['ticker']} — {_gate_reason}")
                     continue
 
             # Counter-tape severity gate: hard block or dampen by severity zone
@@ -1178,57 +1288,61 @@ def main() -> None:
 
     if _is_live_or_dual and dec.decision == "trade" and auth is not None:
         _live_csv = live_trading.get_live_csv_path(args.asset)
-        if not live_trading.check_daily_loss_limit(args.daily_loss_limit, _live_csv):
-            print("  [dual] Daily limit hit — skipping paper log too (live/paper must match).")
-            return
+        _live_limit_ok = live_trading.check_daily_loss_limit(args.daily_loss_limit, _live_csv)
 
-        bid_c = chosen.get("bid", p_market - 0.01)
-        ask_c = chosen.get("ask", p_market + 0.01)
-        yes_price_cents, count = live_trading.compute_order_params(
-            side=dec.side,
-            bet_amount=dec.bet_amount,
-            bid=bid_c,
-            ask=ask_c,
-            max_contracts=args.max_contracts,
-        )
-        if count == 0:
-            print(f"  [live] Bet amount ${dec.bet_amount:.2f} < single contract cost — skipping order")
-            if _is_dual:
-                print("  [dual] Skipping paper log and session state update (live/paper must match).")
-            return
+        if _vol_skip_live:
+            print("  [live] Vol-filter hour — skipping live order only.")
+        elif not _live_limit_ok:
+            print("  [live] Daily loss limit reached — skipping live order only.")
+        else:
+            bid_c = chosen.get("bid", p_market - 0.01)
+            ask_c = chosen.get("ask", p_market + 0.01)
+            yes_price_cents, count = live_trading.compute_order_params(
+                side=dec.side,
+                bet_amount=dec.bet_amount,
+                bid=bid_c,
+                ask=ask_c,
+                max_contracts=args.max_contracts,
+            )
+            if count == 0:
+                print(f"  [live] Bet amount ${dec.bet_amount:.2f} < single contract cost — skipping order")
+            else:
+                # Confirm balance before placing
+                balance = live_trading.get_balance(auth)
+                _balance_ok = True
+                if balance is not None:
+                    order_cost = count * (yes_price_cents if dec.side == "yes" else (100 - yes_price_cents)) / 100.0
+                    print(f"  [live] Balance: ${balance:.2f}  order cost ≈ ${order_cost:.2f}")
+                    if order_cost > balance:
+                        print(f"  [live] Insufficient balance — skipping order")
+                        _balance_ok = False
 
-        # Confirm balance before placing
-        balance = live_trading.get_balance(auth)
-        if balance is not None:
-            order_cost = count * (yes_price_cents if dec.side == "yes" else (100 - yes_price_cents)) / 100.0
-            print(f"  [live] Balance: ${balance:.2f}  order cost ≈ ${order_cost:.2f}")
-            if order_cost > balance:
-                print(f"  [live] Insufficient balance — skipping order")
-                if _is_dual:
-                    print("  [dual] Skipping paper log and session state update (live/paper must match).")
-                return
+                if _balance_ok:
+                    order_result = live_trading.place_order(
+                        auth=auth,
+                        ticker=contract_ticker,
+                        side=dec.side,
+                        count=count,
+                        yes_price=yes_price_cents,
+                    )
+                    live_trading.log_live_trade(
+                        row=row,
+                        order_result=order_result,
+                        yes_price_cents=yes_price_cents,
+                        count=count,
+                        side=dec.side,
+                        asset=args.asset,
+                        csv_path=_live_csv,
+                    )
+                    # Update session state only after live order is confirmed placed
+                    _SESSION_TRADED[contract_ticker] = dec.net_edge
+                    _SIDE_COOLDOWN[(_expiry_prefix(contract_ticker), dec.side)] = now_utc
 
-        order_result = live_trading.place_order(
-            auth=auth,
-            ticker=contract_ticker,
-            side=dec.side,
-            count=count,
-            yes_price=yes_price_cents,
-        )
-        live_trading.log_live_trade(
-            row=row,
-            order_result=order_result,
-            yes_price_cents=yes_price_cents,
-            count=count,
-            side=dec.side,
-            asset=args.asset,
-            csv_path=_live_csv,
-        )
-        # Update session state only after live order is confirmed placed
-        _SESSION_TRADED[contract_ticker] = dec.net_edge
-        _SIDE_COOLDOWN[(_expiry_prefix(contract_ticker), dec.side)] = now_utc
-        # Log to paper CSV only after live order succeeds (dual mode keeps CSVs in sync)
+        # Paper always logs in dual mode regardless of live limit
         if _is_dual:
+            if dec.decision == "trade":
+                _SESSION_TRADED[contract_ticker] = dec.net_edge
+                _SIDE_COOLDOWN[(_expiry_prefix(contract_ticker), dec.side)] = now_utc
             csv_path = get_csv_path(args.asset)
             ensure_csv_exists(csv_path)
             append_row(row, csv_path)

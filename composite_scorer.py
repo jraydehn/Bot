@@ -424,8 +424,14 @@ def lookup_p_up(trend_score: int, reversion_score: int, asset: str = "BTC") -> f
     asset = asset.upper()
     baseline = ASSET_BASELINES.get(asset, BASELINE_UP)
     cal = _CALIBRATIONS.get(asset, {})
-    tb = int(np.clip(trend_score,    -3,  3))
-    rb = int(np.clip(reversion_score, -8, 8))
+    # Per-asset rev clip to match actual JSON coverage. Previously a global
+    # clip(±8) silently dead-coded BTC's rev∈[±9, ±11] cells (23 trained cells
+    # never read) and forced ETH/SOL's |rev|∈[6, 8] rows to read cells that
+    # don't exist (then fall back). Now the clip matches each asset's JSON
+    # range exactly. (2026-04-30 — see audit thread.)
+    _REV_CLIP = {"BTC": 11, "ETH": 5, "SOL": 5}.get(asset, 8)
+    tb = int(np.clip(trend_score, -3, 3))
+    rb = int(np.clip(reversion_score, -_REV_CLIP, _REV_CLIP))
     key = (tb, rb)
     if key in cal:
         return cal[key]

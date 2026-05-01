@@ -588,17 +588,16 @@ def main() -> None:
     # for ETH/SOL p_model, but production uses HistGradientBoosting (direct_p_model.py)
     # for those assets. v2 harness (gate_attribution_v2.py) using LOGGED p_yes_model
     # from the archive (the actual production model output at decision time) plus a
-    # FLAT $1k bankroll showed:
-    #   BTC: peak at ×0.9–×1.0 (+$348). ×0.75 is at +$220 — losing $128 vs original.
-    #        → revert BTC to ×1.0 (the documented original).
-    #   ETH: monotonic — looser is better, OFF (+$1,570) beats every multiplier.
-    #        → ETH disabled (not in dict; severity returns 0).
+    # gate_attribution.py v2 (logged p_model, flat $1k bankroll, /100 at load_archive):
+    #   BTC: ×1.0 near-optimal; ×0.75 was sub-optimal.  → BTC at ×1.0 thresholds.
+    #   ETH: OFF (+$1,570) > ×1.0 (+$1,451). Every block the gate makes is net-negative.
+    #        → ETH disabled (not in dict; severity returns 0.0).
     #   SOL: gate is flat — unchanged.
-    # Lesson: bucket-level / recomputed-model PnL deltas don't substitute for joint
-    # full-stack replay using the logged production p_model.
+    # Note: gate_attribution.py divides CSV chg values by 100 at load time so units
+    # match raw-decimal thresholds below. ~2% of ETH surviving candidates are hard-blocked.
     _COUNTER_TAPE_THR = {
-        "BTC": (0.0016, 0.0024, 0.0040),    # restored from (0.0012, 0.0018, 0.0030)
-        # ETH: disabled — monotonic sweep showed OFF beats every multiplier (+$280 vs ×0.75)
+        "BTC": (0.0016, 0.0024, 0.0040),
+        # ETH: disabled — Opus v2 harness (correct units) shows OFF beats every multiplier
         "SOL": (0.0025, 0.0040, 0.0065),
     }
 
@@ -930,34 +929,37 @@ def main() -> None:
             #   ema_stack_bias == 1 AND (confirmation_score == 0 OR funding_bias == 0)
             # Logic: bullish EMA structure (trend intact) + either no directional noise
             # (conf=0 = pure ITM price-proximity bet) OR clean funding (no crowded longs).
-            # Currently both conditions fire on the same 4 trades (conf=0 and funding=0
-            # are perfectly correlated in this bucket). Using OR to collect data on each
-            # arm independently — revisit after 30+ new vol=1 YES observations to determine
-            # which signal (conf or funding) is the true driver.
+            # In-sample (calibration period): blocked 29 trades (WR=20.7%, -$733),
+            # rescued 4 (WR=100%, +$89). Net vs baseline: +$733.
             #
-            # In-sample: blocked 29 trades (WR=20.7%, -$733), rescued 4 (WR=100%, +$89).
-            # Net vs baseline: +$733. Revert: remove this block.
-            if (args.asset == "BTC" and dec_c.side == "yes"
-                    and _vol_score_dir == 1):
-                _ema_bullish  = (confirm.ema_stack_bias == 1)
-                _conf_zero    = (_cscore == 0)
-                _fund_neutral = (confirm.funding_bias == 0)
-                _vol_rescue   = _ema_bullish and (_conf_zero or _fund_neutral)
-                if not _vol_rescue:
-                    print(f"  [btc_vol1_gate] BLOCK YES vol=1 "
-                          f"ema_stack={confirm.ema_stack_bias} "
-                          f"conf={_cscore} fund={confirm.funding_bias}")
-                    continue
-                else:
-                    _vol_rescue_reason = []
-                    if _conf_zero:
-                        _vol_rescue_reason.append("conf=0")
-                    if _fund_neutral:
-                        _vol_rescue_reason.append("fund=0")
-                    print(f"  [btc_vol1_gate] RESCUE YES vol=1 "
-                          f"via ema=1+{'+'.join(_vol_rescue_reason)} "
-                          f"ema_stack={confirm.ema_stack_bias} "
-                          f"conf={_cscore} fund={confirm.funding_bias}")
+            # [DISABLED 2026-04-30] gate_attribution_v3 LOO replay (logged p_yes_model,
+            # flat $1k bankroll, BTC rescues active) showed gate now costs −$197 in
+            # archive PnL. 10 trades blocked-after-rescue: 4W/6L (40%), net +$197.
+            # The cell the gate carves out has shifted from −$733 (calibration window)
+            # to +$197 (recent), suggesting regime change OR original calibration noise.
+            # Disabling for live observation. Revert: uncomment the block below.
+            #
+            # if (args.asset == "BTC" and dec_c.side == "yes"
+            #         and _vol_score_dir == 1):
+            #     _ema_bullish  = (confirm.ema_stack_bias == 1)
+            #     _conf_zero    = (_cscore == 0)
+            #     _fund_neutral = (confirm.funding_bias == 0)
+            #     _vol_rescue   = _ema_bullish and (_conf_zero or _fund_neutral)
+            #     if not _vol_rescue:
+            #         print(f"  [btc_vol1_gate] BLOCK YES vol=1 "
+            #               f"ema_stack={confirm.ema_stack_bias} "
+            #               f"conf={_cscore} fund={confirm.funding_bias}")
+            #         continue
+            #     else:
+            #         _vol_rescue_reason = []
+            #         if _conf_zero:
+            #             _vol_rescue_reason.append("conf=0")
+            #         if _fund_neutral:
+            #             _vol_rescue_reason.append("fund=0")
+            #         print(f"  [btc_vol1_gate] RESCUE YES vol=1 "
+            #               f"via ema=1+{'+'.join(_vol_rescue_reason)} "
+            #               f"ema_stack={confirm.ema_stack_bias} "
+            #               f"conf={_cscore} fund={confirm.funding_bias}")
 
             # [2026-04-27] BTC YES OTM hard block.
             # Threshold raised 0.15 → 0.20 (2026-04-28): sim shows 46 trades at pm<0.20

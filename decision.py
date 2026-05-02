@@ -615,6 +615,8 @@ def evaluate_trade(
     # --- Gate 3: Minimum net edge threshold ---
     # ETH: 0.5% — lowered for data collection (0.5-1% bucket is net profitable).
     # BTC/SOL: 1% — 0.5-1% bucket is net negative for SOL; BTC unchanged.
+    # BTC NO net_edge [1-2%) gate with rescue is handled in paper_trade_runner.py
+    # (rescue: composite_rev <= -1 AND vol_ratio >= 1.0 → allow through at 1% floor).
     effective_min_edge = 0.005 if asset == "ETH" else 0.01
     p_edge, p_ref = (p_model, p_market) if side == "yes" else (p_market, p_model)
     pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=effective_min_edge)

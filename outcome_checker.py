@@ -111,7 +111,7 @@ def recover_missing_tickers(rows: list, auth: KalshiAuth) -> int:
 
     recovered = 0
     for row in rows:
-        if row.get("decision", "").strip() != "trade":
+        if (row.get("decision") or "").strip() != "trade":
             continue
         if (row.get("contract_ticker") or "").strip():
             continue  # already has a ticker
@@ -231,7 +231,7 @@ def main(csv_path: Path = None) -> None:
         if (row.get("resolved_yes") or "").strip():
             skipped += 1
             continue
-        if row.get("decision", "").strip() != "trade":
+        if (row.get("decision") or "").strip() != "trade":
             skipped += 1
             continue
 
@@ -268,7 +268,7 @@ def main(csv_path: Path = None) -> None:
         row["resolved_yes"] = str(resolved_yes)
 
         # Compute would_win only for trade rows with a valid bet_amount
-        if row.get("decision", "").strip() == "trade" and (row.get("bet_amount") or "").strip():
+        if (row.get("decision") or "").strip() == "trade" and (row.get("bet_amount") or "").strip():
             side = row.get("side", "yes")
             if side == "yes":
                 would_win = resolved_yes

@@ -15,6 +15,7 @@ MIN_CANDLES = 60
 EMA_FAST = 20            # fast EMA period for trend alignment
 EMA_SLOW = 50            # slow EMA period for trend alignment
 VOLUME_MA_PERIOD = 20    # simple moving average period for volume baseline
+CMF_PERIOD = 14          # Chaikin Money Flow lookback (bars)
 EMA_CONFIRM_BARS = 3     # consecutive bars the EMA spread must hold to confirm
 EMA_STRETCH_PERIOD = 20  # EMA period on 5m bars (covers ~100 minutes)
 EMA_STRETCH_THRESHOLD = 0.001  # ±0.1% from 5m EMA triggers overbought/oversold signal
@@ -55,6 +56,8 @@ class ConfirmationResult:
     stoch_crossover_active: bool  # True if crossover fired on current or previous 15m candle
     ema_stack_bias: int        # +1 bullish EMA9>21>50 stack, -1 bearish, 0 neutral/insufficient
     vol_score: int            # +1 high vol + up candle, -1 high vol + down candle, 0 low vol
+    cmf_raw: float            # Chaikin Money Flow (14-period): positive = buying pressure, negative = selling
+    cmf_score: int            # +1 if cmf > 0.05, -1 if cmf < -0.05, 0 neutral
     vwap_score: int           # composite VWAP signal inverted for contrarian edge (= -vwap_signal)
     vwap_signal: int          # raw VWAP composite signal: +1 bullish, -1 bearish, 0 neutral
     vwap_total: int           # sum: position_score + stretch_score + rejection_score*2
@@ -197,6 +200,8 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
     df.columns = df.columns.str.lower()
     close = df["close"]
     volume = df["volume"]
+    high = df["high"]
+    low = df["low"]
 
     # --- EMA Alignment ---
     # Exponential moving averages on closing prices
@@ -419,6 +424,28 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
     else:
         vol_score = 0
 
+    # --- Chaikin Money Flow (CMF) ---
+    # Measures buying/selling pressure over CMF_PERIOD completed bars.
+    # Money Flow Multiplier: [(close - low) - (high - close)] / (high - low)
+    #   = +1 when close == high (max buying pressure)
+    #   = -1 when close == low (max selling pressure)
+    # CMF = sum(MFM * volume, N) / sum(volume, N) — ranges [-1, +1].
+    # Uses last completed bar (-2) consistent with vol_score.
+    _hl_range = (high - low).replace(0, float("nan"))
+    _mfm = ((close - low) - (high - close)) / _hl_range
+    _mfv = _mfm * volume
+    _cmf_series = _mfv.rolling(CMF_PERIOD).sum() / volume.rolling(CMF_PERIOD).sum()
+    _cmf_val = _cmf_series.iloc[-2]
+    cmf_raw = float(_cmf_val) if _cmf_val == _cmf_val else float("nan")
+    if cmf_raw != cmf_raw:
+        cmf_score = 0
+    elif cmf_raw > 0.05:
+        cmf_score = 1
+    elif cmf_raw < -0.05:
+        cmf_score = -1
+    else:
+        cmf_score = 0
+
     # --- Short-term momentum (logged only, not in primary scoring) ---
     mom_15m_score = 0
     mom_60m_score = 0
@@ -515,14 +542,15 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
         "NO={}/4 (no_bias={:+d}). "
         "Stoch: K={:.1f} D={:.1f} xover={}. "
         "EMA={} ({:.0f}/{:.0f}). {}. "
-        "Aux: EMA_stack={:+d}, EMA_str={:+d}, VPIN={:+d}, Vol={:+d}, Funding={:+.4f}%/8h.".format(
+        "Aux: EMA_stack={:+d}, EMA_str={:+d}, VPIN={:+d}, Vol={:+d}, CMF={:.3f}({:+d}), Funding={:+.4f}%/8h.".format(
             label, confirmation_score,
             obi_score, funding_bias, stoch.stoch_bias, vwap_signal,
             no_score, no_bias,
             stoch.stoch_k, stoch.stoch_d, stoch.stoch_crossover_active,
             ema_alignment, ema_20_current, ema_50_current,
             vwap_detail,
-            ema_stack.ema_stack_bias, ema_stretch_score, vpin_score, vol_score, avg_funding_rate * 100,
+            ema_stack.ema_stack_bias, ema_stretch_score, vpin_score, vol_score,
+            cmf_raw if cmf_raw == cmf_raw else 0.0, cmf_score, avg_funding_rate * 100,
         )
     )
 
@@ -547,6 +575,8 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
         stoch_crossover_active=stoch.stoch_crossover_active,
         ema_stack_bias=ema_stack.ema_stack_bias,
         vol_score=vol_score,
+        cmf_raw=cmf_raw,
+        cmf_score=cmf_score,
         vwap_score=vwap_score,
         vwap_signal=vwap_signal,
         vwap_total=vwap_total,

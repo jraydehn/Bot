@@ -164,26 +164,36 @@ def _detect_bos_choch(
 
 def _find_zones(
     df: pd.DataFrame,
-    atr_mult: float = 1.5,
-    lookback: int = 100,
+    atr_mult: float = 1.0,
+    lookback: int = 200,
+    max_age_bars: int = 30,
 ) -> tuple[list[dict], list[dict]]:
     """
     Identify active (unmitigated) supply and demand zones from impulse candles.
 
     A demand zone is formed at the base of a large bullish impulse candle:
-        zone = [candle_low, candle_open]   (the area price left rapidly)
+        zone = [candle_low, candle_body_bot]  (lower wick + body base area)
     A supply zone is formed at the base of a large bearish impulse candle:
-        zone = [candle_open, candle_high]  (the area price left rapidly)
+        zone = [candle_body_top, candle_high] (upper wick + body top area)
 
     A zone is "mitigated" (discarded) once a subsequent bar's range re-enters
     the zone, implying institutions have already filled their orders there.
 
+    Fixes vs original:
+    - atr_mult lowered 1.5 → 1.0 (original was too restrictive, ~2 zones per 120 bars)
+    - lookback extended 100 → 200 (capture more structural context)
+    - max_age_bars: zones older than this many bars are discarded (prevent stale levels)
+    - Supply zone bug fixed: z_bot now uses max(open, close) not just open, preventing
+      zero-width zones when open ≈ high on a bearish candle
+    - Minimum width check: skip zones narrower than 0.05× ATR (avoids degenerate zones)
+
     Args:
-        atr_mult : body must exceed atr_mult × ATR(14) to qualify as impulse
-        lookback : number of recent bars to scan
+        atr_mult     : body must exceed atr_mult × ATR(14) to qualify as impulse
+        lookback     : number of recent bars to scan
+        max_age_bars : discard zones older than this many bars from end of data
 
     Returns:
-        supply_zones, demand_zones : lists of {'top': float, 'bot': float}
+        supply_zones, demand_zones : lists of {'top': float, 'bot': float, 'age': int}
     """
     df_s = df.iloc[-lookback:].reset_index(drop=True)
     N = len(df_s)
@@ -217,30 +227,35 @@ def _find_zones(
         if body < atr_mult * atr[i]:
             continue
 
+        age = N - 1 - i  # bars since this candle (0 = most recent)
+        if age > max_age_bars:
+            continue
+
         sub_low  = low[i + 1:]
         sub_high = high[i + 1:]
+        min_width = atr[i] * 0.05  # skip degenerate near-zero-width zones
 
         if close[i] > open_[i]:                  # bullish impulse → demand zone
-            z_top = float(open_[i])
+            z_top = float(min(open_[i], close[i]))   # body bottom
             z_bot = float(low[i])
-            if z_top <= z_bot:
+            if z_top - z_bot < min_width:
                 continue
             if len(sub_low) == 0:
                 continue
             mitigated = bool(((sub_low <= z_top) & (sub_high >= z_bot)).any())
             if not mitigated:
-                demand_zones.append({"top": z_top, "bot": z_bot})
+                demand_zones.append({"top": z_top, "bot": z_bot, "age": age})
 
         elif open_[i] > close[i]:                # bearish impulse → supply zone
             z_top = float(high[i])
-            z_bot = float(open_[i])
-            if z_top <= z_bot:
+            z_bot = float(max(open_[i], close[i]))   # body top (fix: was just open_[i])
+            if z_top - z_bot < min_width:
                 continue
             if len(sub_low) == 0:
                 continue
             mitigated = bool(((sub_low <= z_top) & (sub_high >= z_bot)).any())
             if not mitigated:
-                supply_zones.append({"top": z_top, "bot": z_bot})
+                supply_zones.append({"top": z_top, "bot": z_bot, "age": age})
 
     return supply_zones, demand_zones
 
@@ -272,7 +287,7 @@ def get_smc_signals(
     bos_1h, choch_1h, sh_1h, sl_1h = _detect_bos_choch(df_1h, n=5)
 
     # Supply / demand zones from 4h data (stronger, more institutionally relevant)
-    supply_zones, demand_zones = _find_zones(df_4h, atr_mult=1.5, lookback=120)
+    supply_zones, demand_zones = _find_zones(df_4h, atr_mult=1.0, lookback=200, max_age_bars=30)
 
     # Nearest supply zone above spot
     above = [z for z in supply_zones if z["bot"] > spot]

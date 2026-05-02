@@ -113,7 +113,8 @@ def load_trades(asset: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     if df.empty:
         return df
-    df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True).dt.tz_convert("America/Los_Angeles")
+    df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce").dt.tz_convert("America/Los_Angeles")
+    df = df[df["logged_at"].notna()]  # drop rows whose logged_at didn't parse (split CSV lines)
     for col in ["resolved_yes", "would_win"]:
         if col in df.columns:
             df[col] = df[col].replace("", pd.NA)

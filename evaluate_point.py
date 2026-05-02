@@ -79,7 +79,21 @@ def load_data(asset: str = "BTC") -> tuple:
     paths = {iv: _find_parquet(iv, symbol) for iv in intervals}
     dfs = {}
     for iv, path in paths.items():
-        dfs[iv] = pd.read_parquet(path)
+        # Retry up to 3 times with a short delay to handle transient write collisions
+        # where the data updater is mid-write when the runner tries to read.
+        _last_exc = None
+        for _attempt in range(3):
+            try:
+                dfs[iv] = pd.read_parquet(path)
+                _last_exc = None
+                break
+            except Exception as _exc:
+                _last_exc = _exc
+                import time as _time
+                print(f"  {iv:3s}: read error (attempt {_attempt+1}/3) — {_exc}. Retrying in 2s...")
+                _time.sleep(2)
+        if _last_exc is not None:
+            raise _last_exc
         if dfs[iv].index.tz is None:
             dfs[iv].index = dfs[iv].index.tz_localize("UTC")
         print(f"  {iv:3s}: {path.name}  ({len(dfs[iv]):,} rows)")

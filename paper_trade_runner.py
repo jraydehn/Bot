@@ -788,12 +788,13 @@ def main() -> None:
             else:
                 p_model_comp  = prob_c.p_yes
 
-            # [BTC vol gate] Block strikes where |z_strike| > 1.0 × vol_factor.
-            # vol_factor (0.92–1.08 in practice) widens/narrows the reachable band
-            # based on the volatility regime. Replaces vol_factor as sigma multiplier.
-            if args.asset == "BTC" and _composite_computed and sigma_tau_c > 0:
+            # [BTC vol gate] For OTM YES only (offset > 0): block if |z_strike| > 2.0 × vol_factor.
+            # Only OTM YES bets need the reachability gate — ITM YES bets are already in the money,
+            # and NO bets are governed by z_abs_no_min below. vol_factor widens/narrows the
+            # band with the vol regime. BASE_Z=2.0 gives a 1.2–2.8σ range across vol_factor [0.60,1.40].
+            if args.asset == "BTC" and _composite_computed and sigma_tau_c > 0 and offset_c > 0:
                 _z_strike_abs = abs(math.log(s_k / spot) / sigma_tau_c)
-                _btc_vol_gate_z = 1.0 * _vol_factor
+                _btc_vol_gate_z = 2.0 * _vol_factor
                 if _z_strike_abs > _btc_vol_gate_z:
                     print(f"  [btc_vol_gate] BLOCK {c['ticker']} — |z|={_z_strike_abs:.3f} > {_btc_vol_gate_z:.3f} (vol_factor={_vol_factor:.3f})")
                     continue

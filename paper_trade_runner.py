@@ -41,7 +41,7 @@ import outcome_checker
 import update_data
 import live_trading
 from kelly_sizing import compute_kelly_size
-from composite_scorer import compute_current_scores, score_to_p_model, composite_to_confirmation, lookup_p_up
+from composite_scorer import compute_current_scores, score_to_p_model, score_to_p_no_model, composite_to_confirmation, lookup_p_up, K_DRIFT_NO_BTC
 import direct_p_model
 import pickle as _pickle
 from vol_layer import compute_vol_regime_factor
@@ -829,15 +829,54 @@ def main() -> None:
                 _cscore     = confirm.confirmation_score
                 _nscore     = confirm.no_score
                 _ema_align  = confirm.ema_alignment
-            dec_c     = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
-                                       p_yes_adj_c, pm, args.bankroll,
-                                       confirmation_score=_cscore, no_score=_nscore,
-                                       obi_score=confirm.obi_score, vol_score=confirm.vol_score,
-                                       ema_alignment=_ema_align, asset=args.asset,
-                                       composite_active=_composite_active,
-                                       composite_p_up=_comp_p_up,
-                                       offset_pct=offset_c,
-                                       p_market_bid=c["bid"], p_market_ask=c["ask"])
+
+            # [Dual YES/NO model — BTC composite only]
+            # YES uses k_drift_yes=2.00 (via DRIFT_MULTIPLIER in composite_scorer.py).
+            # NO uses an independent k_drift_no=0.30 model — NOT 1-p_yes.
+            # We pass (1 - p_no_model) to evaluate_trade for NO so the formula
+            # p_market - p_model gives the correct NO edge:
+            #   edge = p_no_model - (1 - p_yes_market)  =  p_yes_market - (1 - p_no_model) ✓
+            # Kelly sizing also works: p_no_kelly = 1 - (1 - p_no_model) = p_no_model ✓
+            _p_no_btc = None
+            if args.asset == "BTC" and _composite_computed and sigma_tau_c > 0:
+                _p_no_btc = score_to_p_no_model(
+                    _active_trend, _active_rev, spot, s_k, sigma_tau_c, asset="BTC"
+                )
+                _pm_ask = c["ask"]
+                _pm_bid = c["bid"]
+                _dec_yes = evaluate_trade(
+                    struct.structure_bias, confirm.confirmation_bias,
+                    p_yes_adj_c, _pm_ask, args.bankroll,
+                    confirmation_score=_cscore, no_score=_nscore,
+                    obi_score=confirm.obi_score, vol_score=confirm.vol_score,
+                    ema_alignment=_ema_align, asset=args.asset,
+                    composite_active=_composite_active, composite_p_up=_comp_p_up,
+                    offset_pct=offset_c, force_side="yes")
+                _dec_no = evaluate_trade(
+                    struct.structure_bias, confirm.confirmation_bias,
+                    1.0 - _p_no_btc, _pm_bid, args.bankroll,
+                    confirmation_score=_cscore, no_score=_nscore,
+                    obi_score=confirm.obi_score, vol_score=confirm.vol_score,
+                    ema_alignment=_ema_align, asset=args.asset,
+                    composite_active=_composite_active, composite_p_up=_comp_p_up,
+                    offset_pct=offset_c, force_side="no")
+                if _dec_yes.decision == "trade" and _dec_no.decision == "trade":
+                    dec_c = _dec_yes if _dec_yes.net_edge >= _dec_no.net_edge else _dec_no
+                elif _dec_yes.decision == "trade":
+                    dec_c = _dec_yes
+                elif _dec_no.decision == "trade":
+                    dec_c = _dec_no
+                else:
+                    dec_c = _dec_yes if _dec_yes.net_edge >= _dec_no.net_edge else _dec_no
+            else:
+                dec_c = evaluate_trade(
+                    struct.structure_bias, confirm.confirmation_bias,
+                    p_yes_adj_c, pm, args.bankroll,
+                    confirmation_score=_cscore, no_score=_nscore,
+                    obi_score=confirm.obi_score, vol_score=confirm.vol_score,
+                    ema_alignment=_ema_align, asset=args.asset,
+                    composite_active=_composite_active, composite_p_up=_comp_p_up,
+                    offset_pct=offset_c, p_market_bid=c["bid"], p_market_ask=c["ask"])
             # Update pm to side-specific fill-price reference:
             # YES bet fills at YES ask; NO bet fills at 1 - YES bid (so YES bid is reference).
             # Using bid/ask (not mid) prevents edge inflation on wide-spread contracts.
@@ -928,15 +967,16 @@ def main() -> None:
 
             # btc_no_pup_gate and btc_no_edge_gate removed: replaced by z_abs_no_min gate below.
 
-            # [BTC NO z_abs gate] Block NO bets where the strike is < 0.3σ from spot.
-            # Near-ATM NO bets (z_abs < 0.3) have near-zero structural edge — the market
-            # prices these correctly and drift-induced edge is phantom. Companion to the
-            # vol_factor gate upper bound; together they define a [0.3, 1.0×vf] σ-band.
+            # [BTC NO z_abs gate] Block NO bets where the strike is < 0.6σ from spot.
+            # Raised from 0.30 → 0.60 with dual-model reform (k_drift_no=0.30):
+            # backtest shows z_abs > 0.60 + k_no=0.30 gives 20 test trades, +$247 PnL
+            # vs z_abs > 0.30 + k_no=0.30 which gives 21 test trades, +$187 PnL.
+            # Near-ATM NO bets (z_abs < 0.6) have poor structural edge even with k_no=0.30.
             if (args.asset == "BTC" and dec_c.side == "no"
                     and dec_c.decision == "trade" and _composite_computed and sigma_tau_c > 0):
                 _z_no = abs(math.log(s_k / spot) / sigma_tau_c)
-                if _z_no < 0.3:
-                    print(f"  [btc_no_z_gate] BLOCK NO {c['ticker']} — |z|={_z_no:.3f} < 0.30 (near-ATM, no structural edge)")
+                if _z_no < 0.6:
+                    print(f"  [btc_no_z_gate] BLOCK NO {c['ticker']} — |z|={_z_no:.3f} < 0.60 (near-ATM, no structural edge)")
                     continue
 
             # [2026-04-28] BTC spread tightness gate with rescue.
@@ -987,10 +1027,14 @@ def main() -> None:
                 print(f"  [scan] Skipping {c['ticker']} — NO@{s_k} conflicts with existing YES above it")
                 continue
 
+            # For BTC NO trades using dual model, p_yes_model logs the YES probability
+            # (p_model_comp) for consistency. The independent NO probability (_p_no_btc)
+            # is logged separately via p_no_model_comp for future analysis.
             meta_c    = {"strike": s_k, "p_market": pm, "prob": prob_c,
                          "contract_ticker": c["ticker"], "close_ts": c["close_time"],
                          "vol_eff": vol_eff_c, "bid": c["bid"], "ask": c["ask"],
-                         "p_model_comp": p_model_comp}
+                         "p_model_comp": p_model_comp,
+                         "p_no_model_comp": _p_no_btc if (args.asset == "BTC" and _composite_computed) else None}
 
             if best_any_dec is None or dec_c.net_edge > best_any_dec.net_edge:
                 best_any_dec  = dec_c

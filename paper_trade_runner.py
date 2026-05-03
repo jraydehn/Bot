@@ -822,17 +822,6 @@ def main() -> None:
                         p_model_comp = None
                 if p_model_comp is None:
                     p_model_comp = score_to_p_model(_active_trend, _active_rev, spot, s_k, sigma_tau_c, asset=args.asset)
-
-                # [ETH isotonic calibration] Override direct_p_model with log-normal + isotonic.
-                # HistGBM overestimates p_yes on deep OTM ETH YES (pm<0.40: 0% WR, -$977 live).
-                # Isotonic trained on 18,836 reconstructed outcomes; maps p_ln → actual WR.
-                # OOS simulation: +$742 vs HistGBM +$528 (Apr 23 – May 3 2026, 191 slots).
-                if args.asset == "ETH" and sigma_tau_c > 0:
-                    _eth_p_ln = _compute_eth_p_ln(spot, s_k, vol_eff_c, tau_c, _comp_p_up)
-                    if _eth_p_ln is not None:
-                        _eth_iso = _load_eth_iso()
-                        if _eth_iso is not None:
-                            p_model_comp = float(max(0.01, min(0.99, _eth_iso.predict([_eth_p_ln])[0])))
             else:
                 p_model_comp  = prob_c.p_yes
 
@@ -939,6 +928,15 @@ def main() -> None:
                 else:
                     dec_c = _dec_no
             else:
+                # [ETH OTM YES gate] Block YES when strike > spot (OTM) and pm < 0.45.
+                # Archive analysis Apr 15 – May 3 2026: OTM YES pm<0.45 → 6.2% WR, -$1,203.
+                # HistGBM overestimates p_yes in this regime (vol correction + class imbalance).
+                # OOS simulation +$294 improvement (+54%). ITM YES (offset<0) unaffected.
+                _eth_otm_yes_blocked = (
+                    args.asset == "ETH" and offset_c > 0 and pm < 0.45
+                )
+                if _eth_otm_yes_blocked:
+                    print(f"  [eth_otm_yes_gate] BLOCK YES {c['ticker']} — pm={pm:.3f}<0.45, OTM offset={offset_c*100:+.2f}%")
                 dec_c = evaluate_trade(
                     struct.structure_bias, confirm.confirmation_bias,
                     p_yes_adj_c, pm, args.bankroll,
@@ -946,7 +944,8 @@ def main() -> None:
                     obi_score=confirm.obi_score, vol_score=confirm.vol_score,
                     ema_alignment=_ema_align, asset=args.asset,
                     composite_active=_composite_active, composite_p_up=_comp_p_up,
-                    offset_pct=offset_c, p_market_bid=c["bid"], p_market_ask=c["ask"])
+                    offset_pct=offset_c, p_market_bid=c["bid"], p_market_ask=c["ask"],
+                    force_side="no" if _eth_otm_yes_blocked else None)
             # Update pm to side-specific fill-price reference:
             # YES bet fills at YES ask; NO bet fills at 1 - YES bid (so YES bid is reference).
             # Using bid/ask (not mid) prevents edge inflation on wide-spread contracts.

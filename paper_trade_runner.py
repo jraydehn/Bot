@@ -41,7 +41,7 @@ import outcome_checker
 import update_data
 import live_trading
 from kelly_sizing import compute_kelly_size
-from composite_scorer import compute_current_scores, score_to_p_model, score_to_p_no_model, composite_to_confirmation, lookup_p_up, K_DRIFT_NO_BTC
+from composite_scorer import compute_current_scores, score_to_p_model, composite_to_confirmation, lookup_p_up
 import direct_p_model
 import pickle as _pickle
 from vol_layer import compute_vol_regime_factor
@@ -67,43 +67,6 @@ def _load_btc_iso() -> "dict | None":
         print(f"  [btc_iso] Failed to load: {_e}")
         _BTC_ISO_CAL = None
     return _BTC_ISO_CAL
-
-# ETH isotonic calibration: log-normal p_yes → actual WR mapping.
-# Trained on 18,836 reconstructed ETH outcomes (Apr 15 – May 3 2026).
-# Key effect: p_ln < 0.20 → iso ≈ 0.04, eliminating phantom OTM YES edge
-# that HistGBM overestimates. Calibration tracks actual WR within ~2pp.
-_ETH_ISO_CAL: "object | None | str" = "unloaded"
-
-def _load_eth_iso():
-    global _ETH_ISO_CAL
-    if _ETH_ISO_CAL != "unloaded":
-        return _ETH_ISO_CAL
-    path = Path(__file__).parent / "models" / "eth_iso_cal.pkl"
-    if not path.exists():
-        _ETH_ISO_CAL = None
-        return None
-    try:
-        with open(path, "rb") as _f:
-            _ETH_ISO_CAL = _pickle.load(_f)
-        print(f"  [eth_iso] Loaded ETH isotonic calibrator")
-    except Exception as _e:
-        print(f"  [eth_iso] Failed to load: {_e}")
-        _ETH_ISO_CAL = None
-    return _ETH_ISO_CAL
-
-def _compute_eth_p_ln(spot, strike, vol_eff, tau_min, p_up, k_drift=0.80):
-    """Log-normal YES probability for ETH with k_drift=0.80."""
-    if vol_eff <= 0 or tau_min <= 0 or spot <= 0:
-        return None
-    import math as _math
-    from scipy.stats import norm as _norm
-    sigma_tau = vol_eff * _math.sqrt(tau_min)
-    if sigma_tau <= 0:
-        return None
-    z = _math.log(strike / spot) / sigma_tau
-    z_adj = z - _norm.ppf(p_up) * k_drift
-    return float(max(0.01, min(0.99, 1 - _norm.cdf(z_adj))))
-
 from live_signal import (
     load_auth, kalshi_get, fetch_live_spot, fetch_current_price, find_live_contract,
     fetch_contracts_for_nearest_expiry, fetch_recent_1m_candles, minutes_to_expiry,
@@ -800,10 +763,7 @@ def main() -> None:
             # by a calibrated drift derived from empirical win rates on 11,108 test hours.
             # Falls back to pure log-normal (prob_c.p_yes) when composite is unavailable.
             if _composite_computed:
-                # BTC reform: vol_factor removed from sigma — use vol_eff_c (not vol_adj_c).
-                # vol_factor is now used as a reachability gate (see below), not a sigma scaler.
-                _sigma_base   = vol_eff_c if args.asset == "BTC" else vol_adj_c
-                sigma_tau_c   = _sigma_base * math.sqrt(tau_c)
+                sigma_tau_c   = vol_adj_c * math.sqrt(tau_c)
                 p_model_comp  = None
                 # ETH / SOL: use trained strike-hit model (validated +$467 ETH, +$3,780 SOL on test)
                 # BTC: direct model regressed on test — stay on legacy score_to_p_model
@@ -825,49 +785,37 @@ def main() -> None:
             else:
                 p_model_comp  = prob_c.p_yes
 
-            # [BTC vol gate] For OTM YES only (offset > 0): block if |z_strike| > 2.0 × vol_factor.
-            # Only OTM YES bets need the reachability gate — ITM YES bets are already in the money,
-            # and NO bets are governed by z_abs_no_min below. vol_factor widens/narrows the
-            # band with the vol regime. BASE_Z=2.0 gives a 1.2–2.8σ range across vol_factor [0.60,1.40].
-            _otm_yes_blocked = False
-            if args.asset == "BTC" and _composite_computed and sigma_tau_c > 0 and offset_c > 0:
-                _z_strike_abs = abs(math.log(s_k / spot) / sigma_tau_c)
-                _btc_vol_gate_z = 2.0 * _vol_factor
-                if _z_strike_abs > _btc_vol_gate_z:
-                    print(f"  [btc_vol_gate] BLOCK YES {c['ticker']} — |z|={_z_strike_abs:.3f} > {_btc_vol_gate_z:.3f} (vol_factor={_vol_factor:.3f})")
-                    _otm_yes_blocked = True
-
-            # [BTC isotonic calibration DISABLED — trained on drift-biased p_model values.
-            # Reform uses k_drift=0.8 + vol_factor-as-gate; isotonic retrain required
-            # before re-enabling. Remove this comment once retrained.]
-
-            # [OTM YES momentum exhaustion gate — BTC composite only]
-            # Archive analysis Apr 15–May 3 2026 (replay simulator):
-            #   pm < 0.15              : 0–5% actual WR — hard block, no signal rescues
-            #   pm [0.15,0.35)+ema>=1  : 0% WR on 35 trades (EMA already stretched bullish)
-            #   pm [0.25,0.35)+stoch>70: 8% WR on 12 trades (overbought into deep OTM YES)
-            # OOS impact: +$388 vs baseline (+101% PnL improvement) in replay simulation.
-            if args.asset == "BTC" and _composite_computed and pm < 0.35:
-                _ema_s    = confirm.ema_stretch_score
-                # Use 1h stoch_k (14-bar = 14h lookback) — more robust overbought signal.
-                # 15m stoch (3.5h lookback) hits 100 during any sustained uptrend, making
-                # the gate fire spuriously in trending regimes.
-                _hi14_1h = df_confirm["high"].rolling(14).max().iloc[-1]
-                _lo14_1h = df_confirm["low"].rolling(14).min().iloc[-1]
-                _cl_1h   = float(df_confirm["close"].iloc[-1])
-                if len(df_confirm) >= 14 and _hi14_1h > _lo14_1h:
-                    _sk_gate = (_cl_1h - _lo14_1h) / (_hi14_1h - _lo14_1h) * 100
-                else:
-                    _sk_gate = 50.0  # neutral fallback
-                if pm < 0.15:
-                    _otm_yes_blocked = True
-                    print(f"  [otm_yes_gate] BLOCK YES {c['ticker']} — pm={pm:.3f}<0.15 (hard block)")
-                elif _ema_s >= 1:
-                    _otm_yes_blocked = True
-                    print(f"  [otm_yes_gate] BLOCK YES {c['ticker']} — pm={pm:.3f}<0.35, ema_stretch={int(_ema_s)}")
-                elif pm >= 0.25 and _sk_gate > 70:
-                    _otm_yes_blocked = True
-                    print(f"  [otm_yes_gate] BLOCK YES {c['ticker']} — pm={pm:.3f} in [0.25,0.35), stoch_k={_sk_gate:.1f}>70")
+            # BTC isotonic calibration: correct lognormal overconfidence before edge calc.
+            # Rescue conditions keep the original p_model when calibration kills edge
+            # but directional signals confirm the bet is coherent:
+            #   NO rescue:  composite_p_up < 0.50 — model is bearish, NO is directional
+            #   YES rescue: stoch_k < 35 AND chg_5m > 0 — oversold + price already ticking
+            #               up = mean reversion recovery underway for ITM YES
+            if args.asset == "BTC":
+                _iso_cal = _load_btc_iso()
+                if _iso_cal is not None:
+                    _p_cal = float(_iso_cal["iso"].predict([p_model_comp])[0])
+                    _edge_orig_no  = (1 - p_model_comp) - (1 - pm)
+                    _edge_cal_no   = (1 - _p_cal) - (1 - pm)
+                    _edge_orig_yes = p_model_comp - pm
+                    _edge_cal_yes  = _p_cal - pm
+                    _sk_iso = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
+                    _is_no_rescue  = (_edge_orig_no  > 0 and _edge_cal_no  <= 0
+                                      and _comp_p_up < 0.50)
+                    _is_yes_rescue = (_edge_orig_yes > 0 and _edge_cal_yes <= 0
+                                      and _sk_iso < 35 and _sharp_move_pct_5m > 0)
+                    if _is_no_rescue:
+                        print(f"  [btc_iso] NO rescue: p_up={_comp_p_up:.3f}<0.50, "
+                              f"keeping p_model={p_model_comp:.3f} (cal={_p_cal:.3f})")
+                    elif _is_yes_rescue:
+                        print(f"  [btc_iso] YES rescue: stoch_k={_sk_iso:.1f}<35 + "
+                              f"chg_5m={_sharp_move_pct_5m*100:+.2f}%>0, "
+                              f"keeping p_model={p_model_comp:.3f} (cal={_p_cal:.3f})")
+                    else:
+                        if abs(_p_cal - p_model_comp) > 0.01:
+                            print(f"  [btc_iso] p_model {p_model_comp:.3f} -> {_p_cal:.3f}  "
+                                  f"(offset={offset_c*100:+.2f}%  pm={pm:.3f})")
+                        p_model_comp = _p_cal
 
             p_yes_adj_c = max(0.03, min(0.97, p_model_comp + funding_delta))
             if c["ticker"] in already_traded:
@@ -895,74 +843,22 @@ def main() -> None:
                 _cscore     = confirm.confirmation_score
                 _nscore     = confirm.no_score
                 _ema_align  = confirm.ema_alignment
-
-            # [Dual YES/NO model — BTC composite only]
-            # YES uses k_drift_yes=2.00 (via DRIFT_MULTIPLIER in composite_scorer.py).
-            # NO uses an independent k_drift_no=0.30 model — NOT 1-p_yes.
-            # We pass (1 - p_no_model) to evaluate_trade for NO so the formula
-            # p_market - p_model gives the correct NO edge:
-            #   edge = p_no_model - (1 - p_yes_market)  =  p_yes_market - (1 - p_no_model) ✓
-            # Kelly sizing also works: p_no_kelly = 1 - (1 - p_no_model) = p_no_model ✓
-            _p_no_btc = None
-            if args.asset == "BTC" and _composite_computed and sigma_tau_c > 0:
-                _p_no_btc = score_to_p_no_model(
-                    _active_trend, _active_rev, spot, s_k, sigma_tau_c, asset="BTC"
-                )
-                _pm_ask = c["ask"]
-                _pm_bid = c["bid"]
-                _dec_yes = None
-                if not _otm_yes_blocked:
-                    _dec_yes = evaluate_trade(
-                        struct.structure_bias, confirm.confirmation_bias,
-                        p_yes_adj_c, _pm_ask, args.bankroll,
-                        confirmation_score=_cscore, no_score=_nscore,
-                        obi_score=confirm.obi_score, vol_score=confirm.vol_score,
-                        ema_alignment=_ema_align, asset=args.asset,
-                        composite_active=_composite_active, composite_p_up=_comp_p_up,
-                        offset_pct=offset_c, force_side="yes")
-                _dec_no = evaluate_trade(
-                    struct.structure_bias, confirm.confirmation_bias,
-                    1.0 - _p_no_btc, _pm_bid, args.bankroll,
-                    confirmation_score=_cscore, no_score=_nscore,
-                    obi_score=confirm.obi_score, vol_score=confirm.vol_score,
-                    ema_alignment=_ema_align, asset=args.asset,
-                    composite_active=_composite_active, composite_p_up=_comp_p_up,
-                    offset_pct=offset_c, force_side="no")
-                if _dec_yes is not None and _dec_yes.decision == "trade" and _dec_no.decision == "trade":
-                    dec_c = _dec_yes if _dec_yes.net_edge >= _dec_no.net_edge else _dec_no
-                elif _dec_yes is not None and _dec_yes.decision == "trade":
-                    dec_c = _dec_yes
-                elif _dec_no.decision == "trade":
-                    dec_c = _dec_no
-                else:
-                    dec_c = _dec_no
-            else:
-                # [ETH OTM YES gate] Block YES when strike > spot (OTM) and pm < 0.45.
-                # Archive analysis Apr 15 – May 3 2026: OTM YES pm<0.45 → 6.2% WR, -$1,203.
-                # HistGBM overestimates p_yes in this regime (vol correction + class imbalance).
-                # OOS simulation +$294 improvement (+54%). ITM YES (offset<0) unaffected.
-                _eth_otm_yes_blocked = (
-                    args.asset == "ETH" and offset_c > 0 and pm < 0.45
-                )
-                if _eth_otm_yes_blocked:
-                    print(f"  [eth_otm_yes_gate] BLOCK YES {c['ticker']} — pm={pm:.3f}<0.45, OTM offset={offset_c*100:+.2f}%")
-                dec_c = evaluate_trade(
-                    struct.structure_bias, confirm.confirmation_bias,
-                    p_yes_adj_c, pm, args.bankroll,
-                    confirmation_score=_cscore, no_score=_nscore,
-                    obi_score=confirm.obi_score, vol_score=confirm.vol_score,
-                    ema_alignment=_ema_align, asset=args.asset,
-                    composite_active=_composite_active, composite_p_up=_comp_p_up,
-                    offset_pct=offset_c, p_market_bid=c["bid"], p_market_ask=c["ask"],
-                    force_side="no" if _eth_otm_yes_blocked else None)
+            dec_c     = evaluate_trade(struct.structure_bias, confirm.confirmation_bias,
+                                       p_yes_adj_c, pm, args.bankroll,
+                                       confirmation_score=_cscore, no_score=_nscore,
+                                       obi_score=confirm.obi_score, vol_score=confirm.vol_score,
+                                       ema_alignment=_ema_align, asset=args.asset,
+                                       composite_active=_composite_active,
+                                       composite_p_up=_comp_p_up,
+                                       offset_pct=offset_c,
+                                       p_market_bid=c["bid"], p_market_ask=c["ask"])
             # Update pm to side-specific fill-price reference:
             # YES bet fills at YES ask; NO bet fills at 1 - YES bid (so YES bid is reference).
             # Using bid/ask (not mid) prevents edge inflation on wide-spread contracts.
             pm = c["bid"] if dec_c.side == "no" else c["ask"]
-            # ITM NO gate disabled 2026-05-03 — NO means BTC stays above strike, not drops
-            # if dec_c.side == "no" and offset_c <= 0:
-            #     print(f"  [scan] Skipping {c['ticker']} — ITM NO (offset={offset_c*100:+.3f}%, price already above strike)")
-            #     continue
+            if dec_c.side == "no" and offset_c <= 0:
+                print(f"  [scan] Skipping {c['ticker']} — ITM NO (offset={offset_c*100:+.3f}%, price already above strike)")
+                continue
             # Minimum offset filters for NO bets — based on real Kalshi p_market analysis
             # (2026-04-07 backtest + paper trade archive, real pricing confirmed):
             #
@@ -975,7 +871,9 @@ def main() -> None:
             #                   ≥ 0.20%: live winners at 0.23-0.24% offset (n=2, 100% win).
             #                   NOTE: 0.50% was too aggressive — blocked all available SOL contracts.
             # Revert: copy paper_trade_runner_v3.py → paper_trade_runner.py
-            # BTC NO minimum offset filter removed 2026-05-03 — let gate stack evaluate edge
+            if dec_c.side == "no" and args.asset == "BTC" and offset_c < 0.001:
+                print(f"  [scan] Skipping {c['ticker']} — BTC NO offset={offset_c*100:+.3f}% < 0.10% minimum")
+                continue
             if dec_c.side == "no" and args.asset == "ETH" and offset_c < 0.001:
                 print(f"  [scan] Skipping {c['ticker']} — ETH NO offset={offset_c*100:+.3f}% < 0.10% minimum")
                 continue
@@ -985,7 +883,42 @@ def main() -> None:
             if _sharp_move_active and dec_c.decision == "trade":
                 print(f"  [sharp_move] {c['ticker']} — inverted composite: side={dec_c.side.upper()} net={dec_c.net_edge:+.4f}")
 
-            # btc_pup_gate removed: replaced by vol_factor-as-gate + k_drift=0.8 reform.
+            # [EXPERIMENTAL — 2026-04-23] BTC YES p_up gate with causal rescue.
+            # Block YES bets when composite_p_up < 0.52 (isotonic calibration shows
+            # raw p_up < 0.52 maps to calibrated p_up ~0.376 — genuinely bearish).
+            #
+            # Causal mechanism: funding_bias=1 + bearish p_up = crowded long liquidation
+            # cascade that drives price through ITM strikes (38.5% WR observed).
+            # Rescue conditions restore the bet when the cascade mechanism is absent:
+            #   (A) funding_bias==0 AND structure_bias>=0 — no crowded longs to unwind,
+            #       no structural downtrend reinforcing the bearish p_up signal
+            #   (B) composite_rev>0 — independent oversold/reversion signal fires,
+            #       overriding mild p_up bearishness regardless of funding/structure
+            #
+            # In-sample simulation: +$582 net vs baseline (all-time BTC resolved trades).
+            # EXPERIMENTAL: rescue logic derived partly from in-sample analysis.
+            # Revisit after 200+ live observations on this gate. Revert: remove this block.
+            if (args.asset == "BTC" and dec_c.side == "yes"
+                    and _comp_p_up < 0.52):
+                _fund_ok   = (confirm.funding_bias == 0)
+                _struct_ok = (struct.structure_bias >= 0)
+                _rev_ok    = (_comp_rev > 0)
+                _pup_rescue = (_fund_ok and _struct_ok) or _rev_ok
+                if not _pup_rescue:
+                    print(f"  [btc_pup_gate] BLOCK YES p_up={_comp_p_up:.3f}<0.52 "
+                          f"fund={confirm.funding_bias} struct={struct.structure_bias} "
+                          f"rev={_comp_rev}")
+                    continue
+                else:
+                    _rescue_reason = []
+                    if _fund_ok and _struct_ok:
+                        _rescue_reason.append("fund=0+struct>=0")
+                    if _rev_ok:
+                        _rescue_reason.append("rev>0")
+                    print(f"  [btc_pup_gate] RESCUE YES p_up={_comp_p_up:.3f}<0.52 "
+                          f"via {'+'.join(_rescue_reason)} "
+                          f"fund={confirm.funding_bias} struct={struct.structure_bias} "
+                          f"rev={_comp_rev}")
 
             # [EXPERIMENTAL — 2026-04-25] BTC YES vol_score=1 gate with rescue.
             # Block YES bets when vol_score=1 (last completed 1h bar: high volume + price up).
@@ -1028,8 +961,14 @@ def main() -> None:
             #               f"ema_stack={confirm.ema_stack_bias} "
             #               f"conf={_cscore} fund={confirm.funding_bias}")
 
-            # btc_otm_gate (pm<0.20 YES block) removed: vol_factor gate (|z|>1.0×vf)
-            # naturally blocks unreachable deep OTM strikes without a hard pm cutoff.
+            # [2026-04-27] BTC YES OTM hard block.
+            # Threshold raised 0.15 → 0.20 (2026-04-28): sim shows 46 trades at pm<0.20
+            # have 10.9% WR (-$540 net). [0.15-0.20) bucket extends the same pattern as
+            # the original [0.05-0.15) block — structurally implausible in hours regardless
+            # of composite signal. Revert: change threshold back to 0.15.
+            if args.asset == "BTC" and dec_c.side == "yes" and pm < 0.20:
+                print(f"  [btc_otm_gate] BLOCK YES p_market={pm:.3f}<0.20 — OTM hard block")
+                continue
 
             # [2026-04-27] ETH YES OTM hard block: p_market < 0.45 when strike > spot.
             # 32 historical OTM YES trades at pm<0.45 had 6.2% WR (-$1,203 net) across all
@@ -1042,19 +981,31 @@ def main() -> None:
                 print(f"  [eth_otm_gate] BLOCK OTM YES p_market={pm:.3f}<0.45 offset={offset_c:+.3f} — unreachable strike")
                 continue
 
-            # btc_no_pup_gate and btc_no_edge_gate removed: replaced by z_abs_no_min gate below.
+            # [2026-04-28] BTC NO high-p_up block.
+            # Sim: 41 NO trades with composite_p_up >= 0.52 → 53.7% WR, -$430.
+            # Model says price going UP — betting NO into a bullish composite loses.
+            # Revert: remove this block.
+            if args.asset == "BTC" and dec_c.side == "no" and dec_c.decision == "trade" and _comp_p_up >= 0.52:
+                print(f"  [btc_no_pup_gate] BLOCK NO p_up={_comp_p_up:.3f}>=0.52 — bullish composite")
+                continue
 
-            # [BTC NO z_abs gate] Block NO bets where the strike is < 0.6σ from spot.
-            # Raised from 0.30 → 0.60 with dual-model reform (k_drift_no=0.30):
-            # backtest shows z_abs > 0.60 + k_no=0.30 gives 20 test trades, +$247 PnL
-            # vs z_abs > 0.30 + k_no=0.30 which gives 21 test trades, +$187 PnL.
-            # Near-ATM NO bets (z_abs < 0.6) have poor structural edge even with k_no=0.30.
-            if (args.asset == "BTC" and dec_c.side == "no"
-                    and dec_c.decision == "trade" and _composite_computed and sigma_tau_c > 0):
-                _z_no = abs(math.log(s_k / spot) / sigma_tau_c)
-                if _z_no < 0.6:
-                    print(f"  [btc_no_z_gate] BLOCK NO {c['ticker']} — |z|={_z_no:.3f} < 0.60 (near-ATM, no structural edge)")
+            # [2026-04-28] BTC NO marginal edge gate with rescue.
+            # Sim: NO trades with net_edge [1-2%) have 66.7% WR but P&L=-$248 (69 trades).
+            # Rescue: composite_rev<=-1 AND vol_ratio>=1.0 → 19W 6L (76%, +$59).
+            # Revert: remove this block.
+            if args.asset == "BTC" and dec_c.side == "no" and dec_c.decision == "trade" and dec_c.net_edge < 0.02:
+                _no_edge_rescue = (
+                    _comp_rev <= -1 and
+                    vol_ratio_c is not None and vol_ratio_c >= 1.0
+                )
+                _vr_str = f"{vol_ratio_c:.2f}" if vol_ratio_c is not None else "N/A"
+                if not _no_edge_rescue:
+                    print(f"  [btc_no_edge_gate] BLOCK NO net_edge={dec_c.net_edge:.4f}<0.02 "
+                          f"comp_rev={_comp_rev:.1f} vol_ratio={_vr_str}")
                     continue
+                else:
+                    print(f"  [btc_no_edge_gate] RESCUED NO net_edge={dec_c.net_edge:.4f}<0.02 "
+                          f"comp_rev={_comp_rev:.1f}<=-1 vol_ratio={_vr_str}>=1.0")
 
             # [2026-04-28] BTC spread tightness gate with rescue.
             # Sim: trades with spread >= 0.04 → WR deteriorates, P&L=-$242 (49 trades).
@@ -1104,14 +1055,10 @@ def main() -> None:
                 print(f"  [scan] Skipping {c['ticker']} — NO@{s_k} conflicts with existing YES above it")
                 continue
 
-            # For BTC NO trades using dual model, p_yes_model logs the YES probability
-            # (p_model_comp) for consistency. The independent NO probability (_p_no_btc)
-            # is logged separately via p_no_model_comp for future analysis.
             meta_c    = {"strike": s_k, "p_market": pm, "prob": prob_c,
                          "contract_ticker": c["ticker"], "close_ts": c["close_time"],
                          "vol_eff": vol_eff_c, "bid": c["bid"], "ask": c["ask"],
-                         "p_model_comp": p_model_comp,
-                         "p_no_model_comp": _p_no_btc if (args.asset == "BTC" and _composite_computed) else None}
+                         "p_model_comp": p_model_comp}
 
             if best_any_dec is None or dec_c.net_edge > best_any_dec.net_edge:
                 best_any_dec  = dec_c

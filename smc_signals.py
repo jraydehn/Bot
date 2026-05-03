@@ -287,7 +287,7 @@ def get_smc_signals(
     bos_1h, choch_1h, sh_1h, sl_1h = _detect_bos_choch(df_1h, n=5)
 
     # Supply / demand zones from 4h data (stronger, more institutionally relevant)
-    supply_zones, demand_zones = _find_zones(df_4h, atr_mult=1.0, lookback=200, max_age_bars=30)
+    supply_zones, demand_zones = _find_zones(df_4h, atr_mult=1.0, lookback=800, max_age_bars=800)
 
     # Nearest supply zone above spot
     above = [z for z in supply_zones if z["bot"] > spot]

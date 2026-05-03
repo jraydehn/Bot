@@ -803,6 +803,26 @@ def main() -> None:
             # Reform uses k_drift=0.8 + vol_factor-as-gate; isotonic retrain required
             # before re-enabling. Remove this comment once retrained.]
 
+            # [OTM YES momentum exhaustion gate — BTC composite only]
+            # Archive analysis Apr 15–May 3 2026 (replay simulator):
+            #   pm < 0.15              : 0–5% actual WR — hard block, no signal rescues
+            #   pm [0.15,0.35)+ema>=1  : 0% WR on 35 trades (EMA already stretched bullish)
+            #   pm [0.25,0.35)+stoch>70: 8% WR on 12 trades (overbought into deep OTM YES)
+            # OOS impact: +$388 vs baseline (+101% PnL improvement) in replay simulation.
+            _otm_yes_blocked = False
+            if args.asset == "BTC" and _composite_computed and pm < 0.35:
+                _ema_s    = confirm.ema_stretch_score
+                _sk_gate  = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
+                if pm < 0.15:
+                    _otm_yes_blocked = True
+                    print(f"  [otm_yes_gate] BLOCK YES {c['ticker']} — pm={pm:.3f}<0.15 (hard block)")
+                elif _ema_s >= 1:
+                    _otm_yes_blocked = True
+                    print(f"  [otm_yes_gate] BLOCK YES {c['ticker']} — pm={pm:.3f}<0.35, ema_stretch={int(_ema_s)}")
+                elif pm >= 0.25 and _sk_gate > 70:
+                    _otm_yes_blocked = True
+                    print(f"  [otm_yes_gate] BLOCK YES {c['ticker']} — pm={pm:.3f} in [0.25,0.35), stoch_k={_sk_gate:.1f}>70")
+
             p_yes_adj_c = max(0.03, min(0.97, p_model_comp + funding_delta))
             if c["ticker"] in already_traded:
                 print(f"  [scan] Skipping {c['ticker']} — already traded this session")
@@ -844,14 +864,16 @@ def main() -> None:
                 )
                 _pm_ask = c["ask"]
                 _pm_bid = c["bid"]
-                _dec_yes = evaluate_trade(
-                    struct.structure_bias, confirm.confirmation_bias,
-                    p_yes_adj_c, _pm_ask, args.bankroll,
-                    confirmation_score=_cscore, no_score=_nscore,
-                    obi_score=confirm.obi_score, vol_score=confirm.vol_score,
-                    ema_alignment=_ema_align, asset=args.asset,
-                    composite_active=_composite_active, composite_p_up=_comp_p_up,
-                    offset_pct=offset_c, force_side="yes")
+                _dec_yes = None
+                if not _otm_yes_blocked:
+                    _dec_yes = evaluate_trade(
+                        struct.structure_bias, confirm.confirmation_bias,
+                        p_yes_adj_c, _pm_ask, args.bankroll,
+                        confirmation_score=_cscore, no_score=_nscore,
+                        obi_score=confirm.obi_score, vol_score=confirm.vol_score,
+                        ema_alignment=_ema_align, asset=args.asset,
+                        composite_active=_composite_active, composite_p_up=_comp_p_up,
+                        offset_pct=offset_c, force_side="yes")
                 _dec_no = evaluate_trade(
                     struct.structure_bias, confirm.confirmation_bias,
                     1.0 - _p_no_btc, _pm_bid, args.bankroll,
@@ -860,14 +882,14 @@ def main() -> None:
                     ema_alignment=_ema_align, asset=args.asset,
                     composite_active=_composite_active, composite_p_up=_comp_p_up,
                     offset_pct=offset_c, force_side="no")
-                if _dec_yes.decision == "trade" and _dec_no.decision == "trade":
+                if _dec_yes is not None and _dec_yes.decision == "trade" and _dec_no.decision == "trade":
                     dec_c = _dec_yes if _dec_yes.net_edge >= _dec_no.net_edge else _dec_no
-                elif _dec_yes.decision == "trade":
+                elif _dec_yes is not None and _dec_yes.decision == "trade":
                     dec_c = _dec_yes
                 elif _dec_no.decision == "trade":
                     dec_c = _dec_no
                 else:
-                    dec_c = _dec_yes if _dec_yes.net_edge >= _dec_no.net_edge else _dec_no
+                    dec_c = _dec_no
             else:
                 dec_c = evaluate_trade(
                     struct.structure_bias, confirm.confirmation_bias,

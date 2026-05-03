@@ -50,11 +50,12 @@ K_DRIFT_NO_DEFAULT  = 0.30
 # ── Config ─────────────────────────────────────────────────────────────────
 @dataclass
 class SimConfig:
-    k_drift_yes:  float = K_DRIFT_YES_DEFAULT
-    k_drift_no:   float = K_DRIFT_NO_DEFAULT
-    pm_floor_yes: float = 0.04   # BTC YES min p_market (0.04 = effectively off)
-    pm_ceil_no:   float = 0.96   # BTC NO  max p_market (0.96 = effectively off)
-    label:        str   = "baseline"
+    k_drift_yes:    float = K_DRIFT_YES_DEFAULT
+    k_drift_no:     float = K_DRIFT_NO_DEFAULT
+    pm_floor_yes:   float = 0.04   # BTC YES min p_market (0.04 = effectively off)
+    pm_ceil_no:     float = 0.96   # BTC NO  max p_market (0.96 = effectively off)
+    otm_yes_gate:   bool  = False  # momentum exhaustion gate for OTM YES < 0.35
+    label:          str   = "baseline"
 
 
 # ── Model formulas ─────────────────────────────────────────────────────────
@@ -115,7 +116,8 @@ REQUIRED_COLS = ["spot", "strike", "p_market", "vol_eff", "tau_minutes",
 NUMERIC_COLS  = ["spot", "strike", "p_market", "vol_eff", "tau_minutes",
                  "composite_p_up", "offset_pct", "resolved_yes",
                  "structure_bias", "confirmation_bias", "confirmation_score",
-                 "no_score", "obi_score", "vol_score"]
+                 "no_score", "obi_score", "vol_score",
+                 "stoch_k", "ema_stretch_score"]
 
 
 def _load_one(csv_path: Path) -> pd.DataFrame:
@@ -197,14 +199,16 @@ def evaluate_slot(group: pd.DataFrame, cfg: SimConfig, iso: IsotonicRegression =
         p_up         = float(comp_pup_raw) if comp_active else 0.504
 
         # Gate/signal inputs
-        offset    = _safe_float(row.get("offset_pct"), (strike - spot) / spot)
-        struct    = _safe_int(row.get("structure_bias"), 0)
-        conf_bias = _safe_int(row.get("confirmation_bias"), 0)
-        cscore    = _safe_int(row.get("confirmation_score"), 0)
-        nscore    = _safe_int(row.get("no_score"), 0)
-        obi       = _safe_int(row.get("obi_score"), 0)
-        vol_sc    = _safe_int(row.get("vol_score"), 0)
-        ema_al    = _safe_str(row.get("ema_alignment"), "neutral")
+        offset      = _safe_float(row.get("offset_pct"), (strike - spot) / spot)
+        struct      = _safe_int(row.get("structure_bias"), 0)
+        conf_bias   = _safe_int(row.get("confirmation_bias"), 0)
+        cscore      = _safe_int(row.get("confirmation_score"), 0)
+        nscore      = _safe_int(row.get("no_score"), 0)
+        obi         = _safe_int(row.get("obi_score"), 0)
+        vol_sc      = _safe_int(row.get("vol_score"), 0)
+        ema_al      = _safe_str(row.get("ema_alignment"), "neutral")
+        stoch_k     = _safe_float(row.get("stoch_k"), 50.0)
+        ema_stretch = _safe_int(row.get("ema_stretch_score"), 0)
 
         # bid/ask approximation from mid
         pm_ask = min(pm + DEFAULT_SPREAD / 2, 0.96)
@@ -229,7 +233,18 @@ def evaluate_slot(group: pd.DataFrame, cfg: SimConfig, iso: IsotonicRegression =
 
         # ── YES candidate ─────────────────────────────────────────────────
         p_yes = compute_p_yes(spot, strike, vol_eff, tau, p_up, cfg.k_drift_yes)
-        if p_yes is not None and pm >= cfg.pm_floor_yes:
+
+        # OTM YES momentum exhaustion gate (only when enabled)
+        _yes_gate_blocked = False
+        if cfg.otm_yes_gate and pm < 0.35:
+            if pm < 0.15:
+                _yes_gate_blocked = True          # hard block: deep OTM unrecoverable
+            elif ema_stretch >= 1:
+                _yes_gate_blocked = True          # EMA already stretched bullish
+            elif pm >= 0.25 and stoch_k > 70:
+                _yes_gate_blocked = True          # stoch overbought in [0.25, 0.35)
+
+        if p_yes is not None and pm >= cfg.pm_floor_yes and not _yes_gate_blocked:
             # Apply isotonic calibration if provided
             p_yes_eval = float(iso.predict([p_yes])[0]) if iso is not None else p_yes
             try:
@@ -402,6 +417,7 @@ def report(trades: list[dict], cfg: SimConfig, train_frac: float = 0.60):
     print(f"Config: {cfg.label}")
     print(f"  k_drift_yes={cfg.k_drift_yes}  k_drift_no={cfg.k_drift_no}")
     print(f"  pm_floor_yes={cfg.pm_floor_yes}  pm_ceil_no={cfg.pm_ceil_no}")
+    print(f"  otm_yes_gate={'ON' if cfg.otm_yes_gate else 'OFF'}")
     print(f"  bankroll=${FLAT_BANKROLL:.0f} (flat, non-compounding)")
 
     if not trades:
@@ -475,6 +491,8 @@ def main():
     parser.add_argument("--train-frac",    type=float, default=0.60)
     parser.add_argument("--sweep-pm",      action="store_true",
                         help="Sweep pm_floor_yes across common values")
+    parser.add_argument("--otm-yes-gate",  action="store_true",
+                        help="Enable OTM YES momentum exhaustion gate (pm<0.35)")
     parser.add_argument("--calibrate",     action="store_true",
                         help="Fit isotonic calibration on train set, evaluate on test")
     parser.add_argument("--save-cal",      default="models/btc_iso_cal.pkl",
@@ -495,8 +513,10 @@ def main():
         k_drift_no=args.k_drift_no,
         pm_floor_yes=args.pm_floor_yes,
         pm_ceil_no=args.pm_ceil_no,
+        otm_yes_gate=args.otm_yes_gate,
         label=(f"k_yes={args.k_drift_yes}, k_no={args.k_drift_no}, "
-               f"pm_floor={args.pm_floor_yes}"),
+               f"pm_floor={args.pm_floor_yes}"
+               + (", otm_yes_gate=ON" if args.otm_yes_gate else "")),
     )
 
     if args.sweep_pm:

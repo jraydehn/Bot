@@ -829,12 +829,13 @@ def main() -> None:
             # Only OTM YES bets need the reachability gate — ITM YES bets are already in the money,
             # and NO bets are governed by z_abs_no_min below. vol_factor widens/narrows the
             # band with the vol regime. BASE_Z=2.0 gives a 1.2–2.8σ range across vol_factor [0.60,1.40].
+            _otm_yes_blocked = False
             if args.asset == "BTC" and _composite_computed and sigma_tau_c > 0 and offset_c > 0:
                 _z_strike_abs = abs(math.log(s_k / spot) / sigma_tau_c)
                 _btc_vol_gate_z = 2.0 * _vol_factor
                 if _z_strike_abs > _btc_vol_gate_z:
-                    print(f"  [btc_vol_gate] BLOCK {c['ticker']} — |z|={_z_strike_abs:.3f} > {_btc_vol_gate_z:.3f} (vol_factor={_vol_factor:.3f})")
-                    continue
+                    print(f"  [btc_vol_gate] BLOCK YES {c['ticker']} — |z|={_z_strike_abs:.3f} > {_btc_vol_gate_z:.3f} (vol_factor={_vol_factor:.3f})")
+                    _otm_yes_blocked = True
 
             # [BTC isotonic calibration DISABLED — trained on drift-biased p_model values.
             # Reform uses k_drift=0.8 + vol_factor-as-gate; isotonic retrain required
@@ -846,10 +847,18 @@ def main() -> None:
             #   pm [0.15,0.35)+ema>=1  : 0% WR on 35 trades (EMA already stretched bullish)
             #   pm [0.25,0.35)+stoch>70: 8% WR on 12 trades (overbought into deep OTM YES)
             # OOS impact: +$388 vs baseline (+101% PnL improvement) in replay simulation.
-            _otm_yes_blocked = False
             if args.asset == "BTC" and _composite_computed and pm < 0.35:
                 _ema_s    = confirm.ema_stretch_score
-                _sk_gate  = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
+                # Use 1h stoch_k (14-bar = 14h lookback) — more robust overbought signal.
+                # 15m stoch (3.5h lookback) hits 100 during any sustained uptrend, making
+                # the gate fire spuriously in trending regimes.
+                _hi14_1h = df_confirm["high"].rolling(14).max().iloc[-1]
+                _lo14_1h = df_confirm["low"].rolling(14).min().iloc[-1]
+                _cl_1h   = float(df_confirm["close"].iloc[-1])
+                if len(df_confirm) >= 14 and _hi14_1h > _lo14_1h:
+                    _sk_gate = (_cl_1h - _lo14_1h) / (_hi14_1h - _lo14_1h) * 100
+                else:
+                    _sk_gate = 50.0  # neutral fallback
                 if pm < 0.15:
                     _otm_yes_blocked = True
                     print(f"  [otm_yes_gate] BLOCK YES {c['ticker']} — pm={pm:.3f}<0.15 (hard block)")
@@ -950,9 +959,10 @@ def main() -> None:
             # YES bet fills at YES ask; NO bet fills at 1 - YES bid (so YES bid is reference).
             # Using bid/ask (not mid) prevents edge inflation on wide-spread contracts.
             pm = c["bid"] if dec_c.side == "no" else c["ask"]
-            if dec_c.side == "no" and offset_c <= 0:
-                print(f"  [scan] Skipping {c['ticker']} — ITM NO (offset={offset_c*100:+.3f}%, price already above strike)")
-                continue
+            # ITM NO gate disabled 2026-05-03 — NO means BTC stays above strike, not drops
+            # if dec_c.side == "no" and offset_c <= 0:
+            #     print(f"  [scan] Skipping {c['ticker']} — ITM NO (offset={offset_c*100:+.3f}%, price already above strike)")
+            #     continue
             # Minimum offset filters for NO bets — based on real Kalshi p_market analysis
             # (2026-04-07 backtest + paper trade archive, real pricing confirmed):
             #
@@ -965,9 +975,7 @@ def main() -> None:
             #                   ≥ 0.20%: live winners at 0.23-0.24% offset (n=2, 100% win).
             #                   NOTE: 0.50% was too aggressive — blocked all available SOL contracts.
             # Revert: copy paper_trade_runner_v3.py → paper_trade_runner.py
-            if dec_c.side == "no" and args.asset == "BTC" and offset_c < 0.001:
-                print(f"  [scan] Skipping {c['ticker']} — BTC NO offset={offset_c*100:+.3f}% < 0.10% minimum")
-                continue
+            # BTC NO minimum offset filter removed 2026-05-03 — let gate stack evaluate edge
             if dec_c.side == "no" and args.asset == "ETH" and offset_c < 0.001:
                 print(f"  [scan] Skipping {c['ticker']} — ETH NO offset={offset_c*100:+.3f}% < 0.10% minimum")
                 continue

@@ -68,7 +68,7 @@ ASSET_BASELINES = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}
 #   ETH: k=0.80 (legacy calibration, rarely used — direct model takes priority)
 #   SOL: k=0.20 (vol-dominated, composite direction matters less)
 # K_DRIFT_NO_BTC = 0.30 lives in paper_trade_runner.py (used only for independent NO model).
-DRIFT_MULTIPLIER = {"BTC": 2.00, "ETH": 0.80, "SOL": 0.20}
+DRIFT_MULTIPLIER = {"BTC": 1.40, "ETH": 0.80, "SOL": 0.20}
 
 
 K_DRIFT_NO_BTC = 0.30   # independent NO model for BTC; lower drift = less bullish inflation on NO probability
@@ -529,7 +529,7 @@ def score_to_p_no_model(
     """
     Independent NO probability model for BTC.
 
-    Uses K_DRIFT_NO_BTC (0.30) instead of the YES drift multiplier (2.00).
+    Uses K_DRIFT_NO_BTC (0.30) instead of the YES drift multiplier (1.40).
     Lower drift means the NO probability is less influenced by directional bias —
     the model says NO when the raw log-normal says NO, with only mild drift correction.
 

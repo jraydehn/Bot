@@ -1827,6 +1827,21 @@ def main() -> None:
                     print(f"  [btc_adx_gate] RESCUE YES {c['ticker']} — "
                           f"adx_1h={confirm.adx_1h:.1f} in [20,40), ema_stack={confirm.ema_stack_bias}=-1 (bearish stack rescue)")
 
+            # [btc_deepno_neutral_gate] Block BTC YES when pm < 0.35 AND ema_stack_bias=0.
+            # mispricing_analysis [16a] 2026-05-17: pm=deep_NO + ema=neutral YES:
+            # n=48, WR=10.4%, BE=21.3%, Edge=-10.9%, PnL=-$52, p=0.018.
+            # Full verified: pm<0.35 + stack=0 → n=63, PnL=-$52. Non-ADX subset (no adx_1h
+            # data) → n=54, PnL=-$68. ADX-mod subset already caught by btc_adx_gate.
+            # Mechanism: low-probability YES (market disagrees strongly) + no EMA direction
+            # = chasing nothing. Passes bullish stack (+$29) and bearish stack (+$2) through.
+            if (args.asset == "BTC" and dec_c.side == "yes"
+                    and pm < 0.35
+                    and confirm.ema_stack_bias == 0):
+                print(f"  [btc_deepno_neutral_gate] BLOCK YES {c['ticker']} — "
+                      f"pm={pm:.3f}<0.35, ema_stack=0 (no directional signal for low-pm bet)")
+                _log_block("btc_deepno_neutral_gate")
+                continue
+
             # [btc_stoch_no_gate] Block BTC NO when stoch_k < 20 (oversold, bounce risk).
             # mispricing_analysis [Section 9] 2026-05-17: stoch_k<20 NO: n=49, WR=49.0%,
             # BE=66.3%, Edge=-17.3%, PnL=-$85, p=0.021.

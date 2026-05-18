@@ -1827,6 +1827,21 @@ def main() -> None:
                     print(f"  [btc_adx_gate] RESCUE YES {c['ticker']} — "
                           f"adx_1h={confirm.adx_1h:.1f} in [20,40), ema_stack={confirm.ema_stack_bias}=-1 (bearish stack rescue)")
 
+            # [btc_stoch_no_gate] Block BTC NO when stoch_k < 20 (oversold, bounce risk).
+            # mispricing_analysis [Section 9] 2026-05-17: stoch_k<20 NO: n=49, WR=49.0%,
+            # BE=66.3%, Edge=-17.3%, PnL=-$85, p=0.021.
+            # Mechanism: stoch<20 = price has fallen hard; oversold condition creates mean-
+            # reversion bounce risk that sends BTC above the NO strike.
+            # By pm/offset: pm[0.30,0.40) → WR=37.5%, -$47 (worst); offset>0 (ITM NO) → -$84.
+            # No rescue identified — even pm[0.20,0.30) loses at -8.3% edge with stoch<20.
+            if (args.asset == "BTC" and dec_c.side == "no"
+                    and confirm.stoch_k == confirm.stoch_k  # not NaN
+                    and confirm.stoch_k < 20.0):
+                print(f"  [btc_stoch_no_gate] BLOCK NO {c['ticker']} — "
+                      f"stoch_k={confirm.stoch_k:.1f}<20 (oversold, bounce risk for NO)")
+                _log_block("btc_stoch_no_gate")
+                continue
+
             # [EXPERIMENTAL — 2026-04-25] BTC YES vol_score=1 gate with rescue.
             # Block YES bets when vol_score=1 (last completed 1h bar: high volume + price up).
             # Mechanism: high-vol up bar = move already happened; YES bet is chasing into a

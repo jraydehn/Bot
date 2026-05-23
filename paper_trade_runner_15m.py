@@ -96,6 +96,105 @@ MINS_PER_YEAR    = 525600.0
 # LightGBM models — loaded once per asset at startup, used in compute_p_model_15m
 _LGBM_MODELS: dict = {}
 
+# 1h Markov regime cache — refreshed once per UTC hour via yfinance
+_MARKOV_1H_CACHE: dict = {"hour": None, "regime": None}
+# Multi-asset Markov regime cache (ETH/SOL) — refreshed once per UTC hour
+_MARKOV_ETH_SOL_CACHE: dict = {"hour": None, "regimes": {}}
+
+
+def _get_btc_markov_regime_1h() -> "str | None":
+    """Return the current 1h Markov regime (Bull/Bear/Sideways) for BTC.
+
+    Uses a 20-bar rolling return on 1h yfinance data with ±0.8% threshold.
+    Result cached for the current UTC hour; re-fetches at each new hour.
+    Returns None on fetch failure.
+    """
+    global _MARKOV_1H_CACHE
+    now_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    if _MARKOV_1H_CACHE["hour"] == now_hour:
+        return _MARKOV_1H_CACHE["regime"]
+    try:
+        import yfinance as _yf
+        _end   = pd.Timestamp.now("UTC")
+        _start = _end - pd.DateOffset(days=4)   # 4 days → ~96 1h bars (well over 20 needed)
+        _df = _yf.download("BTC-USD", start=_start.strftime("%Y-%m-%d"),
+                           end=(_end + pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+                           interval="1h", progress=False, auto_adjust=True)
+        if isinstance(_df.columns, pd.MultiIndex):
+            _df.columns = _df.columns.get_level_values(0)
+        _close = _df["Close"].dropna()
+        if len(_close) < 21:
+            return None
+        _rr = float(_close.pct_change(20).iloc[-1])
+        _regime = "Bull" if _rr > 0.008 else "Bear" if _rr < -0.008 else "Sideways"
+        _MARKOV_1H_CACHE["hour"]   = now_hour
+        _MARKOV_1H_CACHE["regime"] = _regime
+        return _regime
+    except Exception as _e:
+        print(f"  [markov_1h] fetch error: {_e}")
+        return None
+
+
+def _get_markov_regimes_yf(asset: str) -> dict:
+    """Return Markov regime dict for ETH or SOL, cached per UTC hour.
+
+    ETH: {"1d": regime_str}
+    SOL: {"6h": ..., "4h": ..., "1h": ...}
+
+    Thresholds (validated against paper-trade backtest):
+      ETH daily  20-bar ±3.0%
+      SOL 6h     20-bar ±3.0%
+      SOL 4h     20-bar ±2.5%
+      SOL 1h     20-bar ±1.5%
+    """
+    global _MARKOV_ETH_SOL_CACHE
+    now_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    if (_MARKOV_ETH_SOL_CACHE["hour"] == now_hour
+            and asset in _MARKOV_ETH_SOL_CACHE["regimes"]):
+        return _MARKOV_ETH_SOL_CACHE["regimes"][asset]
+    try:
+        import yfinance as _yf
+        _ticker = "ETH-USD" if asset == "ETH" else "SOL-USD"
+        _end    = pd.Timestamp.now("UTC")
+        _start  = _end - pd.DateOffset(days=120)
+        _raw = _yf.download(
+            _ticker,
+            start=_start.strftime("%Y-%m-%d"),
+            end=(_end + pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            interval="1h", progress=False, auto_adjust=True,
+        )
+        if isinstance(_raw.columns, pd.MultiIndex):
+            _raw.columns = _raw.columns.get_level_values(0)
+        _raw.index = pd.to_datetime(_raw.index, utc=True)
+        _c1h = _raw["Close"].dropna()
+
+        def _regime(close, window, thr):
+            rr = close.pct_change(window)
+            if len(rr.dropna()) == 0 or pd.isna(rr.iloc[-1]):
+                return None
+            v = float(rr.iloc[-1])
+            return "Bull" if v > thr else "Bear" if v < -thr else "Sideways"
+
+        result: dict = {}
+        if asset == "ETH":
+            _c1d = _c1h.resample("1d").last().dropna()
+            result["1d"] = _regime(_c1d, 20, 0.030)
+        else:  # SOL
+            _c6h = _c1h.resample("6h").last().dropna()
+            _c4h = _c1h.resample("4h").last().dropna()
+            result["6h"] = _regime(_c6h, 20, 0.030)
+            result["4h"] = _regime(_c4h, 20, 0.025)
+            result["1h"] = _regime(_c1h, 20, 0.015)
+
+        if _MARKOV_ETH_SOL_CACHE["hour"] != now_hour:
+            _MARKOV_ETH_SOL_CACHE["hour"]    = now_hour
+            _MARKOV_ETH_SOL_CACHE["regimes"] = {}
+        _MARKOV_ETH_SOL_CACHE["regimes"][asset] = result
+        return result
+    except Exception as _e:
+        print(f"  [markov_{asset.lower()}] fetch error: {_e}")
+        return {}
+
 
 def _load_15m_lgbm(asset: str) -> object:
     path = Path(__file__).parent / "models" / f"lgbm_15m_{asset.lower()}.pkl"
@@ -138,6 +237,9 @@ CSV_COLUMNS = [
     "resolved_yes", "would_win", "would_pnl",
     # Expiry price (backfilled at resolution)
     "spot_at_expiry", "price_move_pct", "miss_pct",
+    # Markov regimes (BTC: 1h+15m; ETH: daily; SOL: 6h/4h/1h)
+    "markov_regime_1h", "markov_regime_15m",
+    "markov_eth_daily", "markov_sol_6h", "markov_sol_4h", "markov_sol_1h",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -936,6 +1038,50 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     composite_p_up = fetch_composite_p_up(asset)
     sig["composite_p_up"] = composite_p_up  # None → neutral drift in model
 
+    # Markov regimes — BTC uses live_1m + yfinance; ETH/SOL use yfinance only (cached per hour)
+    _markov_1h: Optional[str] = None
+    _markov_15m: Optional[str] = None
+    _markov_eth_daily: Optional[str] = None
+    _markov_sol_6h: Optional[str] = None
+    _markov_sol_4h: Optional[str] = None
+    _markov_sol_1h: Optional[str] = None
+    if asset == "BTC":
+        try:
+            # 1h regime: fetch via yfinance (cached by UTC hour; live_1m only has ~17 1h bars)
+            _markov_1h = _get_btc_markov_regime_1h()
+            # 15m regime: compute from live_1m (20×15m=5h, fits in ~16h of 1m data)
+            _df15m_reg = live_1m.resample("15min").agg({"close": "last"}).dropna().iloc[:-1]
+            _rr15m_s = _df15m_reg["close"].pct_change(20)
+            if pd.notna(_rr15m_s.iloc[-1]):
+                _rr15m = float(_rr15m_s.iloc[-1])
+                _markov_15m = "Bull" if _rr15m > 0.004 else "Bear" if _rr15m < -0.004 else "Sideways"
+            print(f"  [markov] 1h={_markov_1h or 'n/a'}  15m={_markov_15m or 'n/a'}")
+        except Exception as _me:
+            print(f"  [markov] Error computing regime: {_me}")
+    elif asset == "ETH":
+        try:
+            _eth_regs = _get_markov_regimes_yf("ETH")
+            _markov_eth_daily = _eth_regs.get("1d")
+            print(f"  [markov] ETH daily={_markov_eth_daily or 'n/a'}")
+        except Exception as _me:
+            print(f"  [markov] ETH error: {_me}")
+    elif asset == "SOL":
+        try:
+            _sol_regs = _get_markov_regimes_yf("SOL")
+            _markov_sol_6h = _sol_regs.get("6h")
+            _markov_sol_4h = _sol_regs.get("4h")
+            _markov_sol_1h = _sol_regs.get("1h")
+            print(f"  [markov] SOL 6h={_markov_sol_6h or 'n/a'}  "
+                  f"4h={_markov_sol_4h or 'n/a'}  1h={_markov_sol_1h or 'n/a'}")
+        except Exception as _me:
+            print(f"  [markov] SOL error: {_me}")
+    sig["markov_regime_1h"]  = _markov_1h       or ""
+    sig["markov_regime_15m"] = _markov_15m      or ""
+    sig["markov_eth_daily"]  = _markov_eth_daily or ""
+    sig["markov_sol_6h"]     = _markov_sol_6h    or ""
+    sig["markov_sol_4h"]     = _markov_sol_4h    or ""
+    sig["markov_sol_1h"]     = _markov_sol_1h    or ""
+
     # Empirical z_drift for BTC YES model (AR(1)=+0.32, used as YES-side branch)
     _zdrift_15m: Optional[float] = None
     if asset == "BTC":
@@ -1067,6 +1213,15 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             best_side, best_edge = "no", edge_no
             p_model = p_model_no
 
+        # [eth_markov_daily_sideways_gate — hard block ALL ETH trades when daily regime=Sideways]
+        # Backtest: 114 trades WR=37.7% -$793; subsumes ETH 4h Bull (100% overlap).
+        # No profitable rescue found (n<30 in all rescue subgroups); revisit at n≥30 for NO.
+        if asset.upper() == "ETH" and _markov_eth_daily == "Sideways":
+            print(f"    [eth_daily_sw_gate] BLOCK {best_side.upper()} → skip — "
+                  f"ETH daily Markov=Sideways (n=114, WR=37.7%, -$793)")
+            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+            continue
+
         # ETH YES gate: block overbought YES bets (stoch_k_5m >= 44)
         if asset.upper() == "ETH" and best_side == "yes":
             stoch = sig.get("stoch_k_5m", 50.0)
@@ -1119,6 +1274,30 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                       f"offset_pct={offset_pct:+.3f}% < 0.025% ITM threshold")
                 best_side, best_edge = "no", edge_no
 
+            # [markov_1h_bear_gate — BTC YES hard block]
+            # Gate A: 1h Bear YES → hard block; no rescue found profitable.
+            # Backtest: 105 trades WR=48.6% -$758; hard block saves $783.
+            # Best single-feature rescue (pm≥0.65 WR=73%) still barely above breakeven.
+            if best_side == "yes" and _markov_1h == "Bear":
+                print(f"    [markov_1h_bear_gate] BLOCK YES → flip NO — "
+                      f"1h Markov=Bear (n=105 WR=48.6%, no profitable rescue)")
+                best_side, best_edge = "no", edge_no
+
+            # [markov_15m_bear_gate — BTC YES conditional block]
+            # Gate B: 15m Bear YES → block unless composite_p_up ≤ 0.488 (mean-reversion rescue).
+            # Backtest: 68 trades WR=47.1% -$529.
+            #   p_up > 0.488 (trend-fighting): WR=27.7%, hard block saves $554.
+            #   p_up ≤ 0.488 (subdued model + Bear regime): WR=75%, P&L=+$72 — keep.
+            if best_side == "yes" and _markov_15m == "Bear":
+                _cpu = sig.get("composite_p_up")
+                if _cpu is None or float(_cpu) > 0.488:
+                    print(f"    [markov_15m_bear_gate] BLOCK YES → flip NO — "
+                          f"15m Markov=Bear AND composite_p_up={_cpu} > 0.488 (trend-fighting)")
+                    best_side, best_edge = "no", edge_no
+                else:
+                    print(f"    [markov_15m_bear_gate] RESCUE YES — 15m Markov=Bear but "
+                          f"composite_p_up={float(_cpu):.3f} ≤ 0.488 (mean-reversion, WR=75% expected)")
+
         # [eth_no_consec_gate — 15m ETH NO]
         # Block NO when in a sustained bearish streak AND stochastic is already oversold.
         # Analysis (26 blocked at consec <= -1, 93 total ETH NO trades with feature):
@@ -1142,6 +1321,61 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     print(f"    [eth_no_consec_gate] RESCUE NO — "
                           f"consec_dir_15m={_cd15:.0f}<=-1 but stoch_k_15m={_sk15:.1f}>40 "
                           f"(genuine breakdown, NO allowed)")
+
+        # [sol_markov_gates — block SOL contracts in adverse Markov regimes]
+        # Gates (validated on 784 resolved SOL 15m trades, flat $25 bet):
+        #   6h Bull YES: block unless stoch_cross_1h=0           (rescue n=13, WR=62%, +$152)
+        #   6h Bull NO:  block unless offset_pct ≤ −0.006        (rescue n=43, WR=72%, +$79)
+        #   4h Sideways YES: hard block (no profitable rescue)
+        #   4h Sideways NO:  block unless stoch_k_1h ≥ 86.1      (rescue n=28, WR=79%, +$183)
+        #   1h Sideways YES: block unless oi_chg_pct ≥ 0.0535    (rescue n=43, WR=63%, +$145)
+        # Rescues are OR-combined: any rescue condition saves the contract regardless of
+        # which gate triggered the block (matches simulation Scen 2: Δ+$1,951, net +$148).
+        if asset.upper() == "SOL":
+            _sc1h = float(sig.get("stoch_cross_1h", 0) or 0)
+            _sk1h = float(sig.get("stoch_k_1h", 50.0) or 50.0)
+            _oi   = float((_liq_signal.oi_chg_pct if _liq_signal else None) or 0.0)
+            _OFF_MED_SOL = -0.006  # median offset_pct from 120-day SOL backtest
+
+            _gate_yes = (
+                (_markov_sol_6h == "Bull"      and _sc1h != 0)
+                or (_markov_sol_4h == "Sideways")
+                or (_markov_sol_1h == "Sideways" and _oi < 0.0535)
+            )
+            _rescue_yes = (
+                (_markov_sol_6h == "Bull"      and _sc1h == 0)
+                or (_markov_sol_1h == "Sideways" and _oi >= 0.0535)
+            )
+            _gate_no = (
+                (_markov_sol_6h == "Bull"      and offset_pct > _OFF_MED_SOL)
+                or (_markov_sol_4h == "Sideways" and _sk1h < 86.1)
+            )
+            _rescue_no = (
+                (_markov_sol_6h == "Bull"      and offset_pct <= _OFF_MED_SOL)
+                or (_markov_sol_4h == "Sideways" and _sk1h >= 86.1)
+            )
+
+            _sol_skip = (
+                (best_side == "yes" and _gate_yes and not _rescue_yes)
+                or (best_side == "no"  and _gate_no  and not _rescue_no)
+            )
+
+            _regs = (f"6h={_markov_sol_6h or '?'} 4h={_markov_sol_4h or '?'} "
+                     f"1h={_markov_sol_1h or '?'}")
+            if _sol_skip:
+                print(f"    [sol_markov_gate] BLOCK {best_side.upper()} → skip — {_regs}"
+                      f"  sc={_sc1h:.0f} sk={_sk1h:.1f} oi={_oi:.4f} off={offset_pct:+.3f}%")
+                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                continue
+            elif best_side == "yes" and _gate_yes and _rescue_yes:
+                _rsrc = ("stoch_cross_1h=0" if _markov_sol_6h == "Bull" and _sc1h == 0
+                         else f"oi_chg={_oi:.4f}≥0.054")
+                print(f"    [sol_markov_gate] RESCUE YES [{_rsrc}] ({_regs})")
+            elif best_side == "no" and _gate_no and _rescue_no:
+                _rsrc = (f"stoch_k_1h={_sk1h:.1f}≥86"
+                         if _markov_sol_4h == "Sideways" and _sk1h >= 86.1
+                         else f"offset={offset_pct:+.3f}%≤{_OFF_MED_SOL}")
+                print(f"    [sol_markov_gate] RESCUE NO [{_rsrc}] ({_regs})")
 
         # P_MARKET VOLATILITY GATE: skip deep-OTM contracts on either side.
         # Sim (347 resolved trades): 0W/26L blocked at 0.12/0.88 → +$538 PnL delta.
@@ -1380,6 +1614,13 @@ def _build_row(
         "resolved_yes":         "",
         "would_win":            "",
         "would_pnl":            "",
+        # Markov regimes
+        "markov_regime_1h":     sig.get("markov_regime_1h",  ""),
+        "markov_regime_15m":    sig.get("markov_regime_15m", ""),
+        "markov_eth_daily":     sig.get("markov_eth_daily",  ""),
+        "markov_sol_6h":        sig.get("markov_sol_6h",     ""),
+        "markov_sol_4h":        sig.get("markov_sol_4h",     ""),
+        "markov_sol_1h":        sig.get("markov_sol_1h",     ""),
     }
 
 

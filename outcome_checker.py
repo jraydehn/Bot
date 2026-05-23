@@ -25,7 +25,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
 from kalshi_python_sync import KalshiAuth
-from live_signal import load_auth, kalshi_get, BASE_URL
+from live_signal import load_auth, kalshi_get, BASE_URL, fetch_spot_at_time
 
 PAPER_TRADES_CSV = Path(__file__).parent / "results" / "paper_trades.csv"
 
@@ -37,7 +37,8 @@ CSV_COLUMNS = [
     "obi_score", "obi_raw", "obi_exchanges",
     "vpin_score", "vpin_raw",
     "funding_bias", "avg_funding_rate",
-    "vol_score", "vwap_score", "vwap_signal", "vwap_total", "vwap_stretch_score", "vwap_distance_pct", "bearish_rejection", "bullish_rejection", "ema_stretch_score",
+    "vol_score", "cmf_raw", "cmf_score",
+    "vwap_score", "vwap_signal", "vwap_total", "vwap_stretch_score", "vwap_distance_pct", "bearish_rejection", "bullish_rejection", "ema_stretch_score",
     "stoch_bias", "stoch_k", "stoch_d", "stoch_crossover_active",
     "ema_stack_bias",
     "ema_alignment", "z_shift", "direction_strength", "raw_edge", "net_edge",
@@ -45,8 +46,23 @@ CSV_COLUMNS = [
     "contracts_scanned", "tau_minutes", "gate_blocked",
     "kelly_fraction", "bet_fraction", "bet_amount", "bankroll",
     "composite_trend", "composite_rev", "composite_p_up",
-    "chg_30m", "chg_10m", "chg_5m", "sharp_move_active", "stoch_flipped",
+    "p_up_v2",
+    "chg_30m", "chg_10m", "chg_5m",
+    "bp_5m", "body_15m", "dir_15m", "p_gbdt",
+    "sharp_move_active",
+    "smc_4h", "smc_1h", "choch_1h", "choch_4h",
+    "supply_pct", "demand_pct", "in_supply_zone", "in_demand_zone",
+    "stoch_flipped",
+    "squeeze_1h",
+    "adx_1h",
+    "rvol_1h",
+    "pm_drift_5m",
+    "hour_utc",
+    "liq_score", "liq_bias", "ls_long_pct", "oi_chg_pct",
+    "ob_imbalance", "ob_path_ask_usd", "ob_path_bid_usd", "ob_ask_frac",
+    "ob_bid_wall_pct", "ob_ask_wall_pct",
     "resolved_yes", "would_win", "would_pnl",
+    "spot_at_expiry", "price_move_pct", "miss_pct",
 ]
 
 
@@ -280,6 +296,23 @@ def main(csv_path: Path = None) -> None:
             row["would_win"] = ""
             row["would_pnl"] = ""
 
+        # Log expiry price if not already present
+        if not (row.get("spot_at_expiry") or "").strip() and close_ts_str:
+            _asset = "BTC"
+            _p = str(target)
+            if "eth" in _p.lower():
+                _asset = "ETH"
+            elif "sol" in _p.lower():
+                _asset = "SOL"
+            spot_exp  = fetch_spot_at_time(close_ts_str, _asset)
+            spot_scan = float(row.get("spot") or 0)
+            strike    = float(row.get("strike") or 0)
+            if spot_exp and spot_scan > 0:
+                row["spot_at_expiry"] = round(spot_exp, 2)
+                row["price_move_pct"] = round((spot_exp - spot_scan) / spot_scan * 100, 4)
+            if spot_exp and strike > 0:
+                row["miss_pct"] = round((spot_exp - strike) / strike * 100, 4)
+
         updated += 1
         print(f"  {ticker}: resolved_yes={resolved_yes}  would_win={row['would_win']}  "
               f"would_pnl={row['would_pnl']}")
@@ -313,3 +346,11 @@ if __name__ == "__main__":
             if p.exists():
                 print(f"\n--- {asset} ---")
                 main(p)
+
+        # Fill position monitor outcomes
+        print("\n--- position monitor ---")
+        try:
+            import position_monitor
+            position_monitor.fill_outcomes()
+        except Exception as e:
+            print(f"  [pos_monitor] fill_outcomes error: {e}")

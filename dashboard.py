@@ -21,12 +21,21 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 RESULTS_DIR     = Path(__file__).parent / "results"
 REFRESH_SECONDS = 60
-DISPLAY_FROM    = "2026-04-21 03:40:00"   # hide trades before this UTC time (dashboard cleared Apr 20 8:40 PM PDT — BTC drift multiplier reverted to k=1.0, 0.65×/0.90× restored)
+DISPLAY_FROM    = "2026-05-16 06:56:42"   # hide trades before this UTC time (dashboard cleared May 15 11:56 PM PDT — ETH 15m z_drift sim complete, BTC 15m branched model live)
+ASSET_DISPLAY_FROM = {
+    "BTC": "2026-05-20 06:07:10",  # cleared 2026-05-20 — p_up v2 disabled (miscalibrated, systematically bearish in uptrend)
+}
 
 ASSET_CSV = {
     "BTC": RESULTS_DIR / "paper_trades.csv",
     "ETH": RESULTS_DIR / "paper_trades_eth.csv",
     "SOL": RESULTS_DIR / "paper_trades_sol.csv",
+}
+
+ASSET_CSV_15M = {
+    "BTC": RESULTS_DIR / "paper_trades_btc15m.csv",
+    "ETH": RESULTS_DIR / "paper_trades_eth15m.csv",
+    "SOL": RESULTS_DIR / "paper_trades_sol15m.csv",
 }
 
 ASSET_SPOT_SOURCES = {
@@ -106,24 +115,49 @@ def fetch_spot(asset: str) -> dict:
 
 
 @st.cache_data(ttl=55)
-def load_trades(asset: str) -> pd.DataFrame:
-    csv_path = ASSET_CSV.get(asset)
-    if csv_path is None or not csv_path.exists():
+def _load_csv(path) -> pd.DataFrame:
+    if path is None or not path.exists():
         return pd.DataFrame()
-    df = pd.read_csv(csv_path)
-    if df.empty:
-        return df
-    df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce").dt.tz_convert("America/Los_Angeles")
-    df = df[df["logged_at"].notna()]  # drop rows whose logged_at didn't parse (split CSV lines)
+    df = pd.read_csv(path, low_memory=False)
+    df["logged_at"] = pd.to_datetime(df["logged_at"], format="mixed", utc=True, errors="coerce").dt.tz_convert("America/Los_Angeles")
+    df = df[df["logged_at"].notna()]
     for col in ["resolved_yes", "would_win"]:
         if col in df.columns:
             df[col] = df[col].replace("", pd.NA)
     return df
 
 
+def load_trades(asset: str) -> pd.DataFrame:
+    df_1h  = _load_csv(ASSET_CSV.get(asset))
+    df_15m = _load_csv(ASSET_CSV_15M.get(asset))
+
+    if not df_1h.empty:
+        df_1h["timeframe"] = "1h"
+    if not df_15m.empty:
+        # Normalise 15m column names to match hourly dashboard expectations
+        df_15m = df_15m.rename(columns={
+            "p_model_15m": "p_yes_model",
+            "floor_strike": "strike",
+        })
+        df_15m["timeframe"] = "15m"
+        df_15m["net_edge"]  = df_15m.get("raw_edge", pd.NA)
+
+    frames = [f for f in [df_1h, df_15m] if not f.empty]
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True, sort=False)
+    df = df.sort_values("logged_at").reset_index(drop=True)
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Helper renderers
 # ---------------------------------------------------------------------------
+
+def _parse_win(val) -> bool:
+    """Parse would_win stored as True/False, 1/0, 1.0/0.0, or their string forms."""
+    s = str(val).strip().lower()
+    return s in ("true", "1", "yes", "1.0")
 
 def stat_card(col, label, value, color="#ffffff"):
     col.markdown(f"""
@@ -274,7 +308,7 @@ def render_asset(asset: str):
         return
 
     # Apply display cutoff for all assets
-    cutoff = pd.Timestamp(DISPLAY_FROM, tz="UTC").tz_convert("America/Los_Angeles")
+    cutoff = pd.Timestamp(ASSET_DISPLAY_FROM.get(asset, DISPLAY_FROM), tz="UTC").tz_convert("America/Los_Angeles")
     df = df_all[df_all["logged_at"] >= cutoff].copy()
 
     if df.empty:
@@ -286,7 +320,7 @@ def render_asset(asset: str):
     pending  = trades[trades["would_win"].isna()].copy()
 
     if not resolved.empty:
-        resolved["would_win_bool"] = resolved["would_win"].astype(str).str.lower().isin(["true", "1", "yes"])
+        resolved["would_win_bool"] = resolved["would_win"].apply(_parse_win)
         resolved["would_pnl_num"]  = pd.to_numeric(resolved["would_pnl"], errors="coerce")
         win_rate = resolved["would_win_bool"].mean()
         net_pnl  = resolved["would_pnl_num"].sum()
@@ -343,7 +377,8 @@ def render_asset(asset: str):
     lb2.metric("Strike",            _fmt(latest.get("strike"), "${:,.2f}"))
     lb3.metric("Offset %",          _fmt(latest.get("offset_pct"), "{:+.3f}%"))
     lb4.metric("Vol Eff",           _fmt(latest.get("vol_eff"),    "{:.5f}"))
-    lb5.metric("Contracts Scanned", int(_f(latest.get("contracts_scanned", 0), 0)))
+    _cs = _f(latest.get("contracts_scanned", 0), 0)
+    lb5.metric("Contracts Scanned", int(_cs) if _cs == _cs else 0)
 
     # Sharp move / gate row
     _chg30 = _f(latest.get("chg_30m", float("nan")))
@@ -413,11 +448,11 @@ def render_asset(asset: str):
         )
 
         display_cols = [
-            "logged_at", "contract_ticker", "side",
+            "logged_at", "timeframe", "contract_ticker", "side",
             "offset_pct", "spot", "strike", "tau_minutes",
             "p_yes_model", "p_market", "net_edge",
             "would_pnl", "would_win",
-            "composite_trend", "composite_rev", "composite_p_up",
+            "composite_trend", "composite_rev", "composite_p_up", "p_up_v2",
             "chg_5m", "chg_10m", "chg_30m", "sharp_move_active",
             "confirmation_score", "no_score",
             "obi_score", "funding_bias", "vol_score", "vwap_score", "ema_stretch_score",
@@ -427,23 +462,21 @@ def render_asset(asset: str):
         display_cols = [c for c in display_cols if c in df.columns]
         _trade_source = trades.copy()
         if _composite_only and "composite_p_up" in _trade_source.columns:
-            _trade_source = _trade_source[
-                pd.to_numeric(_trade_source["composite_p_up"], errors="coerce").fillna(0) != 0
-            ]
+            _pup = pd.to_numeric(_trade_source["composite_p_up"], errors="coerce")
+            _trade_source = _trade_source[(_pup != 0) | _pup.isna()]
         trade_rows = _trade_source[display_cols].copy().sort_values("logged_at", ascending=False)
 
         def fmt_result(row):
-            w = str(row.get("would_win", "")).lower()
-            if w == "true":  return "WIN"
-            if w == "false": return "LOSS"
-            return "pending"
+            v = row.get("would_win", "")
+            if pd.isna(v) or str(v).strip() == "": return "pending"
+            return "WIN" if _parse_win(v) else "LOSS"
 
         trade_rows["result"] = trade_rows.apply(fmt_result, axis=1)
         trade_rows = trade_rows.drop(columns=["would_win"], errors="ignore")
 
         for _nc in ["offset_pct", "spot", "strike", "tau_minutes", "p_yes_model", "p_market",
                     "net_edge", "bet_amount", "would_pnl", "kelly_fraction",
-                    "composite_trend", "composite_rev", "composite_p_up",
+                    "composite_trend", "composite_rev", "composite_p_up", "p_up_v2",
                     "chg_5m", "chg_10m", "chg_30m", "confirmation_score", "no_score",
                     "obi_score", "funding_bias", "vol_score", "vwap_score", "ema_stretch_score", "vol_eff"]:
             if _nc in trade_rows.columns:
@@ -456,6 +489,7 @@ def render_asset(asset: str):
 
         trade_rows = trade_rows.rename(columns={
             "logged_at":          "Time (PT)",
+            "timeframe":          "TF",
             "contract_ticker":    "Contract",
             "side":               "Side",
             "offset_pct":         "Offset%",
@@ -467,7 +501,8 @@ def render_asset(asset: str):
             "net_edge":           "Net Edge",
             "composite_trend":    "Trend",
             "composite_rev":      "Rev",
-            "composite_p_up":     "p_up",
+            "composite_p_up":     "p_up (old)",
+            "p_up_v2":            "p_up v2",
             "chg_5m":             "5m Chg%",
             "chg_10m":            "10m Chg%",
             "chg_30m":            "30m Chg%",
@@ -488,11 +523,11 @@ def render_asset(asset: str):
 
         # Enforce column order — computed columns (Result) append to end by default
         _ordered = [c for c in [
-            "Time (PT)", "Contract", "Side",
+            "Time (PT)", "TF", "Contract", "Side",
             "Offset%", "Spot", "Strike", "τ (min)",
             "p_model", "p_market", "Net Edge",
-            "P&L ($)", "Result",
-            "Trend", "Rev", "p_up",
+            "P&L ($)", "Result", "p_up v2",
+            "Trend", "Rev", "p_up (old)",
             "5m Chg%", "10m Chg%", "30m Chg%", "Inversion",
             "Conf", "NO Score", "OBI", "Funding", "Vol", "VWAP", "EMA Str",
             "Vol Eff", "Kelly", "Bet ($)",
@@ -685,12 +720,12 @@ with tab_cmp:
             if df_a.empty:
                 st.markdown("<p style='color:#555;font-size:0.8rem;'>No data yet.</p>", unsafe_allow_html=True)
                 continue
-            cutoff = pd.Timestamp(DISPLAY_FROM, tz="UTC").tz_convert("America/Los_Angeles")
+            cutoff = pd.Timestamp(ASSET_DISPLAY_FROM.get(asset, DISPLAY_FROM), tz="UTC").tz_convert("America/Los_Angeles")
             df_a = df_a[df_a["logged_at"] >= cutoff]
             trades_a   = df_a[(df_a["decision"] == "trade") & (df_a["contract_ticker"].fillna("").str.strip() != "")]
             resolved_a = trades_a.dropna(subset=["would_win"]).copy()
             if not resolved_a.empty:
-                resolved_a["would_win_bool"] = resolved_a["would_win"].astype(str).str.lower().isin(["true", "1", "yes"])
+                resolved_a["would_win_bool"] = resolved_a["would_win"].apply(_parse_win)
                 resolved_a["would_pnl_num"]  = pd.to_numeric(resolved_a["would_pnl"], errors="coerce")
                 wr  = resolved_a["would_win_bool"].mean()
                 pnl = resolved_a["would_pnl_num"].sum()

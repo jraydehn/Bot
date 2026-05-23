@@ -359,6 +359,27 @@ def evaluate_trade(
     P_MARKET_BTC_YES_MIN = 0.55
     P_MARKET_NO_MAX      = 0.35   # shared by BTC and ETH
     P_MARKET_ETH_YES_MIN = 0.35
+    P_ETH_NO_PM_MIN      = 0.10   # ETH NO: block when YES < 10¢ (R:R is 9:1+ unfavorable)
+
+    # ETH NO minimum p_market floor — runs regardless of composite_active.
+    # When p_market < 0.10 (YES < 10¢), buying NO at 90¢+ means risking 90¢ to win 10¢.
+    # Archive: n=6 (100% WR) but sample too small to trust; one loss wipes 9+ prior wins.
+    # The ≥0.10 bucket (n=28, WR=96.4%, +$136) still passes through.
+    if asset == "ETH" and side == "no" and p_market < P_ETH_NO_PM_MIN:
+        p_edge, p_ref = (p_market, p_model)
+        pricing = evaluate_edge(p_edge, p_ref, slippage=slippage, spread=spread, min_net_edge=min_net_edge)
+        reasons.append(
+            f"Gate PM FAILED: p_market={p_market:.3f} < {P_ETH_NO_PM_MIN} for ETH NO — "
+            f"R:R is {(1-p_market)/p_market:.0f}:1 unfavorable; archive n=6 too small to trust."
+        )
+        return DecisionResult(
+            decision="no_trade", side=side,
+            p_model=p_model, p_market=p_market,
+            raw_edge=pricing.raw_edge, net_edge=pricing.net_edge,
+            structure_bias=structure_bias, confirmation_bias=confirmation_bias,
+            kelly_fraction=0.0, bet_fraction=0.0, bet_amount=0.0,
+            was_capped=False, reasons=reasons,
+        )
 
     # YES filter
     yes_min = None

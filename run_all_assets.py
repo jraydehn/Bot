@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import fcntl as _fcntl
 import subprocess
 import sys
 import threading
@@ -25,6 +26,19 @@ from pathlib import Path
 
 ASSETS = ["BTC", "ETH", "SOL"]
 RESTART_DELAY = 5  # seconds before restarting a crashed subprocess
+
+
+def _is_locked(asset: str, live: bool = False) -> bool:
+    """Return True if another process holds the flock for this asset."""
+    prefix = "live_trade" if live else "paper_trade"
+    lock_path = Path(__file__).parent / f".{prefix}_{asset}.lock"
+    try:
+        with open(lock_path, "w") as fd:
+            _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            _fcntl.flock(fd, _fcntl.LOCK_UN)
+        return False
+    except (BlockingIOError, OSError):
+        return True
 
 
 def stream_output(proc, prefix: str) -> None:
@@ -37,6 +51,7 @@ def run_asset(asset: str, extra_args: list) -> None:
     """Launch paper_trade_runner for one asset; restart on crash."""
     script = Path(__file__).parent / "paper_trade_runner.py"
     cmd = [sys.executable, "-u", str(script), "--asset", asset] + extra_args
+    is_live = "--live" in extra_args
 
     while True:
         print(f"  [{asset}] Starting...", flush=True)
@@ -55,8 +70,14 @@ def run_asset(asset: str, extra_args: list) -> None:
             print(f"  [{asset}] Launch error: {exc}", flush=True)
             exit_code = -1
 
-        print(f"  [{asset}] Exited (code={exit_code}). Restarting in {RESTART_DELAY}s...", flush=True)
-        time.sleep(RESTART_DELAY)
+        if exit_code == 1 and _is_locked(asset, live=is_live):
+            print(f"  [{asset}] Another process is running — watchdog standing by.", flush=True)
+            while _is_locked(asset, live=is_live):
+                time.sleep(30)
+            print(f"  [{asset}] Lock released — restarting.", flush=True)
+        else:
+            print(f"  [{asset}] Exited (code={exit_code}). Restarting in {RESTART_DELAY}s...", flush=True)
+            time.sleep(RESTART_DELAY)
 
 
 def main() -> None:

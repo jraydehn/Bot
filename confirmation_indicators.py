@@ -15,7 +15,7 @@ MIN_CANDLES = 60
 EMA_FAST = 20            # fast EMA period for trend alignment
 EMA_SLOW = 50            # slow EMA period for trend alignment
 VOLUME_MA_PERIOD = 20    # simple moving average period for volume baseline
-CMF_PERIOD = 14          # Chaikin Money Flow lookback (bars)
+CMF_PERIOD = 30          # Chaikin Money Flow lookback (1m bars = 30-minute window)
 EMA_CONFIRM_BARS = 3     # consecutive bars the EMA spread must hold to confirm
 EMA_STRETCH_PERIOD = 20  # EMA period on 5m bars (covers ~100 minutes)
 EMA_STRETCH_THRESHOLD = 0.001  # ±0.1% from 5m EMA triggers overbought/oversold signal
@@ -72,6 +72,8 @@ class ConfirmationResult:
     distance_pct: float       # (spot - vwap) / vwap — how far price is from session anchor
     funding_bias: int         # +1 bullish (overcrowded shorts), -1 bearish (overcrowded longs), 0 neutral
     avg_funding_rate: float   # averaged funding rate across exchanges (0.0 if unavailable)
+    squeeze_1h: bool          # True if BB width < KC width (volatility compression before breakout)
+    adx_1h: float             # 14-period Average Directional Index on 1h bars (trend strength, not direction)
     reason: str               # plain-English explanation of the classification
 
 
@@ -159,6 +161,53 @@ def compute_vpin(hist_1m: pd.DataFrame) -> tuple:
 
     except Exception:
         return float("nan"), 0
+
+
+def _compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float:
+    """14-period ADX using Wilder's smoothing. Returns NaN if insufficient data (< 2*period+2 bars)."""
+    h  = high.values.astype(float)
+    lo = low.values.astype(float)
+    c  = close.values.astype(float)
+    m  = len(c) - 1  # number of bar-to-bar pairs
+    if m < period * 2:
+        return float("nan")
+
+    tr  = np.maximum(h[1:] - lo[1:],
+          np.maximum(np.abs(h[1:] - c[:-1]),
+                     np.abs(lo[1:] - c[:-1])))
+    up  = h[1:] - h[:-1]
+    dn  = lo[:-1] - lo[1:]
+    pdm = np.where((up > dn) & (up > 0), up, 0.0)
+    ndm = np.where((dn > up) & (dn > 0), dn, 0.0)
+
+    def _ws(arr):
+        s = np.zeros(m)
+        s[period - 1] = arr[:period].sum()
+        for i in range(period, m):
+            s[i] = s[i - 1] * (period - 1) / period + arr[i]
+        return s
+
+    atr_s = _ws(tr)
+    pdm_s = _ws(pdm)
+    ndm_s = _ws(ndm)
+
+    safe_atr = np.where(atr_s > 0, atr_s, 1.0)
+    di_p = 100.0 * pdm_s / safe_atr
+    di_n = 100.0 * ndm_s / safe_atr
+    di_t     = di_p + di_n
+    safe_dit = np.where(di_t > 0, di_t, 1.0)
+    dx       = np.where(di_t > 0, 100.0 * np.abs(di_p - di_n) / safe_dit, 0.0)
+
+    start = period - 1
+    if m < start + period:
+        return float("nan")
+    adx = np.zeros(m)
+    adx[start + period - 1] = dx[start:start + period].mean()
+    for i in range(start + period, m):
+        adx[i] = (adx[i - 1] * (period - 1) + dx[i]) / period
+
+    result = adx[-1]
+    return float(result) if result == result else float("nan")
 
 
 def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_score: int = 0, momentum_enabled: bool = True, funding_bias: int = 0, avg_funding_rate: float = 0.0, sharp_move_pct: float = 0.0, asset: str = "BTC") -> ConfirmationResult:
@@ -424,27 +473,59 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
     else:
         vol_score = 0
 
-    # --- Chaikin Money Flow (CMF) ---
-    # Measures buying/selling pressure over CMF_PERIOD completed bars.
-    # Money Flow Multiplier: [(close - low) - (high - close)] / (high - low)
-    #   = +1 when close == high (max buying pressure)
-    #   = -1 when close == low (max selling pressure)
-    # CMF = sum(MFM * volume, N) / sum(volume, N) — ranges [-1, +1].
-    # Uses last completed bar (-2) consistent with vol_score.
-    _hl_range = (high - low).replace(0, float("nan"))
-    _mfm = ((close - low) - (high - close)) / _hl_range
-    _mfv = _mfm * volume
-    _cmf_series = _mfv.rolling(CMF_PERIOD).sum() / volume.rolling(CMF_PERIOD).sum()
-    _cmf_val = _cmf_series.iloc[-2]
-    cmf_raw = float(_cmf_val) if _cmf_val == _cmf_val else float("nan")
-    if cmf_raw != cmf_raw:
-        cmf_score = 0
-    elif cmf_raw > 0.05:
-        cmf_score = 1
-    elif cmf_raw < -0.05:
-        cmf_score = -1
-    else:
-        cmf_score = 0
+    # --- Chaikin Money Flow (CMF) on 1m bars ---
+    # Uses 1m OHLCV (hist_1m) with a 30-bar lookback = 30-minute intraday window.
+    # This gives CMF a unique input: short-term accumulation/distribution pressure
+    # independent of the multi-hour EMA trend (ema_stack_bias) and VPIN's equal-volume
+    # bucket approach. Money Flow Multiplier = [(close-low)-(high-close)] / (high-low).
+    cmf_raw = float("nan")
+    cmf_score = 0
+    if hist_1m is not None and len(hist_1m) >= CMF_PERIOD + 1:
+        try:
+            _1m = hist_1m.copy()
+            _1m.columns = [c.lower() for c in _1m.columns]
+            _c1 = _1m["close"].astype(float)
+            _h1 = _1m["high"].astype(float)
+            _l1 = _1m["low"].astype(float)
+            _v1 = _1m["volume"].astype(float)
+            _hl1 = (_h1 - _l1).replace(0, float("nan"))
+            _mfm1 = ((_c1 - _l1) - (_h1 - _c1)) / _hl1
+            _mfv1 = _mfm1 * _v1
+            _vol_sum = _v1.rolling(CMF_PERIOD).sum()
+            _cmf_s = _mfv1.rolling(CMF_PERIOD).sum() / _vol_sum.replace(0, float("nan"))
+            _cmf_val = _cmf_s.iloc[-2]  # last completed bar
+            cmf_raw = float(_cmf_val) if _cmf_val == _cmf_val else float("nan")
+            if cmf_raw != cmf_raw:
+                cmf_score = 0
+            elif cmf_raw > 0.05:
+                cmf_score = 1
+            elif cmf_raw < -0.05:
+                cmf_score = -1
+            else:
+                cmf_score = 0
+        except Exception:
+            cmf_raw = float("nan")
+            cmf_score = 0
+
+    # --- Volatility Squeeze (BB inside KC) ---
+    # Fires when Bollinger Band width (4 * rolling std, 20 bars) < Keltner Channel width (4 * ATR, 20 bars).
+    # Compression phase: price coiling before a breakout. No directional signal — only flags that a
+    # sustained move (YES strike reach) is more likely when the squeeze resolves.
+    try:
+        _close_prev = close.shift(1)
+        _tr_s = pd.concat([(high - low), (high - _close_prev).abs(), (low - _close_prev).abs()], axis=1).max(axis=1)
+        _atr20    = _tr_s.rolling(20).mean()
+        _bb_std20 = close.rolling(20).std()
+        squeeze_1h = bool(float(_bb_std20.iloc[-1]) < float(_atr20.iloc[-1]))
+    except Exception:
+        squeeze_1h = False
+
+    # --- ADX (Average Directional Index) ---
+    # Measures trend STRENGTH regardless of direction. ADX > 25 = trending; < 20 = ranging/choppy.
+    # Trending markets sustain directional moves and are more likely to reach strikes;
+    # ranging markets reject them. No existing trend signal captures this — EMA stack captures
+    # direction only, not magnitude of trend conviction.
+    adx_1h = _compute_adx(high, low, close, period=14)
 
     # --- Short-term momentum (logged only, not in primary scoring) ---
     mom_15m_score = 0
@@ -591,5 +672,7 @@ def compute_confirmation(df: pd.DataFrame, hist_1m: pd.DataFrame = None, obi_sco
         distance_pct=distance_pct,
         funding_bias=funding_bias,
         avg_funding_rate=avg_funding_rate,
+        squeeze_1h=squeeze_1h,
+        adx_1h=adx_1h,
         reason=reason,
     )

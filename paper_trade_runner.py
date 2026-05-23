@@ -59,6 +59,47 @@ import coinglass_data
 # range where formula overestimates P(NO wins). Loaded lazily at first BTC scan.
 _BTC_ISO_CAL: "dict | None | str" = "unloaded"
 
+# Daily Markov regime cache — refreshed once per UTC calendar day.
+_MARKOV_DAILY_CACHE: dict = {"date": None, "regime": None}
+
+def _get_btc_daily_markov_regime() -> "str | None":
+    """Return today's BTC daily Markov regime: 'Bull', 'Bear', 'Sideways', or None on error.
+
+    Computes the 20-day rolling return on BTC-USD daily closes (±2% threshold).
+    Result is cached by UTC date — one yfinance call per calendar day maximum.
+    Returns None on any fetch/compute failure so the gate is skipped rather than
+    blocking incorrectly.
+    """
+    global _MARKOV_DAILY_CACHE
+    today = datetime.now(timezone.utc).date()
+    if _MARKOV_DAILY_CACHE["date"] == today:
+        return _MARKOV_DAILY_CACHE["regime"]
+    try:
+        import yfinance as _yf
+        import pandas as _pd_m
+        _end   = _pd_m.Timestamp.now("UTC").normalize()
+        _start = _end - _pd_m.DateOffset(days=65)
+        _df = _yf.download(
+            "BTC-USD",
+            start=_start.strftime("%Y-%m-%d"),
+            end=(_end + _pd_m.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            progress=False, auto_adjust=True,
+        )
+        if isinstance(_df.columns, _pd_m.MultiIndex):
+            _df.columns = _df.columns.get_level_values(0)
+        _close = _df["Close"].dropna()
+        if len(_close) < 22:
+            return None
+        _latest_ret = float(_close.pct_change(20).iloc[-1])
+        _regime = "Bull" if _latest_ret > 0.02 else "Bear" if _latest_ret < -0.02 else "Sideways"
+        _MARKOV_DAILY_CACHE["date"]   = today
+        _MARKOV_DAILY_CACHE["regime"] = _regime
+        print(f"  [markov_daily] BTC 20d rolling return={_latest_ret*100:+.2f}% → regime={_regime}")
+        return _regime
+    except Exception as _exc:
+        print(f"  [markov_daily] Fetch failed (gate skipped): {_exc}")
+        return None
+
 def _load_btc_iso() -> "dict | None":
     global _BTC_ISO_CAL
     if _BTC_ISO_CAL != "unloaded":
@@ -440,6 +481,7 @@ CSV_COLUMNS = [
     "liq_bias",          # Coinalyze: (short_liqs - long_liqs) / total_liqs; +1=squeeze, -1=cascade
     "ls_long_pct",       # Coinalyze: % of open perp positions that are long (crowding signal)
     "oi_chg_pct",        # Coinalyze: open interest % change over last completed 15m bar
+    "markov_regime_daily",  # BTC 20-day rolling return regime label: Bull / Bear / Sideways
     "ob_imbalance",      # Coinbase spot order book: (bid-ask)/(bid+ask) in 0.5% window around strike
     "ob_path_ask_usd",   # USD ask notional between spot and strike (OTM YES resistance to clear)
     "ob_path_bid_usd",   # USD bid notional between strike and spot (ITM YES / OTM NO floor support)
@@ -1191,6 +1233,9 @@ def main() -> None:
                     pass
             except Exception:
                 pass
+
+        # Fetch daily Markov regime once per cycle (cached by UTC date — one yfinance call/day).
+        _markov_regime = _get_btc_daily_markov_regime() if args.asset == "BTC" else None
 
         for c in ladder:
             _p_gbdt_c     = None   # BTC LGBM p(YES) for this contract (shadow mode only)
@@ -2106,6 +2151,30 @@ def main() -> None:
 
             # btc_pup_gate removed: replaced by vol_factor-as-gate + k_drift=0.8 reform.
 
+            # [markov_sideways_gate — BTC YES + NO]
+            # Block trades when the BTC 20-day rolling return is between ±2% (Sideways macro).
+            # Analysis: 114 BTC trades in Sideways (Apr–May 2026): WR=34.2%, P&L=-$735 (-18pp vs BE).
+            #   YES side: WR=33.3%, n=21 — no rescue found → hard block.
+            #   NO side:  WR=34.4%, n=93 overall; rescue: p_market≤0.39 → WR=87.5%, n=24, +$38.
+            # Mechanism: flat 20-day macro = no sustained directional bias; intraday signals
+            # chase noise in both directions. Deep OTM NO (pm≤0.39) wins regardless because
+            # the strike is too far for a choppy market to reach.
+            # Regime fetched once per scan cycle via _get_btc_daily_markov_regime() (cached by date).
+            if args.asset == "BTC" and _markov_regime == "Sideways":
+                if dec_c.side == "yes":
+                    print(f"  [markov_sideways_gate] BLOCK YES {c['ticker']} — "
+                          f"daily Markov=Sideways, flat macro (YES WR=33% in Sideways)")
+                    _log_block("markov_sideways_gate")
+                    continue
+                elif dec_c.side == "no" and pm > 0.39:
+                    print(f"  [markov_sideways_gate] BLOCK NO {c['ticker']} — "
+                          f"daily Markov=Sideways, pm={pm:.3f}>0.39 (NO WR=34% in Sideways)")
+                    _log_block("markov_sideways_gate")
+                    continue
+                elif dec_c.side == "no" and pm <= 0.39:
+                    print(f"  [markov_sideways_gate] RESCUE NO {c['ticker']} — "
+                          f"daily Markov=Sideways but pm={pm:.3f}≤0.39 "
+                          f"(deep OTM NO rescue: WR=87.5% in Sideways)")
 
             # [rvol_gate] Block BTC YES when relative volume (current 1h vs 30-bar avg for
             # same hour) is below 0.80 — quiet period, price unlikely to reach strike.
@@ -3339,6 +3408,7 @@ def main() -> None:
         "liq_bias":           round(_liq_signal.liq_bias, 4)    if _liq_signal else "",
         "ls_long_pct":        round(_liq_signal.ls_long_pct, 2) if _liq_signal else "",
         "oi_chg_pct":         round(_liq_signal.oi_chg_pct, 4)  if _liq_signal else "",
+        "markov_regime_daily": _markov_regime or "",
         "ob_imbalance":       _gate_signals.get("ob_imbalance", ""),
         "ob_path_ask_usd":    _gate_signals.get("ob_path_ask_usd", ""),
         "ob_path_bid_usd":    _gate_signals.get("ob_path_bid_usd", ""),

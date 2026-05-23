@@ -437,6 +437,30 @@ def fetch_live_spot(asset: str = "BTC") -> Optional[float]:
     return avg
 
 
+def fetch_spot_at_time(close_ts_str: str, asset: str = "BTC") -> Optional[float]:
+    """
+    Fetch the Binance 1m close price at a specific timestamp.
+    Used to log spot_at_expiry when a contract resolves.
+    close_ts_str: ISO8601 string e.g. '2026-05-21T14:00:00Z'
+    Returns the close price of the last completed 1m bar at that time, or None.
+    """
+    cfg    = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])
+    symbol = cfg["binance_symbol"]
+    try:
+        close_dt = pd.Timestamp(close_ts_str).tz_convert("UTC")
+        end_ms   = int(close_dt.timestamp() * 1000)
+        r = requests.get("https://api.binance.us/api/v3/klines", params={
+            "symbol": symbol, "interval": "1m", "endTime": end_ms, "limit": 2,
+        }, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if data:
+            return float(data[-1][4])   # close of last 1m bar before close_ts
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Fetch recent BTC candles from Binance US
 # ---------------------------------------------------------------------------

@@ -84,6 +84,8 @@ COLUMNS = [
     "resolved_yes",
     # Expiry price (backfilled at resolution)
     "spot_at_expiry", "price_move_pct", "miss_pct",
+    # Drift model features (BTC: p_up_v2 + 6h rolling z_drift)
+    "p_up_v2_btc", "z_drift_6h",
 ]
 
 _META_COLS = {

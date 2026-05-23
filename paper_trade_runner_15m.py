@@ -242,6 +242,8 @@ CSV_COLUMNS = [
     "markov_eth_daily", "markov_sol_6h", "markov_sol_4h", "markov_sol_1h",
     # p_up_v2 drift model (BTC only)
     "p_up_v2_btc",
+    # Rolling 6h empirical z_drift (for LGBM feature logging)
+    "z_drift_6h",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -914,6 +916,35 @@ def compute_zdrift_empirical_15m(
         return None
 
 
+def compute_z_drift_6h(df_resolved: pd.DataFrame) -> "float | None":
+    """
+    Rolling 6h mean of actual z-scores from resolved trades with spot_at_expiry.
+    Uses logged spot_at_expiry rather than live_1m lookup — cleaner and works offline.
+    Returns None when fewer than 3 valid rows exist in the window.
+    """
+    try:
+        needed = ["decision_time", "spot", "realized_vol_annual", "tau_minutes", "spot_at_expiry"]
+        df = df_resolved.dropna(subset=needed).copy()
+        if df.empty:
+            return None
+        df["decision_time"] = pd.to_datetime(df["decision_time"], format="ISO8601", utc=True)
+        cutoff = df["decision_time"].max() - pd.Timedelta(hours=6)
+        window = df[df["decision_time"] >= cutoff]
+        if len(window) < 3:
+            return None
+        sigma = window["realized_vol_annual"] * (window["tau_minutes"] / 525600.0) ** 0.5
+        sigma = sigma.replace(0, float("nan"))
+        actual_z = (window["spot_at_expiry"].astype(float) / window["spot"].astype(float)).apply(
+            lambda x: x if x > 0 else float("nan")
+        ).apply(lambda x: __import__("math").log(x)) / sigma
+        valid = actual_z.dropna()
+        if len(valid) < 3:
+            return None
+        return float(valid.mean())
+    except Exception:
+        return None
+
+
 def compute_p_yes_zdrift_15m(
     spot: float, floor_strike: float, tau_min: float,
     sig: dict, z_drift: float, p_market: float,
@@ -1190,6 +1221,24 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     print(f"  [zdrift_15m] fallback error: {_ze}")
     sig["p_up_v2_btc"] = _p_up_v2_btc if _p_up_v2_btc is not None else ""
 
+    # Rolling 6h z_drift logged for all assets (LGBM feature)
+    _z_drift_6h: Optional[float] = None
+    try:
+        _csv_15m_path = _csv_path(asset)
+        if _csv_15m_path.exists():
+            _df_log = pd.read_csv(_csv_15m_path, low_memory=False)
+            _df_log_res = _df_log[
+                _df_log["resolved_yes"].notna() &
+                (_df_log["resolved_yes"].astype(str) != "") &
+                _df_log["spot_at_expiry"].notna()
+            ]
+            _z_drift_6h = compute_z_drift_6h(_df_log_res)
+    except Exception as _zdex:
+        print(f"  [z_drift_6h] error: {_zdex}")
+    sig["z_drift_6h"] = _z_drift_6h if _z_drift_6h is not None else ""
+    if _z_drift_6h is not None:
+        print(f"  [z_drift_6h] {_z_drift_6h:+.4f}  (6h rolling mean actual_z)")
+
     def _fmt(v, fmt=".3f"):
         return format(v, fmt) if isinstance(v, (int, float)) and v == v else "n/a"
 
@@ -1323,41 +1372,13 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             if stoch >= 44:
                 best_side, best_edge = "no", edge_no
 
-        # [BTC YES gate] Two loss clusters with rescue conditions.
-        # Live data (83 BTC YES trades, 37 days):
-        #   Block 1 (ema_bias=-1): n=43, WR=32.6%, -$215 → rescue: vol_ratio<0.5 AND bp_5m>0.75
-        #   Block 2 (p_market<0.40): n=34, WR=23.5%, -$138 → rescue: vol_ratio<0.7 AND bp_5m>0.80 AND dir_15m=1
-        #   Blocked n=34 WR=14.7% -$416; all rescued+passed n=49 WR=59.2% +$279
-        # When blocked, flip to NO (bearish/OTM conditions that hurt YES often support NO).
-        # Revert: remove this block.
+        # [BTC YES gate] Gate 3 only — offset flip.
+        # Gates 1 (ema=-1 flip) and 2 (pm<0.40 flip) removed 2026-05-23:
+        # Audit on 387 scan archive rows showed payout asymmetry destroys value.
+        # At low p_market, YES wins pay 3-6x more than NO wins; blocking rare YES winners
+        # costs more than the gate recovers regardless of win-rate improvement.
+        # Gate 1 cost: -$1,309 vs baseline. Gate 2 cost: -$1,507 vs baseline.
         if asset.upper() == "BTC" and best_side == "yes":
-            _ema  = sig.get("ema_bias",  0)
-            _bp5  = sig.get("bp_5m",     0.5)
-            _vr   = sig.get("vol_ratio", 1.0)
-            _d15  = sig.get("dir_15m",   0)
-
-            # Gate 1: bearish EMA
-            if _ema == -1:
-                _rescue = (_vr < 0.5 and _bp5 > 0.75)
-                if _rescue:
-                    print(f"    [btc_yes_gate] RESCUE YES — ema_bias=-1 but "
-                          f"vol_ratio={_vr:.2f}<0.5 AND bp_5m={_bp5:.2f}>0.75")
-                else:
-                    print(f"    [btc_yes_gate] BLOCK YES → flip NO — ema_bias=-1, "
-                          f"vol_ratio={_vr:.2f} bp_5m={_bp5:.2f} (no rescue)")
-                    best_side, best_edge = "no", edge_no
-
-            # Gate 2: deep OTM YES (only if gate 1 didn't already flip)
-            if best_side == "yes" and p_market < 0.40:
-                _rescue = (_vr < 0.7 and _bp5 > 0.80 and _d15 == 1)
-                if _rescue:
-                    print(f"    [btc_yes_gate] RESCUE YES — p_market={p_market:.3f}<0.40 but "
-                          f"vol_ratio={_vr:.2f}<0.7 AND bp_5m={_bp5:.2f}>0.80 AND dir_15m=1")
-                else:
-                    print(f"    [btc_yes_gate] BLOCK YES → flip NO — p_market={p_market:.3f}<0.40, "
-                          f"vol_ratio={_vr:.2f} bp_5m={_bp5:.2f} dir_15m={_d15} (no rescue)")
-                    best_side, best_edge = "no", edge_no
-
             # Gate 3: insufficient ITM YES — block when offset_pct < 0.025%
             # Sim (1117 15m trades, split-half validated May 11-22):
             #   cutoff=+0.025 → Total=+$1,056 vs baseline +$334
@@ -1717,6 +1738,7 @@ def _build_row(
         "markov_sol_4h":        sig.get("markov_sol_4h",     ""),
         "markov_sol_1h":        sig.get("markov_sol_1h",     ""),
         "p_up_v2_btc":          _f(sig.get("p_up_v2_btc")),
+        "z_drift_6h":           _f(sig.get("z_drift_6h")),
     }
 
 

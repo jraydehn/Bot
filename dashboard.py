@@ -23,7 +23,7 @@ RESULTS_DIR     = Path(__file__).parent / "results"
 REFRESH_SECONDS = 60
 DISPLAY_FROM    = "2026-05-16 06:56:42"   # hide trades before this UTC time (dashboard cleared May 15 11:56 PM PDT — ETH 15m z_drift sim complete, BTC 15m branched model live)
 ASSET_DISPLAY_FROM = {
-    "BTC": "2026-05-20 06:07:10",  # cleared 2026-05-20 — p_up v2 disabled (miscalibrated, systematically bearish in uptrend)
+    "BTC": "2026-05-23 15:51:18",  # cleared 2026-05-23 — p_up_v2 τ-scaled + territory-split k (k_yes=1.40, k_no=1.56), z_drift_6h logging live
 }
 
 ASSET_CSV = {

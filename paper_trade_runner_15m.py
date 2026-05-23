@@ -240,6 +240,8 @@ CSV_COLUMNS = [
     # Markov regimes (BTC: 1h+15m; ETH: daily; SOL: 6h/4h/1h)
     "markov_regime_1h", "markov_regime_15m",
     "markov_eth_daily", "markov_sol_6h", "markov_sol_4h", "markov_sol_1h",
+    # p_up_v2 drift model (BTC only)
+    "p_up_v2_btc",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -285,7 +287,13 @@ def append_row(row: dict, asset: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Composite p_up from hourly runner
+# p_up_v2 drift model constants (calibrated 2026-05-22, territory-split, recent era)
+# k_yes=1.40 on YES-territory (z<0), k_no=1.56 on NO-territory (z>0)
+K_PUP_V2_YES = 1.40
+K_PUP_V2_NO  = 1.56
+
+
+# Composite p_up / p_up_v2 from hourly runner
 # ---------------------------------------------------------------------------
 
 def fetch_composite_p_up(asset: str) -> Optional[float]:
@@ -310,6 +318,28 @@ def fetch_composite_p_up(asset: str) -> Optional[float]:
         if age_min > 120:
             return None
         val = float(recent["composite_p_up"].iloc[-1])
+        return val if 0.0 < val < 1.0 else None
+    except Exception:
+        return None
+
+
+def fetch_p_up_v2(asset: str) -> Optional[float]:
+    """Read most recent p_up_v2 from hourly paper trade CSV (same source as composite_p_up)."""
+    path = HOURLY_CSV_MAP.get(asset.upper())
+    if path is None or not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path, usecols=["logged_at", "p_up_v2"], low_memory=False)
+        df["p_up_v2"] = pd.to_numeric(df["p_up_v2"], errors="coerce")
+        df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce")
+        recent = df.dropna(subset=["p_up_v2", "logged_at"]).sort_values("logged_at")
+        if recent.empty:
+            return None
+        last_time = recent["logged_at"].iloc[-1].to_pydatetime()
+        age_min = (datetime.now(timezone.utc) - last_time).total_seconds() / 60.0
+        if age_min > 120:
+            return None
+        val = float(recent["p_up_v2"].iloc[-1])
         return val if 0.0 < val < 1.0 else None
     except Exception:
         return None
@@ -907,6 +937,57 @@ def compute_p_yes_zdrift_15m(
     return float(np.clip(norm.cdf(z_drift - z_strike), 0.03, 0.97))
 
 
+def compute_p_yes_pup_v2_15m(
+    spot: float, floor_strike: float, tau_min: float,
+    sig: dict, p_up_v2: float, p_market: float,
+) -> float:
+    """
+    BTC YES prob: log-normal with p_up_v2 τ-scaled drift.
+    z_drift = Φ⁻¹(p_up_v2) × K_PUP_V2_YES × √(τ/60)
+    Calibrated 2026-05-22 on YES-territory (z<0), recent era: k=1.40.
+    """
+    if tau_min <= 0.5 or spot <= 0 or floor_strike <= 0:
+        return 0.5
+    vol_realized = sig.get("vol_multi", None)
+    if vol_realized is None or not (vol_realized > 0):
+        rv_ann = sig.get("realized_vol_annual", 0.3)
+        vol_realized = rv_ann / math.sqrt(MINS_PER_YEAR)
+    vol_imp   = implied_vol_from_price(p_market, spot, floor_strike, tau_min)
+    weight    = REALIZED_VOL_WEIGHT_BY_ASSET.get("BTC", 0.35)
+    vol_eff   = blend_vol(vol_realized, vol_imp, weight=weight)
+    sigma_tau = max(vol_eff * math.sqrt(tau_min), 1e-6)
+    z_strike  = math.log(floor_strike / spot) / sigma_tau
+    tau_scale = math.sqrt(min(tau_min, 60.0) / 60.0)
+    z_drift   = norm.ppf(float(np.clip(p_up_v2, 0.02, 0.98))) * K_PUP_V2_YES * tau_scale
+    return float(np.clip(norm.cdf(z_drift - z_strike), 0.03, 0.97))
+
+
+def compute_p_no_pup_v2_15m(
+    spot: float, floor_strike: float, tau_min: float,
+    sig: dict, p_up_v2: float, p_market: float,
+) -> float:
+    """
+    BTC NO prob: complementary log-normal with p_up_v2 τ-scaled drift.
+    z_drift = Φ⁻¹(p_up_v2) × K_PUP_V2_NO × √(τ/60)
+    Calibrated 2026-05-22 on NO-territory (z>0), recent era: k=1.56.
+    Both YES and NO share the same distribution → coherent cross-strike pricing.
+    """
+    if tau_min <= 0.5 or spot <= 0 or floor_strike <= 0:
+        return 0.5
+    vol_realized = sig.get("vol_multi", None)
+    if vol_realized is None or not (vol_realized > 0):
+        rv_ann = sig.get("realized_vol_annual", 0.3)
+        vol_realized = rv_ann / math.sqrt(MINS_PER_YEAR)
+    vol_imp   = implied_vol_from_price(p_market, spot, floor_strike, tau_min)
+    weight    = REALIZED_VOL_WEIGHT_BY_ASSET.get("BTC", 0.35)
+    vol_eff   = blend_vol(vol_realized, vol_imp, weight=weight)
+    sigma_tau = max(vol_eff * math.sqrt(tau_min), 1e-6)
+    z_strike  = math.log(floor_strike / spot) / sigma_tau
+    tau_scale = math.sqrt(min(tau_min, 60.0) / 60.0)
+    z_drift   = norm.ppf(float(np.clip(p_up_v2, 0.02, 0.98))) * K_PUP_V2_NO * tau_scale
+    return float(np.clip(norm.cdf(z_strike - z_drift), 0.03, 0.97))
+
+
 def _compute_1h_drift(sig: dict, tau_min: float) -> float:
     """
     Composite 1h directional drift from 7 signals.
@@ -1082,23 +1163,32 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     sig["markov_sol_4h"]     = _markov_sol_4h    or ""
     sig["markov_sol_1h"]     = _markov_sol_1h    or ""
 
-    # Empirical z_drift for BTC YES model (AR(1)=+0.32, used as YES-side branch)
-    _zdrift_15m: Optional[float] = None
+    # p_up_v2 drift model for BTC (k_yes=1.40, k_no=1.56, τ-scaled)
+    # Replaces empirical z_drift. Falls back to z_drift when unavailable.
+    _p_up_v2_btc: Optional[float] = None
+    _zdrift_15m:  Optional[float] = None
     if asset == "BTC":
-        _csv_15m = _csv_path(asset)
-        if _csv_15m.exists():
-            try:
-                _df_all  = pd.read_csv(_csv_15m, low_memory=False)
-                _df_res  = _df_all[_df_all["resolved_yes"].notna() &
-                                   (_df_all["resolved_yes"].astype(str) != "")]
-                _zdrift_15m = compute_zdrift_empirical_15m(_df_res, live_1m)
-                _n_res = len(_df_res)
-                if _zdrift_15m is not None:
-                    print(f"  [zdrift_15m] z_drift={_zdrift_15m:+.4f}  ({_n_res} resolved)")
-                else:
-                    print(f"  [zdrift_15m] insufficient data ({_n_res} resolved, need 10)")
-            except Exception as _ze:
-                print(f"  [zdrift_15m] error: {_ze}")
+        _p_up_v2_btc = fetch_p_up_v2("BTC")
+        if _p_up_v2_btc is not None:
+            print(f"  [p_up_v2_btc] {_p_up_v2_btc:.3f}  "
+                  f"(k_yes={K_PUP_V2_YES}, k_no={K_PUP_V2_NO}, τ-scaled)")
+        else:
+            # Fallback to empirical z_drift when p_up_v2 unavailable
+            _csv_15m = _csv_path(asset)
+            if _csv_15m.exists():
+                try:
+                    _df_all  = pd.read_csv(_csv_15m, low_memory=False)
+                    _df_res  = _df_all[_df_all["resolved_yes"].notna() &
+                                       (_df_all["resolved_yes"].astype(str) != "")]
+                    _zdrift_15m = compute_zdrift_empirical_15m(_df_res, live_1m)
+                    _n_res = len(_df_res)
+                    if _zdrift_15m is not None:
+                        print(f"  [zdrift_15m] fallback z_drift={_zdrift_15m:+.4f}  ({_n_res} resolved)")
+                    else:
+                        print(f"  [zdrift_15m] fallback insufficient data ({_n_res} resolved, need 10)")
+                except Exception as _ze:
+                    print(f"  [zdrift_15m] fallback error: {_ze}")
+    sig["p_up_v2_btc"] = _p_up_v2_btc if _p_up_v2_btc is not None else ""
 
     def _fmt(v, fmt=".3f"):
         return format(v, fmt) if isinstance(v, (int, float)) and v == v else "n/a"
@@ -1168,11 +1258,16 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         offset_pct = (spot - floor_s) / floor_s * 100
 
         # Compute p_model before already_bet check so scan archive captures all contracts.
-        p_model_no  = compute_p_model_15m(spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
-        if asset == "BTC" and _zdrift_15m is not None:
-            p_model_yes = compute_p_yes_zdrift_15m(spot, floor_s, tau_min, sig, _zdrift_15m, p_market)
+        # BTC: p_up_v2 τ-scaled drift (k_yes=1.40, k_no=1.56); fallback to z_drift / LGBM.
+        if asset == "BTC" and _p_up_v2_btc is not None:
+            p_model_yes = compute_p_yes_pup_v2_15m(spot, floor_s, tau_min, sig, _p_up_v2_btc, p_market)
+            p_model_no  = compute_p_no_pup_v2_15m(spot, floor_s, tau_min, sig, _p_up_v2_btc, p_market)
         else:
-            p_model_yes = p_model_no
+            p_model_no  = compute_p_model_15m(spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
+            if asset == "BTC" and _zdrift_15m is not None:
+                p_model_yes = compute_p_yes_zdrift_15m(spot, floor_s, tau_min, sig, _zdrift_15m, p_market)
+            else:
+                p_model_yes = p_model_no
 
         # Scan archive: log all evaluated contracts before any skips.
         try:
@@ -1621,6 +1716,7 @@ def _build_row(
         "markov_sol_6h":        sig.get("markov_sol_6h",     ""),
         "markov_sol_4h":        sig.get("markov_sol_4h",     ""),
         "markov_sol_1h":        sig.get("markov_sol_1h",     ""),
+        "p_up_v2_btc":          _f(sig.get("p_up_v2_btc")),
     }
 
 

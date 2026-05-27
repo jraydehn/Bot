@@ -100,6 +100,83 @@ def _get_btc_daily_markov_regime() -> "str | None":
         print(f"  [markov_daily] Fetch failed (gate skipped): {_exc}")
         return None
 
+def _get_daily_markov_regime(asset: str) -> "str | None":
+    """Return today's daily Markov regime for BTC, ETH, or SOL.
+
+    BTC: 20-day rolling return on daily closes, ±2% threshold (existing logic).
+    ETH: delegates to _get_markov_regimes_yf("ETH")["1d"] (±3%, cached per hour).
+    SOL: delegates to _get_markov_regimes_yf("SOL")["6h"] (±3%, cached per hour).
+    Returns None on any failure so callers skip regime-dependent logic rather than
+    blocking incorrectly.
+    """
+    if asset == "BTC":
+        return _get_btc_daily_markov_regime()
+    try:
+        _regs = _get_markov_regimes_yf(asset)
+        if asset == "ETH":
+            return _regs.get("1d")
+        if asset == "SOL":
+            return _regs.get("6h")
+    except Exception as _exc:
+        print(f"  [markov_daily] {asset} fetch failed: {_exc}")
+    return None
+
+
+# GARCH(1,1) conditional vol ratio cache — recomputed once per hour.
+# ratio = cond_vol / long_run_vol; > 1.5 signals high vol regime (bull-trap risk on YES).
+_GARCH_RATIO_CACHE: dict = {"hour": None, "ratio": None, "cond_ve": None}
+
+
+def _get_garch_ratio(df_1h: pd.DataFrame, asset: str = "BTC") -> "float | None":
+    """Return GARCH(1,1) conditional vol ratio for the most recent 1h bar.
+
+    Fits on the last 500 bars of log returns. Caches per UTC hour — one fit per hour max.
+    Returns None on any failure so callers skip the gate rather than blocking incorrectly.
+    """
+    global _GARCH_RATIO_CACHE
+    if asset != "BTC":
+        return None
+    current_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    if _GARCH_RATIO_CACHE["hour"] == current_hour and _GARCH_RATIO_CACHE["ratio"] is not None:
+        return _GARCH_RATIO_CACHE["ratio"]
+    try:
+        import numpy as _np_g
+        from arch import arch_model as _arch_model
+        import warnings as _w
+        _w.filterwarnings("ignore")
+        _close = df_1h["close"].astype(float).dropna()
+        if len(_close) < 502:
+            return None
+        _window = _np_g.log(_close / _close.shift(1)).dropna() * 100
+        _w500   = _window.iloc[-500:]
+        _am     = _arch_model(_w500, vol="Garch", p=1, q=1, dist="normal", rescale=False)
+        _res    = _am.fit(disp="off", show_warning=False)
+        _cond_v = float(_res.conditional_volatility.iloc[-1])
+        _omega  = float(_res.params["omega"])
+        _alpha  = float(_res.params["alpha[1]"])
+        _beta   = float(_res.params["beta[1]"])
+        _persist = _alpha + _beta
+        _lr_vol  = (float(_np_g.sqrt(_omega / (1.0 - _persist)))
+                    if _persist < 1.0 else float(_w500.std()))
+        _ratio   = _cond_v / _lr_vol if _lr_vol > 0 else 1.0
+        _GARCH_RATIO_CACHE["hour"]    = current_hour
+        _GARCH_RATIO_CACHE["ratio"]   = _ratio
+        _GARCH_RATIO_CACHE["cond_ve"] = _cond_v / 100.0 / math.sqrt(60.0)
+        print(f"  [garch] BTC cond_vol={_cond_v:.4f}% lr_vol={_lr_vol:.4f}% ratio={_ratio:.3f} persist={_persist:.3f}")
+        return _ratio
+    except Exception as _exc:
+        print(f"  [garch] Fit failed (gate skipped): {_exc}")
+        return None
+
+
+def _get_garch_cond_ve(df_1h: pd.DataFrame) -> float:
+    """Return GARCH(1,1) conditional vol in vol_eff units (per sqrt-minute).
+    Reuses the hourly-cached fit from _get_garch_ratio — no extra fitting cost."""
+    _get_garch_ratio(df_1h, "BTC")
+    cve = _GARCH_RATIO_CACHE.get("cond_ve")
+    return float(cve) if cve is not None else float("nan")
+
+
 def _load_btc_iso() -> "dict | None":
     global _BTC_ISO_CAL
     if _BTC_ISO_CAL != "unloaded":
@@ -481,6 +558,7 @@ CSV_COLUMNS = [
     "liq_bias",          # Coinalyze: (short_liqs - long_liqs) / total_liqs; +1=squeeze, -1=cascade
     "ls_long_pct",       # Coinalyze: % of open perp positions that are long (crowding signal)
     "oi_chg_pct",        # Coinalyze: open interest % change over last completed 15m bar
+    "arima_forecast_1h",    # ARIMA(2,0,1) 1-step-ahead forecast of next 1h log return
     "markov_regime_daily",  # BTC 20-day rolling return regime label: Bull / Bear / Sideways
     "ob_imbalance",      # Coinbase spot order book: (bid-ask)/(bid+ask) in 0.5% window around strike
     "ob_path_ask_usd",   # USD ask notional between spot and strike (OTM YES resistance to clear)
@@ -797,6 +875,7 @@ def main() -> None:
     # Scales blended sigma before score_to_p_model. Validated on 19,947h of OHLCV data.
     # High-vol regime → factor > 1.0 → wider sigma → OTM strikes more reachable.
     # Low-vol regime  → factor < 1.0 → tighter sigma → edge concentrates near ATM.
+    _markov_regime = _get_daily_markov_regime(args.asset)  # fetched early — needed by garch_markov_vol_adjust below
     _vol_factor = 1.0
     _vol_score_dir = 0
     if live_1m is not None and len(live_1m) >= 400:
@@ -805,6 +884,23 @@ def main() -> None:
             print(f"  [vol_layer] score={_vol_score_dir:+d}  factor={_vol_factor:.3f}  {_vol_details.get('votes', {})}")
         except Exception as _exc:
             print(f"  [vol_layer] Error: {_exc} — using factor=1.0")
+
+    # [garch_markov_vol_adjust] BTC only: deflate sigma by one vote step when GARCH ratio is
+    # suppressed (<0.67) AND daily Markov is Sideways — the quietest vol regime across all assets
+    # (BigMove% = 11.8% vs 19.8% baseline). In this regime the model overestimates sigma,
+    # accepting YES bets that are below breakeven (paper_trades: n=146 YES, WR=43.8% vs BE=48.9%,
+    # -$7.34). NOT applied to ETH/SOL: both are profitable in LOW+Sideways (ETH +$15.29, SOL n=13).
+    if args.asset == "BTC":
+        _garch_ratio_vol = _get_garch_ratio(df_confirm, "BTC")
+        if (_garch_ratio_vol is not None
+                and _garch_ratio_vol < 0.67
+                and _markov_regime == "Sideways"):
+            from vol_layer import VOL_VOTE_STEP, VOL_FACTOR_MIN
+            _vol_factor_pre = _vol_factor
+            _vol_factor = max(VOL_FACTOR_MIN, _vol_factor - VOL_VOTE_STEP)
+            _vol_score_dir -= 1
+            print(f"  [garch_markov_vol] BTC LOW+Sideways → σ deflated "
+                  f"(ratio={_garch_ratio_vol:.3f}, factor {_vol_factor_pre:.3f}→{_vol_factor:.3f})")
 
     # --- Deribit IV (BTC/ETH only) ---
     # Fetch once per scan; 5-min cache. Replaces noisy Kalshi back-computed IV as the
@@ -1135,7 +1231,10 @@ def main() -> None:
             expiry_source_is_live = False
         already_traded = _SESSION_TRADED  # always use session set; CSV failure cannot bypass it
         already_traded_expiries = {}  # {close_ts: {"yes": [strikes], "no": [strikes]}}
-        _mu_6h_btc = 0.0
+        _mu_6h_btc = _mu_12h_btc = _mu_24h_btc = _regime_z_btc = 0.0
+        _rvol_inv_btc = 1.0
+        _garch_ve_btc = float("nan")
+        _arima_forecast_btc = float("nan")
         if csv_path_check.exists():
             try:
                 df_existing = pd.read_csv(csv_path_check)
@@ -1221,21 +1320,40 @@ def main() -> None:
                     _SESSION_SEEDED = True
                     if _SESSION_TRADED:
                         print(f"  [session] Seeded {len(_SESSION_TRADED)} open tickers from CSV")
-                # Compute 6h rolling log-return drift from 1h close prices.
+                # Multi-window rolling drift + regime_z + GARCH ve for branched YES/NO model.
                 try:
                     import numpy as _np_drift
                     _close_1h = df_confirm["close"].astype(float).sort_index()
-                    _log_ret_6h = _np_drift.log(_close_1h / _close_1h.shift(1)).rolling(6).mean()
-                    _mu_val = float(_log_ret_6h.iloc[-1])
-                    _mu_6h_btc = 0.0 if _np_drift.isnan(_mu_val) else _mu_val
-                    print(f"  [drift6h] mu_6h = {_mu_6h_btc:.6f} ({len(_close_1h)} 1h bars)")
-                except Exception:
-                    pass
+                    _lr_1h = _np_drift.log(_close_1h / _close_1h.shift(1))
+                    def _safe_roll(s, w):
+                        v = float(s.rolling(w).mean().iloc[-1])
+                        return 0.0 if _np_drift.isnan(v) else v
+                    _mu_6h_btc  = _safe_roll(_lr_1h, 6)
+                    _mu_12h_btc = _safe_roll(_lr_1h, 12)
+                    _mu_24h_btc = _safe_roll(_lr_1h, 24)
+                    _ewm_mean = float(_lr_1h.ewm(span=12).mean().iloc[-1])
+                    _ewm_std  = float(_lr_1h.ewm(span=24).std().iloc[-1])
+                    _regime_z_btc = float(_np_drift.clip(
+                        _ewm_mean / _ewm_std if _ewm_std > 0 else 0.0, -3.0, 3.0))
+                    _vol_24h_std  = float(_lr_1h.rolling(24,  min_periods=4).std().iloc[-1])
+                    _vol_168h_std = float(_lr_1h.rolling(168, min_periods=24).std().iloc[-1])
+                    if _vol_24h_std > 0 and not _np_drift.isnan(_vol_24h_std) and not _np_drift.isnan(_vol_168h_std):
+                        _rvol_inv_btc = float(_np_drift.clip(_vol_168h_std / _vol_24h_std, 0.3, 2.0))
+                    _garch_ve_btc = _get_garch_cond_ve(df_confirm)
+                    try:
+                        from statsmodels.tsa.arima.model import ARIMA as _ARIMA
+                        _lr_arima = _lr_1h.dropna()
+                        _arima_forecast_btc = float(
+                            _ARIMA(_lr_arima, order=(2, 0, 1)).fit(disp=False).forecast(steps=1).iloc[0])
+                    except Exception:
+                        _arima_forecast_btc = float("nan")
+                    print(f"  [drift] rvol_inv={_rvol_inv_btc:.3f} garch_ve={_garch_ve_btc:.6f}")
+                except Exception as _drift_exc:
+                    print(f"  [drift] compute failed: {_drift_exc}")
             except Exception:
                 pass
 
-        # Fetch daily Markov regime once per cycle (cached by UTC date — one yfinance call/day).
-        _markov_regime = _get_btc_daily_markov_regime() if args.asset == "BTC" else None
+        # _markov_regime already fetched above (before garch_markov_vol_adjust block).
 
         for c in ladder:
             _p_gbdt_c     = None   # BTC LGBM p(YES) for this contract (shadow mode only)
@@ -1401,10 +1519,9 @@ def main() -> None:
                 # vol_factor is now used as a reachability gate (see below), not a sigma scaler.
                 _sigma_base   = vol_eff_c if args.asset == "BTC" else vol_adj_c
                 sigma_tau_c   = _sigma_base * math.sqrt(tau_c)
-                _z_drift_6h   = (
-                    _mu_6h_btc * (tau_c / 60.0) / sigma_tau_c
-                    if args.asset == "BTC" and sigma_tau_c > 0 else 0.0
-                )
+                # YES drift computed below after p_up_v2 is available
+                _sq = math.sqrt(tau_c / 60.0) if args.asset == "BTC" else 0.0
+                _z_drift_6h = 0.0
                 # Tau-blended p_up: for BTC, interpolate between 1h and 30m calibration
                 # tables based on how much time remains. At tau>=60 pure 1h; at tau<=30
                 # pure 30m; linear blend between. Falls back to 1h for assets
@@ -1426,13 +1543,17 @@ def main() -> None:
                         pm_drift_5m=float("nan"),
                     )
                     if _p_up_v2 is not None:
-                        print(f"  [p_up_v2] {_p_up_v2:.3f}  (was {_comp_p_up_c:.3f})")
-                        _comp_p_up_c = _p_up_v2
+                        print(f"  [p_up_v2] {_p_up_v2:.3f}")
                         # Update rolling regime buffer once per new 1h bar
                         _bar_ts_now = df_confirm.index[-1]
                         if _bar_ts_now != _pup_v2_regime_state["last_bar_ts"]:
                             _pup_v2_buf.append(_p_up_v2)
                             _pup_v2_regime_state["last_bar_ts"] = _bar_ts_now
+                        # YES drift: norm.ppf(p_up_v2) × rvol_inv × k=0.3 × √(τ/60)
+                        if args.asset == "BTC" and sigma_tau_c > 0:
+                            from scipy.stats import norm as _norm_pup
+                            _z_drift_6h = float(_norm_pup.ppf(max(0.01, min(0.99, _p_up_v2)))) * _rvol_inv_btc * 0.3 * _sq
+                            print(f"  [yes_drift] z={_z_drift_6h:+.4f}  (pup={_p_up_v2:.3f} rvol_inv={_rvol_inv_btc:.3f})")
                 p_model_comp  = None
                 _p_no_eth     = None
                 # ETH HYBRID: YES → score_to_p_model (k=0.80, tau-blended p_up)
@@ -1713,17 +1834,45 @@ def main() -> None:
             # Kelly sizing also works: p_no_kelly = 1 - (1 - p_no_model) = p_no_model ✓
             _p_no_btc = None
             if args.asset == "BTC" and _composite_computed and sigma_tau_c > 0:
+                # NO drift: norm.ppf(p_up_v2) × rvol_inv × k=0.3 × √(τ/60); GARCH σ override
+                _ve_no = _garch_ve_btc if (not math.isnan(_garch_ve_btc) and _garch_ve_btc > 0) else vol_eff_c
+                _sigma_tau_no = _ve_no * math.sqrt(tau_c)
+                _sq_no = math.sqrt(tau_c / 60.0)
+                if _p_up_v2 is not None and _sigma_tau_no > 0:
+                    from scipy.stats import norm as _norm_no
+                    _z_drift_no = float(_norm_no.ppf(max(0.01, min(0.99, _p_up_v2)))) * _rvol_inv_btc * 0.3 * _sq_no
+                else:
+                    _z_drift_no = 0.0
                 _p_no_btc = score_to_p_no_model(
-                    _active_trend, _active_rev, spot, s_k, sigma_tau_c, asset="BTC",
-                    p_up_override=_comp_p_up_c, z_drift_override=_z_drift_6h,
+                    _active_trend, _active_rev, spot, s_k,
+                    _sigma_tau_no if _sigma_tau_no > 0 else sigma_tau_c,
+                    asset="BTC", p_up_override=_comp_p_up_c, z_drift_override=_z_drift_no,
                 )
                 _pm_ask = c["ask"]
                 _pm_bid = c["bid"]
+                # [stoch_bounce — BTC YES/NO extreme-stoch trigger, W_sk17_pm60]
+                # When stoch_k < 17 (deeply oversold) + pm < 0.60 → take YES with pure lognormal.
+                # When stoch_k > 83 (deeply overbought) + pm > 0.40 → take NO with pure lognormal.
+                # Bypasses composite drift and the gate stack — stoch extreme is the sole signal.
+                # Backtest (3,108 paper trades): YES 37t 73.0% WR +$18.07/t; NO 18t 66.7% WR +$11.23/t.
+                _sk_bounce = float(confirm.stoch_k) if confirm.stoch_k == confirm.stoch_k else 50.0
+                _stoch_bounce_yes = _sk_bounce < 17.0 and pm < 0.60
+                _stoch_bounce_no  = _sk_bounce > 83.0 and pm > 0.40
+                _p_bounce = max(0.03, min(0.97, prob_c.p_yes))
+                if _stoch_bounce_yes:
+                    _bounce_ctx = "RESCUE" if (_otm_yes_blocked or _smc_yes_blocked) else "TRIGGER"
+                    print(f"  [stoch_bounce] {_bounce_ctx} YES {c['ticker']} — "
+                          f"stoch_k={_sk_bounce:.1f}<17, pm={pm:.3f}<0.60, p_lognorm={_p_bounce:.3f}")
+                    p_model_comp = _p_bounce
+                if _stoch_bounce_no:
+                    print(f"  [stoch_bounce] TRIGGER NO {c['ticker']} — "
+                          f"stoch_k={_sk_bounce:.1f}>83, pm={pm:.3f}>0.40, p_lognorm={1-_p_bounce:.3f}")
                 _dec_yes = None
-                if not _otm_yes_blocked and not _smc_yes_blocked:
+                if _stoch_bounce_yes or (not _otm_yes_blocked and not _smc_yes_blocked):
+                    _p_yes_eval = _p_bounce if _stoch_bounce_yes else p_yes_adj_c
                     _dec_yes = evaluate_trade(
                         struct.structure_bias, confirm.confirmation_bias,
-                        p_yes_adj_c, _pm_ask, args.bankroll,
+                        _p_yes_eval, _pm_ask, args.bankroll,
                         confirmation_score=_cscore, no_score=_nscore,
                         obi_score=confirm.obi_score, vol_score=confirm.vol_score,
                         ema_alignment=_ema_align, asset=args.asset,
@@ -1732,16 +1881,14 @@ def main() -> None:
                 # [CoinGlass stablecoin OI 4h gate — BTC NO]
                 # Backtest (1h paper trades): oi_stable_chg_4h>1% blocks 82 NO → WR=56.1%, -$545.
                 # No rescue: all subgroups net-negative. Crowded longs → NO bets lose.
-                _btc_oi_no_blocked = (_cg is not None and _cg.oi_stable_pct_4h > 1.0)
+                # stoch_bounce rescues from this gate when overbought (stoch>83).
+                _btc_oi_no_blocked = (not _stoch_bounce_no) and (_cg is not None and _cg.oi_stable_pct_4h > 1.0)
                 if _btc_oi_no_blocked:
                     print(f"  [cg_oi_stable_no_gate] BLOCK NO {c['ticker']} — oi_stable_4h={_cg.oi_stable_pct_4h:+.2f}%>1% (crowded longs, NO unlikely)")
-                _roll_pup = sum(_pup_v2_buf) / len(_pup_v2_buf) if len(_pup_v2_buf) >= 2 else None
-                _pup_regime_bull = _roll_pup is not None and _roll_pup >= 0.52
-                if _pup_regime_bull and not _btc_oi_no_blocked:
-                    print(f"  [pup_v2_regime] BLOCK NO {c['ticker']} — roll_pup={_roll_pup:.3f}>=0.52 (bull regime, N={len(_pup_v2_buf)})")
-                _dec_no = None if (_btc_oi_no_blocked or _pup_regime_bull) else evaluate_trade(
+                _p_no_eval = _p_bounce if _stoch_bounce_no else (1.0 - _p_no_btc)
+                _dec_no = None if _btc_oi_no_blocked else evaluate_trade(
                     struct.structure_bias, confirm.confirmation_bias,
-                    1.0 - _p_no_btc, _pm_bid, args.bankroll,
+                    _p_no_eval, _pm_bid, args.bankroll,
                     confirmation_score=_cscore, no_score=_nscore,
                     obi_score=confirm.obi_score, vol_score=confirm.vol_score,
                     ema_alignment=_ema_align, asset=args.asset,
@@ -2143,6 +2290,90 @@ def main() -> None:
                     _log_block("eth_bp_gate")
                     continue
 
+            # [eth_yes_deepotm_gate] Block YES when offset_c>=0.001 (>=0.10% OTM = strike >$2+ above spot).
+            # Analysis (2026-05-23, n=25): WR=0.0%, BE=15.3%, P&L=-$1,068.
+            # ETH needs to rise $3-22 in one hour — exceeds typical hourly range.
+            # Tested in daily-Bull (n=14, WR=0%) and Sideways (n=11, WR=0%) — regime-independent.
+            # 4h/1h Bull Markov never observed in data window — rescue slot reserved, pending.
+            # offset∈(0,0.001)+pm>=0.40: n=10, WR=60%, +$78 — barely-OTM stays allowed.
+            if (args.asset == "ETH"
+                    and dec_c.side == "yes"
+                    and offset_c >= 0.001):
+                print(f"  [eth_yes_deepotm_gate] BLOCK YES {c['ticker']} — "
+                      f"offset={offset_c*100:+.3f}%>=0.10 "
+                      f"(requires >${offset_c*spot:.0f} hourly move, 0-for-25 historically)")
+                _log_block("eth_yes_deepotm_gate")
+                continue
+
+            # [eth_yes_chg5m_vwap_gate] Block YES when 5m rising + neutral/below VWAP + ITM.
+            # Analysis (2026-05-23, n=44): WR=40.9%, BE=60.6%, P&L=-$635.
+            # vwap_stretch=-2 rescue does not exist within this gate's population filter.
+            # Only marginal rescue (confirmation_score>0, n=8, WR=62.5%) — insufficient.
+            # confirmation_score==0 (n=36): WR=36.1%, -$659 — dominant driver.
+            if (args.asset == "ETH"
+                    and dec_c.side == "yes"
+                    and _sharp_move_pct_5m > 0
+                    and getattr(confirm, "stretch_score", None) in (-1, 0)
+                    and offset_c <= 0):
+                print(f"  [eth_yes_chg5m_vwap_gate] BLOCK YES {c['ticker']} — "
+                      f"chg_5m={_sharp_move_pct_5m*100:+.3f}%>0, "
+                      f"vwap_stretch={getattr(confirm,'stretch_score',None)}, "
+                      f"offset={offset_c*100:+.3f}% ITM "
+                      f"(rising into neutral VWAP, WR=40.9% vs BE=60.6%)")
+                _log_block("eth_yes_chg5m_vwap_gate")
+                continue
+
+            # [eth_no_vwap_stretch2_gate] Block NO when vwap_stretch==2 unless tau>40+vol_score=0.
+            # Analysis (2026-05-23, n=43): WR=65.1%, BE=72.3%, P&L=-$198.
+            # vol_score=-1 (n=13): WR=46.2%, -$239 — low-vol extreme stretch fails badly.
+            # tau<20 (n=6): WR=16.7%, -$208 — near-expiry extreme stretch also fails.
+            # Rescue: tau>40 + vol_score=0 → n=22, WR=81.8%, +$148.
+            # Also: tau>40 + ema_stack_bias=-1 → n=25, WR=80.0%, +$142.
+            if (args.asset == "ETH"
+                    and dec_c.side == "no"
+                    and getattr(confirm, "stretch_score", None) == 2):
+                _tau_eth = float(tau_c) if tau_c is not None else 0.0
+                _vol_sc_eth = getattr(confirm, "vol_score", None)
+                _stretch2_rescue = (_tau_eth > 40 and _vol_sc_eth == 0)
+                if not _stretch2_rescue:
+                    print(f"  [eth_no_vwap_stretch2_gate] BLOCK NO {c['ticker']} — "
+                          f"vwap_stretch=2, tau={_tau_eth:.0f}min, vol_score={_vol_sc_eth} "
+                          f"(rescue needs tau>40+vol=0)")
+                    _log_block("eth_no_vwap_stretch2_gate")
+                    continue
+                else:
+                    print(f"  [eth_no_vwap_stretch2_gate] RESCUE NO {c['ticker']} — "
+                          f"vwap_stretch=2 but tau={_tau_eth:.0f}>40+vol=0 (WR=81.8%)")
+
+            # [eth_no_adx_gate] Block NO when adx_1h>40 unless ema_stack_bias==-1 OR vol_ratio normal.
+            # Analysis (2026-05-23, n=22): WR=63.6%, BE=72.0%, P&L=-$142.
+            # vol_ratio<0.80 (n=12): WR=41.7%, -$238 — low vol in strong trend, NO fails.
+            # Rescue: ema_stack_bias==-1 → n=9, WR=77.8%, +$23.
+            # Rescue: vol_ratio∈[0.80,1.20) → n=8, WR=87.5%, +$72.
+            _adx_eth = (float(confirm.adx_1h)
+                        if hasattr(confirm, "adx_1h")
+                        and confirm.adx_1h is not None
+                        and confirm.adx_1h == confirm.adx_1h
+                        else None)
+            if (args.asset == "ETH"
+                    and dec_c.side == "no"
+                    and _adx_eth is not None
+                    and _adx_eth > 40):
+                _ema_eth = getattr(confirm, "ema_stack_bias", None)
+                _vr_eth2 = vol_ratio_c if vol_ratio_c is not None else 1.0
+                _adx_rescue = (_ema_eth == -1 or (0.80 <= _vr_eth2 < 1.20))
+                if not _adx_rescue:
+                    print(f"  [eth_no_adx_gate] BLOCK NO {c['ticker']} — "
+                          f"adx_1h={_adx_eth:.1f}>40, ema={_ema_eth}, "
+                          f"vol_ratio={_vr_eth2:.2f} "
+                          f"(rescue needs ema=-1 or vol_ratio 0.80-1.20)")
+                    _log_block("eth_no_adx_gate")
+                    continue
+                else:
+                    _rsrc_eth = f"ema={_ema_eth}=-1" if _ema_eth == -1 else f"vol_ratio={_vr_eth2:.2f}∈[0.80,1.20)"
+                    print(f"  [eth_no_adx_gate] RESCUE NO {c['ticker']} — "
+                          f"adx_1h={_adx_eth:.1f}>40 but {_rsrc_eth} (WR=77-87%)")
+
             if dec_c.side == "no" and args.asset == "SOL" and offset_c < 0.002:
                 print(f"  [scan] Skipping {c['ticker']} — SOL NO offset={offset_c*100:+.3f}% < 0.20% minimum")
                 continue
@@ -2176,15 +2407,62 @@ def main() -> None:
                           f"daily Markov=Sideways but pm={pm:.3f}≤0.39 "
                           f"(deep OTM NO rescue: WR=87.5% in Sideways)")
 
+            # [btc_highpm_no_gate] Block BTC NO when pm>0.70 AND composite_rev>=0.
+            # Analysis (2026-05-23, n=115 resolved): BTC NO bets at pm>0.70 → WR=20.0%, PnL=-$567.
+            # Split by composite_rev:
+            #   comp_rev <  0 (n=36): WR=33.3%, PnL=+$1,005 — no upward reversal signal → ALLOW
+            #   comp_rev >= 0 (n=79): WR=14.0%, PnL=-$1,572 — reversal firing into near-ITM NO → BLOCK
+            # Mechanism: pm>0.70 = market prices YES at 70%+; composite_rev>=0 = upward momentum
+            # or reversal signal active. Together: price is near strike AND moving toward it.
+            # Model is wrong 86% of the time in this combination.
+            # Wins blocked: 11   Losses blocked: 68   Net PnL delta: +$1,572
+            if (args.asset == "BTC"
+                    and dec_c.side == "no"
+                    and pm > 0.70
+                    and _active_rev >= 0):
+                print(f"  [btc_highpm_no_gate] BLOCK NO {c['ticker']} — "
+                      f"pm={pm:.3f}>0.70, composite_rev={_active_rev:+d}>=0 "
+                      f"(near-ITM YES + reversal signal, WR=14% historically)")
+                _log_block("btc_highpm_no_gate")
+                continue
+
             # [rvol_gate] Block BTC YES when relative volume (current 1h vs 30-bar avg for
             # same hour) is below 0.80 — quiet period, price unlikely to reach strike.
             # mispricing_analysis (2026-05-17): rvol<0.5 YES: n=128, WR=38.3%, BE=46.5%, -$105, p=0.023.
             # ALL rvol<1.0 YES trades show negative edge vs breakeven. Use 0.80 as threshold.
+            # Rescue: vpin==1 (informed buying) OR liq_bias==1.0 (all liquidations are short squeeze).
+            # blocked_trades sweep 2026-05-24: rescue n=62 deduped WR=63.3% vs block n=92 WR=45.7%.
             if (args.asset == "BTC" and dec_c.side == "yes"
                     and not math.isnan(_rvol_1h) and _rvol_1h < 0.80):
-                print(f"  [rvol_gate] BLOCK YES {c['ticker']} — rvol_1h={_rvol_1h:.3f}<0.80 (quiet hour, YES underperforms)")
-                _log_block("rvol_gate")
-                continue
+                _rvol_liq_bias = float(_liq_signal.liq_bias) if _liq_signal is not None else float("nan")
+                _rvol_rescued = (confirm.vpin_score == 1) or (_rvol_liq_bias == 1.0)
+                if _rvol_rescued:
+                    print(f"  [rvol_gate] RESCUED YES {c['ticker']} — rvol={_rvol_1h:.3f}<0.80 BUT "
+                          f"vpin={confirm.vpin_score}/liq_bias={_rvol_liq_bias:.3f} (informed buying or short squeeze)")
+                else:
+                    print(f"  [rvol_gate] BLOCK YES {c['ticker']} — rvol_1h={_rvol_1h:.3f}<0.80 (quiet hour, YES underperforms)")
+                    _log_block("rvol_gate")
+                    continue
+
+            # [btc_garch_highvol_yes_gate] Block BTC YES when GARCH(1,1) cond vol ratio > 1.5.
+            # ALL 424 HIGH GARCH trades share an identical Markov fingerprint: 1h=Bull inside
+            # 4h/6h=Sideways inside 12h/daily=Bear — a bull-trap bounce in a sticky-vol bear market.
+            # Persistence α+β=0.935 means the vol shock does not resolve within contract life.
+            # Validated: 308 blocked (WR=25%), 231 losses saved, 77 wins forgone → +$44.94/$ net.
+            # Rescue: pm≥0.80 AND tau<45 min — deep-ITM contract near expiry, GARCH vol can't
+            # bridge the gap to strike; WR=100% on n=116 with +4.7pp above breakeven.
+            if args.asset == "BTC" and dec_c.side == "yes":
+                _garch_ratio = _get_garch_ratio(df_confirm, "BTC")
+                if _garch_ratio is not None and _garch_ratio > 1.5:
+                    _garch_rescue = (pm >= 0.80 and tau_c < 45)
+                    if _garch_rescue:
+                        print(f"  [btc_garch_highvol_yes_gate] RESCUE YES {c['ticker']} — "
+                              f"ratio={_garch_ratio:.3f}>1.5 BUT pm={pm:.3f}>=0.80 + tau={tau_c:.0f}<45 (deep-ITM near-expiry)")
+                    else:
+                        print(f"  [btc_garch_highvol_yes_gate] BLOCK YES {c['ticker']} — "
+                              f"ratio={_garch_ratio:.3f}>1.5, pm={pm:.3f}, tau={tau_c:.0f} (bull-trap vol regime)")
+                        _log_block("btc_garch_highvol_yes_gate")
+                        continue
 
             # [btc_adx_gate] Block BTC YES when ADX_1h is in moderate trending range [20,40).
             # mispricing_analysis [21a] 2026-05-17: adx_mod(20-40) YES: n=153, WR=36.6%,
@@ -2266,15 +2544,22 @@ def main() -> None:
             # Mechanism: stoch<20 = price has fallen hard; oversold condition creates mean-
             # reversion bounce risk that sends BTC above the NO strike.
             # By pm/offset: pm[0.30,0.40) → WR=37.5%, -$47 (worst); offset>0 (ITM NO) → -$84.
-            # Rescue (2026-05-17): ct<=-3 AND fund=-1 — strong bearish trend + crowded shorts
+            # Rescue 1 (2026-05-17): ct<=-3 AND fund=-1 — strong bearish trend + crowded shorts
             # confirms downtrend continuation even from oversold; WR=88.5% vs 83% implied (n=3222).
+            # Rescue 2 (2026-05-24): vwap_stretch_score==1 — price above VWAP despite stoch dip;
+            # temporary oversold in elevated VWAP context, NO strike stays out of reach; n=11, WR=81.8%.
             if (args.asset == "BTC" and dec_c.side == "no"
                     and confirm.stoch_k == confirm.stoch_k  # not NaN
                     and confirm.stoch_k < 20.0):
-                _stoch_no_rescue = (_active_trend <= -3 and confirm.funding_bias == -1)
+                _stoch_no_rescue = (
+                    (_active_trend <= -3 and confirm.funding_bias == -1)
+                    or getattr(confirm, "stretch_score", None) == 1
+                )
                 if _stoch_no_rescue:
+                    _rsrc_stoch = ("ct<=-3+fund=-1" if (_active_trend <= -3 and confirm.funding_bias == -1)
+                                   else "vwap_stretch=1")
                     print(f"  [btc_stoch_no_gate] RESCUED NO {c['ticker']} — "
-                          f"ct={_active_trend}<=-3+fund=-1 overrides stoch<20 (trend+funding confirm bearish)")
+                          f"{_rsrc_stoch} overrides stoch<20")
                 else:
                     print(f"  [btc_stoch_no_gate] BLOCK NO {c['ticker']} — "
                           f"stoch_k={confirm.stoch_k:.1f}<20 (oversold, bounce risk for NO)")
@@ -2353,6 +2638,69 @@ def main() -> None:
             # [G4 — sol_yes_gate REMOVED 2026-05-17]
             # blocked_trades.csv retrospective (n=283): WR=48.4%, BE=37.7%, Edge=+10.8%, $304 profit blocked.
             # Original n=12 analysis (WR=16.7%) no longer valid with full data. Gate was over-blocking.
+
+            # [sol_yes_deepotm_gate] Hard block SOL YES when offset_c > 0.001 (>0.10% OTM).
+            # Analysis (2026-05-23, n=18): WR=5.6%, BE≈20%, P&L≈-$450.
+            # Existing struct=1 rescue only protects 4 of 18 — 14 unprotected trades structurally unwinnable.
+            # Strike >0.10% above spot requires a large hourly move SOL rarely makes in range.
+            if (args.asset == "SOL"
+                    and dec_c.side == "yes"
+                    and offset_c > 0.001):
+                print(f"  [sol_yes_deepotm_gate] BLOCK YES {c['ticker']} — "
+                      f"offset={offset_c*100:+.3f}%>0.10 "
+                      f"(OTM SOL YES, n=18 WR=5.6%, no viable rescue)")
+                _log_block("sol_yes_deepotm_gate")
+                continue
+
+            # [sol_yes_structure_pos_gate] Hard block SOL YES when structure_bias=1 AND (no_score=2 OR composite_rev=0).
+            # Analysis (2026-05-23, n=24): WR=25.0%, BE≈55.0%, P&L=-$313.
+            # no_score=2 alone: n=11, WR=18.2%. composite_rev=0 alone: n=15, WR=26.7%.
+            # Baseline (neither condition): n=187, WR=77.5%, +$1,128 — stark contrast validates gate.
+            # No rescue found — max WR=25% at n=12 across all tested features.
+            if (args.asset == "SOL"
+                    and dec_c.side == "yes"
+                    and struct.structure_bias == 1
+                    and (confirm.no_score == 2 or _active_rev == 0)):
+                print(f"  [sol_yes_structure_pos_gate] BLOCK YES {c['ticker']} — "
+                      f"struct=1, no_score={confirm.no_score}, composite_rev={_active_rev} "
+                      f"(bullish structure but conflicting NO signal or no rev, WR=25% vs BE=55%)")
+                _log_block("sol_yes_structure_pos_gate")
+                continue
+
+            # [sol_no_vwap_neutral_gate] Hard block SOL NO when vwap_stretch=0 AND (ema_stretch=1 OR stoch_k<40).
+            # Analysis (2026-05-23, n=38): WR=52.6%, BE≈75.8%, P&L=-$374.
+            # Baseline NO (not blocked): n=193, WR=85.0%, +$1,004 — confirms gate carves out losers.
+            # ema_stretch=1 = EMA bullishly extended (trend against NO); stoch<40 = oversold (bounce imminent).
+            # No rescue — best candidate (no_score>=1) only reached 60.9% vs 75.8% breakeven.
+            _vwap_str_sol = getattr(confirm, "stretch_score", None)
+            _ema_str_sol  = getattr(confirm, "ema_stretch_score", None)
+            _stoch_k_sol  = (float(confirm.stoch_k)
+                             if confirm.stoch_k == confirm.stoch_k
+                             else 50.0)
+            if (args.asset == "SOL"
+                    and dec_c.side == "no"
+                    and _vwap_str_sol == 0
+                    and (_ema_str_sol == 1 or _stoch_k_sol < 40.0)):
+                print(f"  [sol_no_vwap_neutral_gate] BLOCK NO {c['ticker']} — "
+                      f"vwap_stretch=0, ema_stretch={_ema_str_sol}, stoch_k={_stoch_k_sol:.1f} "
+                      f"(neutral VWAP+extended EMA or oversold, WR=52.6% vs BE=75.8%, no rescue)")
+                _log_block("sol_no_vwap_neutral_gate")
+                continue
+
+            # [sol_no_structure_neg_gate] Hard block SOL NO when structure_bias=-1 AND pm>=0.30.
+            # Analysis (2026-05-23, n=17): WR=41.2%, BE≈64.0%, P&L=-$227.
+            # structure_bias=-1 AND pm<0.30 (excluded): n=37, WR=86.5% — correctly not blocked.
+            # Baseline NO not blocked: n=214, WR=82.7%, +$856.
+            # composite_rev>=3 shows WR=83% but n=6 — re-evaluate rescue after 30+ blocked trades.
+            if (args.asset == "SOL"
+                    and dec_c.side == "no"
+                    and struct.structure_bias == -1
+                    and pm >= 0.30):
+                print(f"  [sol_no_structure_neg_gate] BLOCK NO {c['ticker']} — "
+                      f"struct=-1, pm={pm:.3f}>=0.30 "
+                      f"(bearish structure at fair price, WR=41.2% vs BE=64%, no rescue)")
+                _log_block("sol_no_structure_neg_gate")
+                continue
 
             # [G5 — SOL NO pm 0.30-0.50 mid-range gate]
             # Zone sits barely below breakeven: n=50, 62% WR, bkeven=64%, -$2.53/t (-$126 total).
@@ -2633,6 +2981,10 @@ def main() -> None:
                         # Rescue: bearish streak into bullish structure = counter-trend pullback.
                         # Data: n=60, WR=0.883 vs BE=0.542. Streak is corrective, not continuation.
                         print(f"  [streak_gate] RESCUED YES {c['ticker']} — streak30=bearish but structure_bias=1 (bullish structure, pullback into demand)")
+                    elif confirm.vpin_score == -1 and _sharp_move_pct_10m <= 0:
+                        # Rescue: vpin=-1 during bearish streak with no bounce = informed-seller compression,
+                        # not continuation. blocked_trades sweep 2026-05-24: n=18 WR=72.2% +$220.
+                        print(f"  [streak_gate] RESCUED YES {c['ticker']} — streak30=bearish, vpin=-1 (compression not continuation), stoch_k={_sk:.1f}")
                     elif _sharp_move_pct_10m <= 0:
                         _gate = True
                         _gate_reason = f"streak30=bearish, stoch_k={_sk:.1f}, chg_10m={_sharp_move_pct_10m*100:+.2f}% (no bounce)"
@@ -3408,6 +3760,7 @@ def main() -> None:
         "liq_bias":           round(_liq_signal.liq_bias, 4)    if _liq_signal else "",
         "ls_long_pct":        round(_liq_signal.ls_long_pct, 2) if _liq_signal else "",
         "oi_chg_pct":         round(_liq_signal.oi_chg_pct, 4)  if _liq_signal else "",
+        "arima_forecast_1h":  round(_arima_forecast_btc, 7) if not math.isnan(_arima_forecast_btc) else "",
         "markov_regime_daily": _markov_regime or "",
         "ob_imbalance":       _gate_signals.get("ob_imbalance", ""),
         "ob_path_ask_usd":    _gate_signals.get("ob_path_ask_usd", ""),

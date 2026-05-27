@@ -1886,13 +1886,13 @@ def main() -> None:
                     _sk4h_bounce = _sk4h_last if not math.isnan(_sk4h_last) else 50.0
                 else:
                     _sk4h_bounce = 50.0
-                _stoch_bounce_yes = _sk_bounce < 17.0 and _sk4h_bounce < 40.0 and pm < 0.60
+                _stoch_bounce_yes = _sk_bounce < 17.0 and _sk4h_bounce < 50.0 and pm < 0.60
                 _stoch_bounce_no  = _sk_bounce > 83.0 and _sk4h_bounce > 60.0 and pm > 0.40
                 _p_bounce = max(0.03, min(0.97, prob_c.p_yes))
                 if _stoch_bounce_yes:
                     _bounce_ctx = "RESCUE" if (_otm_yes_blocked or _smc_yes_blocked) else "TRIGGER"
                     print(f"  [stoch_bounce] {_bounce_ctx} YES {c['ticker']} — "
-                          f"stoch_k={_sk_bounce:.1f}<17, stoch_k_4h={_sk4h_bounce:.1f}<40, "
+                          f"stoch_k={_sk_bounce:.1f}<17, stoch_k_4h={_sk4h_bounce:.1f}<50, "
                           f"pm={pm:.3f}<0.60, p_lognorm={_p_bounce:.3f}")
                     p_model_comp = _p_bounce
                 if _stoch_bounce_no:

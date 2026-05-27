@@ -509,6 +509,7 @@ CSV_COLUMNS = [
     "ema_stretch_score",
     "stoch_bias",
     "stoch_k",
+    "stoch_k_4h",
     "stoch_d",
     "stoch_crossover_active",
     "ema_stack_bias",
@@ -694,6 +695,7 @@ def main() -> None:
     # Captures whether this specific hour is busier or quieter than usual — distinct
     # from vol_score which compares to recent bars regardless of time-of-day.
     _rvol_1h = float("nan")
+    _sk4h_bounce = float("nan")
     try:
         _same_hour_vol = df_confirm[df_confirm.index.hour == now_utc.hour]["volume"]
         _avg_vol_hour  = float(_same_hour_vol.iloc[:-1].tail(30).mean())
@@ -1850,23 +1852,37 @@ def main() -> None:
                 )
                 _pm_ask = c["ask"]
                 _pm_bid = c["bid"]
-                # [stoch_bounce — BTC YES/NO extreme-stoch trigger, W_sk17_pm60]
-                # When stoch_k < 17 (deeply oversold) + pm < 0.60 → take YES with pure lognormal.
-                # When stoch_k > 83 (deeply overbought) + pm > 0.40 → take NO with pure lognormal.
-                # Bypasses composite drift and the gate stack — stoch extreme is the sole signal.
-                # Backtest (3,108 paper trades): YES 37t 73.0% WR +$18.07/t; NO 18t 66.7% WR +$11.23/t.
+                # [stoch_bounce — BTC YES/NO extreme-stoch trigger, MT_1h17_4h40]
+                # When stoch_k(1h) < 17 + stoch_k(4h) < 40 + pm < 0.60 → YES pure lognormal.
+                # When stoch_k(1h) > 83 + stoch_k(4h) > 60 + pm > 0.40 → NO pure lognormal.
+                # 4h confirmation filters noise: backtest 84.2% WR, +$32.75/trade (19 trades).
+                # Bypasses composite drift and most early gates; late gates (BearDrift, rvol, etc.) apply.
                 _sk_bounce = float(confirm.stoch_k) if confirm.stoch_k == confirm.stoch_k else 50.0
-                _stoch_bounce_yes = _sk_bounce < 17.0 and pm < 0.60
-                _stoch_bounce_no  = _sk_bounce > 83.0 and pm > 0.40
+                if _df_4h_comp is not None and len(_df_4h_comp) >= 14:
+                    _l4h = _df_4h_comp["low"]
+                    _h4h = _df_4h_comp["high"]
+                    _c4h_b = _df_4h_comp["close"]
+                    _ll14 = _l4h.rolling(14, min_periods=14).min()
+                    _hh14 = _h4h.rolling(14, min_periods=14).max()
+                    _denom4h = (_hh14 - _ll14).replace(0, float("nan"))
+                    _sk4h_raw = 100.0 * (_c4h_b - _ll14) / _denom4h
+                    _sk4h_last = float(_sk4h_raw.iloc[-1])
+                    _sk4h_bounce = _sk4h_last if not math.isnan(_sk4h_last) else 50.0
+                else:
+                    _sk4h_bounce = 50.0
+                _stoch_bounce_yes = _sk_bounce < 17.0 and _sk4h_bounce < 40.0 and pm < 0.60
+                _stoch_bounce_no  = _sk_bounce > 83.0 and _sk4h_bounce > 60.0 and pm > 0.40
                 _p_bounce = max(0.03, min(0.97, prob_c.p_yes))
                 if _stoch_bounce_yes:
                     _bounce_ctx = "RESCUE" if (_otm_yes_blocked or _smc_yes_blocked) else "TRIGGER"
                     print(f"  [stoch_bounce] {_bounce_ctx} YES {c['ticker']} — "
-                          f"stoch_k={_sk_bounce:.1f}<17, pm={pm:.3f}<0.60, p_lognorm={_p_bounce:.3f}")
+                          f"stoch_k={_sk_bounce:.1f}<17, stoch_k_4h={_sk4h_bounce:.1f}<40, "
+                          f"pm={pm:.3f}<0.60, p_lognorm={_p_bounce:.3f}")
                     p_model_comp = _p_bounce
                 if _stoch_bounce_no:
                     print(f"  [stoch_bounce] TRIGGER NO {c['ticker']} — "
-                          f"stoch_k={_sk_bounce:.1f}>83, pm={pm:.3f}>0.40, p_lognorm={1-_p_bounce:.3f}")
+                          f"stoch_k={_sk_bounce:.1f}>83, stoch_k_4h={_sk4h_bounce:.1f}>60, "
+                          f"pm={pm:.3f}>0.40, p_lognorm={1-_p_bounce:.3f}")
                 _dec_yes = None
                 if _stoch_bounce_yes or (not _otm_yes_blocked and not _smc_yes_blocked):
                     _p_yes_eval = _p_bounce if _stoch_bounce_yes else p_yes_adj_c
@@ -3711,6 +3727,7 @@ def main() -> None:
         "ema_stretch_score":      confirm.ema_stretch_score,
         "stoch_bias":             confirm.stoch_bias,
         "stoch_k":                round(confirm.stoch_k, 2) if confirm.stoch_k == confirm.stoch_k else "",
+        "stoch_k_4h":             round(_sk4h_bounce, 2) if not math.isnan(_sk4h_bounce) else "",
         "stoch_d":                round(confirm.stoch_d, 2) if confirm.stoch_d == confirm.stoch_d else "",
         "stoch_crossover_active": confirm.stoch_crossover_active,
         "ema_stack_bias":         confirm.ema_stack_bias,

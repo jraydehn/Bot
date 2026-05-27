@@ -65,10 +65,7 @@ _MARKOV_DAILY_CACHE: dict = {"date": None, "regime": None}
 def _get_btc_daily_markov_regime() -> "str | None":
     """Return today's BTC daily Markov regime: 'Bull', 'Bear', 'Sideways', or None on error.
 
-    Loads 3-state GaussianHMM (features: log_ret, realized_vol_20d, ret_5d) from
-    results/hmm_3state_btc.pkl. More precise than ±2% threshold: separates low-vol
-    steady markets (Bull) from medium-vol flat periods (Sideways) from high-vol
-    crashes (Bear), preventing false Sideways blocks in calm low-vol markets.
+    Computes the 20-day rolling return on BTC-USD daily closes (±2% threshold).
     Result is cached by UTC date — one yfinance call per calendar day maximum.
     Returns None on any fetch/compute failure so the gate is skipped rather than
     blocking incorrectly.
@@ -79,10 +76,9 @@ def _get_btc_daily_markov_regime() -> "str | None":
         return _MARKOV_DAILY_CACHE["regime"]
     try:
         import yfinance as _yf
-        import numpy as _np_m
         import pandas as _pd_m
         _end   = _pd_m.Timestamp.now("UTC").normalize()
-        _start = _end - _pd_m.DateOffset(days=90)
+        _start = _end - _pd_m.DateOffset(days=65)
         _df = _yf.download(
             "BTC-USD",
             start=_start.strftime("%Y-%m-%d"),
@@ -92,25 +88,13 @@ def _get_btc_daily_markov_regime() -> "str | None":
         if isinstance(_df.columns, _pd_m.MultiIndex):
             _df.columns = _df.columns.get_level_values(0)
         _close = _df["Close"].dropna()
-        if len(_close) < 25:
+        if len(_close) < 22:
             return None
-        _lr    = _np_m.log(_close / _close.shift(1))
-        _rv    = _lr.rolling(20, min_periods=10).std()
-        _r5    = _np_m.log(_close / _close.shift(5))
-        _feats = _pd_m.DataFrame({"log_ret": _lr, "realized_vol": _rv, "ret_5d": _r5}).dropna()
-        if len(_feats) < 10:
-            return None
-        _X        = _feats[["log_ret", "realized_vol", "ret_5d"]].values
-        _pkl_path = Path(__file__).parent / "results" / "hmm_3state_btc.pkl"
-        _payload  = _pickle.load(open(_pkl_path, "rb"))
-        _states   = _payload["model"].predict(_X)
-        _regime   = _payload["state_to_name"][int(_states[-1])]
+        _latest_ret = float(_close.pct_change(20).iloc[-1])
+        _regime = "Bull" if _latest_ret > 0.02 else "Bear" if _latest_ret < -0.02 else "Sideways"
         _MARKOV_DAILY_CACHE["date"]   = today
         _MARKOV_DAILY_CACHE["regime"] = _regime
-        _rv_last = float(_feats["realized_vol"].iloc[-1])
-        _r5_last = float(_feats["ret_5d"].iloc[-1])
-        print(f"  [markov_daily] BTC HMM 3-state → regime={_regime}  "
-              f"(vol={_rv_last:.4f}  ret5d={_r5_last*100:+.2f}%)")
+        print(f"  [markov_daily] BTC 20d rolling return={_latest_ret*100:+.2f}% → regime={_regime}")
         return _regime
     except Exception as _exc:
         print(f"  [markov_daily] Fetch failed (gate skipped): {_exc}")

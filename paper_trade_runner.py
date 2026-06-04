@@ -116,6 +116,217 @@ def _get_btc_daily_markov_regime() -> "str | None":
         print(f"  [markov_daily] Fetch failed (gate skipped): {_exc}")
         return None
 
+# ── 7-state BTC daily Markov regime ──────────────────────────────────────────
+# More granular than 3-state: Crash_Bear / Correction / Consolidation / Recovery
+#   / Slow_Bull / Bull / Explosive_Bull.  Uses 4 features (adds ret_20d).
+# Validated 2026-06-04 on scan archive:
+#   Correction: YES edge=-9.4% (block), NO edge=+6.7% (allow)
+#   Consolidation: YES edge=-2.1% (soft), NO edge=+2.7% (allow)
+_MARKOV_7STATE_CACHE: dict = {"date": None, "regime": None}
+
+def _get_btc_7state_regime() -> "str | None":
+    """Return today's BTC 7-state HMM regime or None on error (gate skipped)."""
+    global _MARKOV_7STATE_CACHE
+    today = datetime.now(timezone.utc).date()
+    if _MARKOV_7STATE_CACHE["date"] == today:
+        return _MARKOV_7STATE_CACHE["regime"]
+    try:
+        import yfinance as _yf
+        import numpy as _np_7
+        import pandas as _pd_7
+        _end   = _pd_7.Timestamp.now("UTC").normalize()
+        _start = _end - _pd_7.DateOffset(days=120)
+        _df = _yf.download(
+            "BTC-USD",
+            start=_start.strftime("%Y-%m-%d"),
+            end=(_end + _pd_7.DateOffset(days=1)).strftime("%Y-%m-%d"),
+            progress=False, auto_adjust=True,
+        )
+        if isinstance(_df.columns, _pd_7.MultiIndex):
+            _df.columns = _df.columns.get_level_values(0)
+        _close = _df["Close"].dropna()
+        if len(_close) < 25:
+            return None
+        _lr   = _np_7.log(_close / _close.shift(1))
+        _rv   = _lr.rolling(20, min_periods=10).std()
+        _r5   = _np_7.log(_close / _close.shift(5))
+        _r20  = _np_7.log(_close / _close.shift(20))
+        _feats = _pd_7.DataFrame({"log_ret": _lr, "realized_vol": _rv,
+                                   "ret_5d": _r5, "ret_20d": _r20}).dropna()
+        if len(_feats) < 10:
+            return None
+        _X = _feats[["log_ret", "realized_vol", "ret_5d", "ret_20d"]].values
+        _pkl_path = Path(__file__).parent / "results" / "hmm_7state_btc.pkl"
+        _payload  = _pickle.load(open(_pkl_path, "rb"))
+        _states   = _payload["model"].predict(_X)
+        _regime   = _payload["state_to_name"][int(_states[-1])]
+        _MARKOV_7STATE_CACHE["date"]   = today
+        _MARKOV_7STATE_CACHE["regime"] = _regime
+        _rv_last  = float(_feats["realized_vol"].iloc[-1])
+        _r5_last  = float(_feats["ret_5d"].iloc[-1])
+        _r20_last = float(_feats["ret_20d"].iloc[-1])
+        print(f"  [markov_7state] BTC HMM 7-state → regime={_regime}  "
+              f"(vol={_rv_last:.4f}  ret5d={_r5_last*100:+.2f}%  ret20d={_r20_last*100:+.2f}%)")
+        return _regime
+    except Exception as _exc:
+        print(f"  [markov_7state] Fetch failed (gate skipped): {_exc}")
+        return None
+
+
+# ── HMM SMC Phase model (4 states: Markup/Markdown/Transition/Divergence) ────
+# Trained on 21,114 hourly SMC observations (Jan 2024 – Jun 2026).
+# Features: bos_4h/1h ±1, choch_4h/1h, supply_pct, demand_pct, zone_imbal, in_supply/demand.
+# States: 0=Markup, 1=Markdown, 2=Transition(ChoCH), 3=Divergence(4h-bear,1h-bull)
+# Key outcome: State 2 NO bets at pm>0.80 → WR=8%, PnL=-$2,398 (primary block target).
+_HMM_SMC_PKL        = Path(__file__).parent / "hmm_smc_phases.pkl"
+_hmm_smc_model      = None
+_hmm_smc_scaler     = None
+_HMM_SMC_SUPPLY_MED = 3.064   # median supply_pct from training data (fill for None)
+_HMM_SMC_DEMAND_MED = 3.950   # median demand_pct from training data
+from collections import deque as _deque_smc
+_hmm_smc_buf = _deque_smc(maxlen=24)   # rolling 24h of scaled observations
+
+try:
+    _hmm_smc_pkg    = _pickle.load(open(_HMM_SMC_PKL, "rb"))
+    _hmm_smc_model  = _hmm_smc_pkg["model"]
+    _hmm_smc_scaler = _hmm_smc_pkg["scaler"]
+    print(f"  [hmm_smc] Loaded {_HMM_SMC_PKL.name}  "
+          f"({_hmm_smc_pkg['n_states']} states, {len(_hmm_smc_pkg['feat_cols'])} features)")
+except Exception as _hmm_smc_e:
+    print(f"  [hmm_smc] WARNING: could not load {_HMM_SMC_PKL.name}: {_hmm_smc_e}")
+
+# ── Vol-regime HMM (BTC 1h runner) ─────────────────────────────────────────
+# 2-state ergodic Gaussian HMM on 15m returns: R0=low-vol, R1=high-vol.
+# R0: σ_ann=32%, self-trans=0.978, mean residence ~11h (near-absorbing).
+# R1: σ_ann=88%, self-trans=0.923, mean residence ~3h  (near-absorbing).
+# Full-history aggregate: R0=$0.84/trade, R1=$0.04/trade (-$2.69 May+).
+#
+# Three signals logged (soft posterior, not just hard Viterbi):
+#   hmm_vol_state  — hard Viterbi rank (0=R0, 1=R1) for backwards compat
+#   hmm_r1_prob    — P(R1|observations): soft posterior; catches transitions ~5 steps early
+#   hmm_vol_k10    — P(R1 in 10 steps): forward forecast using P^10; regime persistence signal
+#
+# Gate readiness: 100+ R1 obs → run analyze_hmm_vol_state_otm_itm.py
+_VOL_HMM_PKL_1H   = Path(__file__).parent / "models" / "hmm_ergodic_2state_btc_15m.pkl"
+_vol1h_hmm_model  = None
+_vol1h_hmm_order  = None
+_vol1h_hmm_rankof: "dict | None" = None
+_vol1h_P10:        "object | None" = None   # P^10 pre-computed at load time
+
+try:
+    import numpy as _np_volhmm
+    with open(_VOL_HMM_PKL_1H, "rb") as _vhf:
+        _vol1h_pkg = _pickle.load(_vhf)
+    _vol1h_hmm_model  = _vol1h_pkg["model"]
+    _n_vol1h          = _vol1h_pkg["n_states"]
+    _vol1h_hmm_order  = sorted(range(_n_vol1h),
+                               key=lambda s: float(
+                                   _np_volhmm.sqrt(_vol1h_hmm_model.covars_[s, 0, 0])))
+    _vol1h_hmm_rankof = {s: i for i, s in enumerate(_vol1h_hmm_order)}
+    # Pre-compute P^10 for forward forecast (rank-ordered rows/cols)
+    _P_raw = _vol1h_hmm_model.transmat_
+    _P_ord = _np_volhmm.array([[_P_raw[_vol1h_hmm_order[i], _vol1h_hmm_order[j]]
+                                 for j in range(_n_vol1h)]
+                                for i in range(_n_vol1h)])
+    _vol1h_P10 = _np_volhmm.linalg.matrix_power(_P_ord, 10)
+    print(f"  [vol_hmm_1h] Loaded {_VOL_HMM_PKL_1H.name}  ({_n_vol1h} states)  "
+          f"P10[R1→R1]={_vol1h_P10[1,1]:.3f}")
+except Exception as _ve1h:
+    print(f"  [vol_hmm_1h] WARNING: {_ve1h}")
+
+# [hmm_mtf_momentum] Multi-timeframe momentum HMM (9-state, BTC-only).
+# State 3: stoch_k_1h≈64, rsi_1h≈57, bp_1h≈0.86, macd_hist_1h≈42, adx_1h≈32
+#          — moderate uptrend/bullish momentum; WR=24.1%, ppt=-$149.7.
+# Gate: block BTC NO when St3; rescue if offset∈[0,5%) + macd_hist_1h<-50.
+_MTF_HMM_PKL      = Path(__file__).parent / "models" / "hmm_mtf_momentum_btc15m.pkl"
+_mtf_hmm_model    = None
+_mtf_hmm_scaler   = None
+
+try:
+    import numpy as _np_mtf
+    with open(_MTF_HMM_PKL, "rb") as _mf:
+        _mtf_pkg = _pickle.load(_mf)
+    _mtf_hmm_model  = _mtf_pkg["model"]
+    _mtf_hmm_scaler = _mtf_pkg["scaler"]
+    print(f"  [hmm_mtf] Loaded {_MTF_HMM_PKL.name}  ({_mtf_pkg['n_states']} states, St3 WR=24.1%)")
+except Exception as _mtf_load_e:
+    print(f"  [hmm_mtf] WARNING: {_mtf_load_e}")
+
+
+def _vol1h_hmm_probs(live_1m: "pd.DataFrame") -> "tuple[int,float,float,int] | None":
+    """Return (hard_rank, r1_prob, r1_prob_k10, time_in_state) from live 1m data.
+
+    hard_rank      : Viterbi hard state rank (0=R0 low-vol, 1=R1 high-vol)
+    r1_prob        : soft posterior P(R1|observations) — catches transitions ~5 bars early
+    r1_prob_k10    : 10-step forward P(R1) = posterior @ P^10 @ e_R1
+    time_in_state  : consecutive trailing bars in current hard state (semi-Markov sojourn depth)
+                     R1 early=1-3 (spike), mid=4-15 (settling), deep=16+ (committed episode)
+    """
+    if _vol1h_hmm_model is None or _vol1h_hmm_rankof is None or _vol1h_P10 is None:
+        return None
+    try:
+        c15 = live_1m["close"].resample("15min").last().dropna()
+        if len(c15) < 22:
+            return None
+        lr       = _np_volhmm.log(c15 / c15.shift(1)).dropna().values[-20:]
+        obs      = lr.reshape(-1, 1)
+        # Hard Viterbi sequence — use full sequence for time-in-state
+        raw_seq   = _vol1h_hmm_model.predict(obs)
+        hard_rank = _vol1h_hmm_rankof[int(raw_seq[-1])]
+        # Count trailing bars in current state (semi-Markov sojourn depth)
+        time_in_state = 0
+        for _rs in reversed(raw_seq):
+            if _vol1h_hmm_rankof[int(_rs)] == hard_rank:
+                time_in_state += 1
+            else:
+                break
+        # Soft posterior
+        post_raw  = _vol1h_hmm_model.predict_proba(obs)[-1]
+        post_ord  = _np_volhmm.array([post_raw[_vol1h_hmm_order[i]] for i in range(_n_vol1h)])
+        r1_prob   = float(post_ord[1])
+        r1_k10    = float(post_ord @ _vol1h_P10[:, 1])
+        return (hard_rank, round(r1_prob, 4), round(r1_k10, 4), time_in_state)
+    except Exception:
+        return None
+
+
+_HMM_SMC_STATE_LABELS = {
+    0: "Markup",
+    1: "Markdown",
+    2: "Transition(ChoCH)",
+    3: "Divergence",
+}
+
+def _hmm_smc_predict(smc_result) -> int:
+    """Predict HMM SMC phase state from a SMCResult. Returns -1 on load error."""
+    if _hmm_smc_model is None or _hmm_smc_scaler is None or smc_result is None:
+        return -1
+    import numpy as _np_hmm
+    _bos_map = {"bullish": 1.0, "bearish": -1.0, "neutral": 0.0}
+    _vec = [
+        _bos_map.get(smc_result.bos_4h, 0.0),
+        _bos_map.get(smc_result.bos_1h, 0.0),
+        float(smc_result.choch_4h),
+        float(smc_result.choch_1h),
+        float(min(20.0, max(0.0, smc_result.nearest_supply_pct))
+              if smc_result.nearest_supply_pct is not None else _HMM_SMC_SUPPLY_MED),
+        float(min(20.0, max(0.0, smc_result.nearest_demand_pct))
+              if smc_result.nearest_demand_pct is not None else _HMM_SMC_DEMAND_MED),
+        float(smc_result.n_supply_zones - smc_result.n_demand_zones),
+        float(smc_result.in_supply_zone),
+        float(smc_result.in_demand_zone),
+    ]
+    try:
+        _scaled = _hmm_smc_scaler.transform([_vec])[0]
+        _hmm_smc_buf.append(_scaled)
+        if len(_hmm_smc_buf) < 3:
+            return -1
+        _buf_arr = _np_hmm.array(list(_hmm_smc_buf))
+        return int(_hmm_smc_model.predict(_buf_arr)[-1])
+    except Exception:
+        return -1
+
+
 def _get_daily_markov_regime(asset: str) -> "str | None":
     """Return today's daily Markov regime for BTC, ETH, or SOL.
 
@@ -555,7 +766,7 @@ CSV_COLUMNS = [
     "bp_5m",              # buying pressure on last completed 5m bar: (close-low)/(high-low)
     "body_15m",           # body ratio on last completed 15m bar: |close-open|/(high-low)
     "dir_15m",            # direction of last completed 15m bar: +1=bullish, -1=bearish
-    "p_gbdt",             # BTC LGBM shadow model probability (shadow mode, no trade logic effect)
+    "p_gbdt",             # BTC/ETH/SOL LGBM shadow model probability [SHADOW — gate eval after 2,000+ scan archive rows + retrain]
     "sharp_move_active",  # True if sharp move inversion was applied this cycle
     "smc_4h",             # SMC 4h structure: bullish / bearish / neutral
     "smc_1h",             # SMC 1h structure: bullish / bearish / neutral
@@ -575,14 +786,22 @@ CSV_COLUMNS = [
     "liq_bias",          # Coinalyze: (short_liqs - long_liqs) / total_liqs; +1=squeeze, -1=cascade
     "ls_long_pct",       # Coinalyze: % of open perp positions that are long (crowding signal)
     "oi_chg_pct",        # Coinalyze: open interest % change over last completed 15m bar
-    "arima_forecast_1h",    # ARIMA(2,0,1) 1-step-ahead forecast of next 1h log return
-    "markov_regime_daily",  # BTC 20-day rolling return regime label: Bull / Bear / Sideways
-    "ob_imbalance",      # Coinbase spot order book: (bid-ask)/(bid+ask) in 0.5% window around strike
-    "ob_path_ask_usd",   # USD ask notional between spot and strike (OTM YES resistance to clear)
-    "ob_path_bid_usd",   # USD bid notional between strike and spot (ITM YES / OTM NO floor support)
-    "ob_ask_frac",       # ask_mass at strike / total book ask (normalized resistance)
-    "ob_bid_wall_pct",   # distance to nearest $500k+ bid wall below spot (fraction of spot, negative)
-    "ob_ask_wall_pct",   # distance to nearest $500k+ ask wall above spot (fraction of spot, positive)
+    "arima_forecast_1h",    # ARIMA(2,0,1) 1-step-ahead forecast of next 1h log return [SHADOW — gate eval after 500+ obs; fixed 2026-06-02 (disp arg)]
+    "markov_regime_daily",   # BTC 3-state HMM: Bull / Bear / Sideways
+    "markov_regime_7state",  # BTC 7-state HMM: Correction / Consolidation / Bull / etc.
+    "ob_imbalance",      # Coinbase spot OB: (bid-ask)/(bid+ask) in 0.5% window around strike [SHADOW — gate eval after 200+ obs]
+    "ob_path_ask_usd",   # USD ask notional between spot and strike (OTM YES resistance to clear) [SHADOW — same batch as ob_imbalance]
+    "ob_path_bid_usd",   # USD bid notional between strike and spot (ITM YES / OTM NO floor support) [SHADOW — same batch as ob_imbalance]
+    "ob_ask_frac",       # ask_mass at strike / total book ask (normalized resistance) [SHADOW — same batch as ob_imbalance]
+    "ob_bid_wall_pct",   # distance to nearest $500k+ bid wall below spot (fraction of spot, negative) [SHADOW — same batch as ob_imbalance]
+    "ob_ask_wall_pct",   # distance to nearest $500k+ ask wall above spot (fraction of spot, positive) [SHADOW — same batch as ob_imbalance]
+    "hmm_vol_state",     # hard Viterbi rank: 0=R0 low-vol, 1=R1 high-vol
+    "hmm_r1_prob",       # soft posterior P(R1|data) 0-1; catches transitions ~5 bars early [SHADOW]
+    "hmm_vol_k10",       # 10-step forward P(R1): posterior @ P^10 [SHADOW]
+    "hmm_time_in_state", # sojourn depth in bars: early=1-3 (spike), mid=4-15, deep=16+ (committed) [SHADOW]
+    "ou_z_score",        # OU AR(1) fit: (spot - ou_mean) / ou_sigma; +ve=extended up, -ve=extended down [SHADOW]
+    "ou_halflife_min",   # OU expected reversion half-life in minutes [SHADOW]
+    "ou_tau_drift",      # OU expected log-return over contract tau: mu+(spot-mu)*exp(-theta*tau_h); tau-aware [SHADOW]
     "resolved_yes",   # filled by outcome_checker.py
     "would_win",      # filled by outcome_checker.py
     "would_pnl",      # filled by outcome_checker.py
@@ -658,9 +877,11 @@ def main() -> None:
     # ETH: 00/01 (60-67% WR, -$66/-$108), 16 (47% WR, -$184)
     # SOL: 15 (53% WR, -$153), 18 (59% WR, -$110)
     # ETH hour 16 removed from SKIP_HOURS 2026-05-17: NO bets at 16UTC have WR=87.5%, Edge=+21.2%, p=0.000.
+    # BTC hour 22 removed from SKIP_HOURS 2026-06-03: 5 wins missed ($1,404) during May 25-27
+    #   live outage; original -$294 figure is stale. Revisit after 30+ hour-22 live observations.
     # YES bets at hour 16 are now blocked per-contract by hour_yes_gate (all assets).
     SKIP_HOURS = {
-        "BTC": {22},
+        "BTC": set(),
         "ETH": set(),
         "SOL": set(),
     }.get(args.asset, set())
@@ -712,6 +933,8 @@ def main() -> None:
     # from vol_score which compares to recent bars regardless of time-of-day.
     _rvol_1h = float("nan")
     _sk4h_bounce = float("nan")
+    _hmm_mtf_state    = -1      # -1 = model unavailable / BTC only
+    _macd_hist_1h_mtf = float("nan")
     try:
         _same_hour_vol = df_confirm[df_confirm.index.hour == now_utc.hour]["volume"]
         _avg_vol_hour  = float(_same_hour_vol.iloc[:-1].tail(30).mean())
@@ -821,6 +1044,94 @@ def main() -> None:
         except Exception as _exc:
             print(f"  [composite] Score error: {_exc} — using pure log-normal fallback")
 
+    # HMM MTF momentum state (BTC only) — classify current market regime via
+    # the 9-state multi-timeframe momentum model.  Single-observation inference
+    # (argmax emission) using features computed from live OHLCV data.
+    if args.asset == "BTC" and _mtf_hmm_model is not None and _mtf_hmm_scaler is not None:
+        try:
+            _c1h_mtf = df_confirm["close"].astype(float)
+            # stoch_k_1h
+            _sk_1h_mtf = float(confirm.stoch_k) if confirm.stoch_k == confirm.stoch_k else 50.0
+            # rsi_1h
+            _delta_1h = _c1h_mtf.diff()
+            _gain_1h  = _delta_1h.clip(lower=0).ewm(span=14, adjust=False).mean()
+            _loss_1h  = (-_delta_1h.clip(upper=0)).ewm(span=14, adjust=False).mean()
+            _rsi_val  = (100 - 100 / (1 + _gain_1h / _loss_1h.replace(0, float("nan")))).iloc[-1]
+            _rsi_1h_mtf = float(_rsi_val) if not math.isnan(float(_rsi_val)) else 50.0
+            # bp_1h: (close-low)/(high-low) of last completed 1h bar
+            _h1 = float(df_confirm["high"].iloc[-1]); _l1 = float(df_confirm["low"].iloc[-1])
+            _bp_1h_mtf = (_c1h_mtf.iloc[-1] - _l1) / (_h1 - _l1) if (_h1 - _l1) > 0 else 0.5
+            # chg_1h: 1h close pct-change × 100
+            _chg_1h_mtf = float(_c1h_mtf.pct_change().iloc[-1] * 100) if len(_c1h_mtf) >= 2 else 0.0
+            if math.isnan(_chg_1h_mtf): _chg_1h_mtf = 0.0
+            # macd_hist_1h (kept for rescue check below)
+            _ema12_1h = _c1h_mtf.ewm(span=12, adjust=False).mean()
+            _ema26_1h = _c1h_mtf.ewm(span=26, adjust=False).mean()
+            _macd_1h  = _ema12_1h - _ema26_1h
+            _macd_sig_1h = _macd_1h.ewm(span=9, adjust=False).mean()
+            _macd_hist_1h_mtf = float((_macd_1h - _macd_sig_1h).iloc[-1])
+            if math.isnan(_macd_hist_1h_mtf): _macd_hist_1h_mtf = 0.0
+            # adx_1h (from confirm)
+            _adx_1h_mtf = float(confirm.adx_1h) if (hasattr(confirm, "adx_1h") and
+                                                     confirm.adx_1h == confirm.adx_1h) else 25.0
+            # stoch_k_5m from live_1m (last completed 5m bar)
+            _sk_5m_mtf = 50.0
+            if live_1m is not None and len(live_1m) >= 20:
+                _df5m = live_1m.resample("5min").agg(
+                    {"high": "max", "low": "min", "close": "last"}).dropna()
+                if len(_df5m) >= 14:
+                    _ll5 = _df5m["low"].rolling(14).min()
+                    _hh5 = _df5m["high"].rolling(14).max()
+                    _rng5 = (_hh5 - _ll5).replace(0, float("nan"))
+                    _s5 = ((_df5m["close"] - _ll5) / _rng5 * 100).iloc[-1]
+                    _sk_5m_mtf = float(_s5) if not math.isnan(float(_s5)) else 50.0
+            # stoch_k_15m from _df_15m_comp
+            _sk_15m_mtf = 50.0
+            _df_15m_mtf = locals().get("_df_15m_comp")
+            if _df_15m_mtf is not None and len(_df_15m_mtf) >= 14:
+                _ll15 = _df_15m_mtf["low"].rolling(14).min()
+                _hh15 = _df_15m_mtf["high"].rolling(14).max()
+                _rng15 = (_hh15 - _ll15).replace(0, float("nan"))
+                _s15 = ((_df_15m_mtf["close"] - _ll15) / _rng15 * 100).iloc[-1]
+                _sk_15m_mtf = float(_s15) if not math.isnan(float(_s15)) else 50.0
+            # macd_hist_4h and adx_4h
+            _macd_hist_4h_mtf = 0.0
+            _adx_4h_mtf = 30.0
+            if _df_4h_comp is not None and len(_df_4h_comp) >= 26:
+                _c4 = _df_4h_comp["close"].astype(float)
+                _h4 = _df_4h_comp["high"].astype(float)
+                _l4 = _df_4h_comp["low"].astype(float)
+                _e12_4 = _c4.ewm(span=12, adjust=False).mean()
+                _e26_4 = _c4.ewm(span=26, adjust=False).mean()
+                _m4 = _e12_4 - _e26_4
+                _ms4 = _m4.ewm(span=9, adjust=False).mean()
+                _mh4 = float((_m4 - _ms4).iloc[-1])
+                _macd_hist_4h_mtf = _mh4 if not math.isnan(_mh4) else 0.0
+                # ADX 4h
+                _tr4 = pd.concat([_h4 - _l4, (_h4 - _c4.shift()).abs(),
+                                   (_l4 - _c4.shift()).abs()], axis=1).max(axis=1)
+                _dp4 = _h4.diff().clip(lower=0)
+                _dm4 = (-_l4.diff()).clip(lower=0)
+                _dp4 = _dp4.where(_dp4 > _dm4, 0)
+                _dm4 = _dm4.where(_dm4 > _h4.diff().clip(lower=0), 0)
+                _atr4 = _tr4.ewm(span=14, adjust=False).mean()
+                _pdi4 = _dp4.ewm(span=14, adjust=False).mean() / _atr4.replace(0, float("nan")) * 100
+                _mdi4 = _dm4.ewm(span=14, adjust=False).mean() / _atr4.replace(0, float("nan")) * 100
+                _dx4  = ((_pdi4 - _mdi4).abs() / (_pdi4 + _mdi4).replace(0, float("nan")) * 100)
+                _adx4_val = float(_dx4.ewm(span=14, adjust=False).mean().iloc[-1])
+                _adx_4h_mtf = _adx4_val if not math.isnan(_adx4_val) else 30.0
+            # Build feature vector and classify state
+            import numpy as _np_mtf_local
+            _fv = _np_mtf_local.array([[
+                _sk_5m_mtf, _sk_15m_mtf, _sk_1h_mtf, _rsi_1h_mtf,
+                _bp_1h_mtf, _chg_1h_mtf, _macd_hist_1h_mtf, _adx_1h_mtf,
+                _macd_hist_4h_mtf, _adx_4h_mtf,
+            ]])
+            _fv_scaled = _mtf_hmm_scaler.transform(_fv)
+            _hmm_mtf_state = int(_mtf_hmm_model.predict(_fv_scaled)[0])
+        except Exception:
+            _hmm_mtf_state = -1
+
     # 1h candle direction: last completed bar (iloc[-2]; iloc[-1] may be partial)
     _1h_candle_green = False
     _1h_candle_red   = False
@@ -889,11 +1200,17 @@ def main() -> None:
             print(f"  [smc] Error: {_smc_exc}")
             _smc = None
 
+    # HMM SMC phase state — predicted once per scan from rolling 24h buffer
+    _hmm_smc_state = _hmm_smc_predict(_smc) if (args.asset == "BTC" and _smc is not None) else -1
+    if _hmm_smc_state >= 0:
+        print(f"  [hmm_smc] state={_hmm_smc_state}  ({_HMM_SMC_STATE_LABELS.get(_hmm_smc_state, '?')})")
+
     # --- Vol regime factor ---
     # Scales blended sigma before score_to_p_model. Validated on 19,947h of OHLCV data.
     # High-vol regime → factor > 1.0 → wider sigma → OTM strikes more reachable.
     # Low-vol regime  → factor < 1.0 → tighter sigma → edge concentrates near ATM.
-    _markov_regime = _get_daily_markov_regime(args.asset)  # fetched early — needed by garch_markov_vol_adjust below
+    _markov_regime  = _get_daily_markov_regime(args.asset)  # fetched early — needed by garch_markov_vol_adjust below
+    _markov_7state  = _get_btc_7state_regime() if args.asset == "BTC" else None
     _vol_factor = 1.0
     _vol_score_dir = 0
     if live_1m is not None and len(live_1m) >= 400:
@@ -1253,6 +1570,12 @@ def main() -> None:
         _rvol_inv_btc = 1.0
         _garch_ve_btc = float("nan")
         _arima_forecast_btc = float("nan")
+        # OU mean reversion — scan-level, all assets
+        _ou_z_score      = float("nan")   # (spot - ou_mean) / ou_sigma; +ve = price extended above mean
+        _ou_halflife_min = float("nan")   # expected reversion half-life in minutes
+        _ou_theta        = float("nan")   # speed of reversion (per hour), cached for tau_drift
+        _ou_mu_val       = float("nan")   # OU long-run mean (price level)
+        _ou_sigma_s      = float("nan")   # stationary std (price level)
         if csv_path_check.exists():
             try:
                 df_existing = pd.read_csv(csv_path_check)
@@ -1307,34 +1630,37 @@ def main() -> None:
                                 _SESSION_TRADED[ticker] = 0.0
                 except Exception:
                     pass
-                # Seed _SIDE_COOLDOWN from recent trades so restarts preserve cooldown state.
+                # Re-seed _SIDE_COOLDOWN from CSV every cycle so concurrent runner instances
+                # (e.g. two paper runners, or paper + live dual) see each other's recent
+                # trades and respect the same 300s cooldown. traded_rows_all is re-read
+                # from disk each cycle so this is safe across processes.
                 # Live runner seeds from live_trades.csv only — paper trades must not
                 # influence live cooldowns (they are independent processes).
+                try:
+                    _cooldown_window = pd.Timestamp(now_utc) - pd.Timedelta(seconds=300)
+                    if args.live or getattr(args, 'dual', False):
+                        _cd_source = pd.DataFrame()
+                        _cd_path = live_trading.get_live_csv_path(args.asset)
+                        if _cd_path.exists():
+                            _cd_df = pd.read_csv(_cd_path)
+                            _cd_source = _cd_df[
+                                pd.to_datetime(_cd_df["logged_at"], utc=True) >= _cooldown_window
+                            ]
+                        _cd_rows = _cd_source[["contract_ticker", "side", "logged_at"]].dropna() if not _cd_source.empty else pd.DataFrame()
+                    else:
+                        _cd_rows = traded_rows_all[["contract_ticker", "side", "logged_at"]].dropna()
+                    for _, r in _cd_rows.iterrows():
+                        _ts = pd.to_datetime(r["logged_at"], utc=True)
+                        if _ts >= _cooldown_window:
+                            _key = (_expiry_prefix(str(r["contract_ticker"])), r["side"])
+                            if _key not in _SIDE_COOLDOWN or _ts > pd.Timestamp(_SIDE_COOLDOWN[_key]):
+                                _SIDE_COOLDOWN[_key] = _ts.to_pydatetime()
+                except Exception:
+                    pass
                 global _SESSION_SEEDED
                 if not _SESSION_SEEDED:
-                    try:
-                        _cooldown_window = pd.Timestamp(now_utc) - pd.Timedelta(seconds=300)
-                        if args.live or getattr(args, 'dual', False):
-                            _cd_source = pd.DataFrame()
-                            _cd_path = live_trading.get_live_csv_path(args.asset)
-                            if _cd_path.exists():
-                                _cd_df = pd.read_csv(_cd_path)
-                                _cd_source = _cd_df[
-                                    pd.to_datetime(_cd_df["logged_at"], utc=True) >= _cooldown_window
-                                ]
-                            _cd_rows = _cd_source[["contract_ticker", "side", "logged_at"]].dropna() if not _cd_source.empty else pd.DataFrame()
-                        else:
-                            _cd_rows = traded_rows_all[["contract_ticker", "side", "logged_at"]].dropna()
-                        for _, r in _cd_rows.iterrows():
-                            _ts = pd.to_datetime(r["logged_at"], utc=True)
-                            if _ts >= _cooldown_window:
-                                _key = (_expiry_prefix(str(r["contract_ticker"])), r["side"])
-                                if _key not in _SIDE_COOLDOWN or _ts > pd.Timestamp(_SIDE_COOLDOWN[_key]):
-                                    _SIDE_COOLDOWN[_key] = _ts.to_pydatetime()
-                        if _SIDE_COOLDOWN:
-                            print(f"  [session] Seeded {len(_SIDE_COOLDOWN)} cooldown entries from CSV")
-                    except Exception:
-                        pass
+                    if _SIDE_COOLDOWN:
+                        print(f"  [session] Seeded {len(_SIDE_COOLDOWN)} cooldown entries from CSV")
                     _SESSION_SEEDED = True
                     if _SESSION_TRADED:
                         print(f"  [session] Seeded {len(_SESSION_TRADED)} open tickers from CSV")
@@ -1362,7 +1688,7 @@ def main() -> None:
                         from statsmodels.tsa.arima.model import ARIMA as _ARIMA
                         _lr_arima = _lr_1h.dropna()
                         _arima_forecast_btc = float(
-                            _ARIMA(_lr_arima, order=(2, 0, 1)).fit(disp=False).forecast(steps=1).iloc[0])
+                            _ARIMA(_lr_arima, order=(2, 0, 1)).fit().forecast(steps=1).iloc[0])
                     except Exception:
                         _arima_forecast_btc = float("nan")
                     print(f"  [drift] rvol_inv={_rvol_inv_btc:.3f} garch_ve={_garch_ve_btc:.6f}")
@@ -1371,7 +1697,46 @@ def main() -> None:
             except Exception:
                 pass
 
+        # ── Ornstein-Uhlenbeck mean reversion fit (log-price, 24h rolling) ──────
+        # AR(1) on log-prices over last 24 bars: log(X_t) = a + b*log(X_{t-1}) + ε
+        # 24-bar window targets intraday reversion relevant to Kalshi tau (5-150 min).
+        # Full-history fit gives half-life ~73k min (multi-year trend) — useless here.
+        # b = e^{-θ}; θ = -ln(b) per hour; mu_log = a/(1-b) (OU log-price mean)
+        # ou_z_score:    (log(spot) - mu_log) / sigma_log — signed extension in log units
+        # ou_halflife_min: ln(2)/θ × 60 — minutes until half the deviation reverts
+        # ou_tau_drift:  E[log_return over τ] = (mu_log - log(spot)) × (1 - e^{-θτ/60})
+        #                negative z → positive tau_drift → supports YES; and vice versa
+        try:
+            import numpy as _np_ou
+            _ou_lp = _np_ou.log(df_confirm["close"].astype(float).dropna().values[-25:])
+            if len(_ou_lp) >= 20:
+                _ou_lx = _ou_lp[:-1]; _ou_ly = _ou_lp[1:]
+                _ou_b  = float(_np_ou.clip(
+                    _np_ou.cov(_ou_lx, _ou_ly)[0, 1] / (_np_ou.var(_ou_lx) + 1e-12),
+                    0.001, 0.9999))
+                _ou_a      = float(_np_ou.mean(_ou_ly) - _ou_b * _np_ou.mean(_ou_lx))
+                _ou_mu_val = _ou_a / (1.0 - _ou_b)        # OU mean in log-price space
+                _ou_theta  = -float(_np_ou.log(_ou_b))    # reversion speed per hour
+                _ou_sigma_s = float(_np_ou.std(_ou_lp))   # log-price stationary std
+                if _ou_sigma_s > 0 and _ou_theta > 0:
+                    _ou_z_score      = round((math.log(spot) - _ou_mu_val) / _ou_sigma_s, 4)
+                    _ou_halflife_min = round(math.log(2) / _ou_theta * 60.0, 1)
+                    print(f"  [ou] z={_ou_z_score:+.3f}  mu_px={math.exp(_ou_mu_val):,.0f}  "
+                          f"hl={_ou_halflife_min:.0f}min  "
+                          f"({'YES' if _ou_z_score < -0.5 else 'NO' if _ou_z_score > 0.5 else 'neutral'} bias)")
+        except Exception:
+            pass
+
         # _markov_regime already fetched above (before garch_markov_vol_adjust block).
+
+        # Semi-Markov vol-regime signal — computed once per scan cycle, used by gate + CSV.
+        # Returns (hard_rank, r1_prob, r1_k10, time_in_state); None if model unavailable.
+        _hmm_vol_probs = _vol1h_hmm_probs(live_1m) if (args.asset == "BTC" and live_1m is not None) else None
+        if _hmm_vol_probs is not None:
+            _hmm_r, _hmm_tis = _hmm_vol_probs[0], _hmm_vol_probs[3]
+            _tis_zone = ("early" if _hmm_tis <= 3 else "mid" if _hmm_tis <= 15 else "deep")
+            print(f"  [vol_hmm] R{_hmm_r}  t={_hmm_tis} bars ({_tis_zone})  "
+                  f"r1_prob={_hmm_vol_probs[1]:.3f}  k10={_hmm_vol_probs[2]:.3f}")
 
         for c in ladder:
             _p_gbdt_c     = None   # BTC LGBM p(YES) for this contract (shadow mode only)
@@ -1614,14 +1979,15 @@ def main() -> None:
             # Only OTM YES bets need the reachability gate — ITM YES bets are already in the money,
             # and NO bets are governed by z_abs_no_min below. vol_factor widens/narrows the
             # band with the vol regime. BASE_Z=2.0 gives a 1.2–2.8σ range across vol_factor [0.60,1.40].
-            _otm_yes_blocked = False
-            _smc_yes_blocked = False
+            _otm_yes_blocked    = False
+            _otm_yes_block_gate = ""
+            _smc_yes_blocked    = False
             if args.asset == "BTC" and _composite_computed and sigma_tau_c > 0 and offset_c > 0:
                 _z_strike_abs = abs(math.log(s_k / spot) / sigma_tau_c)
                 _btc_vol_gate_z = 2.0 * _vol_factor
                 if _z_strike_abs > _btc_vol_gate_z:
                     print(f"  [btc_vol_gate] BLOCK YES {c['ticker']} — |z|={_z_strike_abs:.3f} > {_btc_vol_gate_z:.3f} (vol_factor={_vol_factor:.3f})")
-                    _otm_yes_blocked = True
+                    _otm_yes_blocked = True; _otm_yes_block_gate = "btc_vol_gate"
 
             # [BTC isotonic calibration DISABLED — trained on drift-biased p_model values.
             # Reform uses k_drift=0.8 + vol_factor-as-gate; isotonic retrain required
@@ -1641,6 +2007,10 @@ def main() -> None:
             #   No rescue condition found within blocked group (best: 1h MACD neg at 50% WR = still losing).
             # Rationale: Near-ITM YES fails when 4h is extended because BTC retraces before expiry.
             #   The 1h composite looks bullish (high p_up) but the 4h exhaustion overrides it.
+            # 2026-05-30 reform: changed OR → AND. MACD hist is in absolute $ terms and fires constantly
+            #   at mild uptrends (RSI=57, MACD=126 = only 0.17% of price). MACD-only blocks have
+            #   76.8% YES rate (+3.6% edge) vs RSI+MACD blocks at 63.5% (-9.3% edge). Scan archive
+            #   simulation (250 expiry cycles, May 18-30): OR=$164, AND=$545, improvement=+$381.
             if args.asset == "BTC" and _composite_computed and pm > 0.50 and not _otm_yes_blocked:
                 if _df_4h_comp is not None and len(_df_4h_comp) >= 26:
                     _c4h = _df_4h_comp["close"]
@@ -1653,11 +2023,22 @@ def main() -> None:
                     _macd_4h    = _ema12_4h - _ema26_4h
                     _macd_sig_4h= _macd_4h.ewm(span=9, adjust=False).mean()
                     _macd_hist_4h = float((_macd_4h - _macd_sig_4h).iloc[-2])
-                    if _rsi_4h > 62 or _macd_hist_4h > 80:
-                        _otm_yes_blocked = True
+                    if _rsi_4h > 62 and _macd_hist_4h > 80:
+                        _otm_yes_blocked = True; _otm_yes_block_gate = "near_itm_gate"
                         print(f"  [near_itm_gate] BLOCK YES {c['ticker']} — pm={pm:.3f}>0.50, "
                               f"4h_rsi={_rsi_4h:.1f}, 4h_macd_hist={_macd_hist_4h:.1f} "
                               f"(4h overbought, Near-ITM YES gate)")
+                        gate_audit_logger.log_block(
+                            gate_name="near_itm_gate",
+                            ticker=c["ticker"], asset=args.asset, side="yes",
+                            pm=pm, p_model=p_model_comp or float("nan"),
+                            net_edge=max(0.0, (p_model_comp or 0.0) - pm - 0.04),
+                            offset_pct=offset_c, strike=s_k, spot=spot,
+                            tau_minutes=tau_c, count=0, kelly_fraction=0.0,
+                            close_ts=c.get("close_time", ""),
+                            signals={"rsi_4h": round(_rsi_4h, 1), "macd_hist_4h": round(_macd_hist_4h, 1)},
+                            now_utc=now_utc, bankroll=args.bankroll,
+                        )
 
             # [cg_fr_gate REMOVED 2026-05-17]
             # gate fired on fr_vol>0 (positive funding = crowded longs).
@@ -1675,7 +2056,7 @@ def main() -> None:
                 if confirm.ema_stack_bias == 1 and _active_rev <= -4 and _sk_rev > 55:
                     _rev_rescue = (pm > 0.65)
                     if not _rev_rescue:
-                        _otm_yes_blocked = True
+                        _otm_yes_blocked = True; _otm_yes_block_gate = "rev_div_gate"
                         print(f"  [rev_div_gate] BLOCK YES {c['ticker']} — ema=+1, rev={_active_rev}<=-4, stoch_k={_sk_rev:.1f}>55, pm={pm:.3f}")
                     else:
                         print(f"  [rev_div_gate] RESCUE YES {c['ticker']} — ema=+1, rev={_active_rev}, stoch_k={_sk_rev:.1f} BUT pm={pm:.3f}>0.65 (deep ITM)")
@@ -1687,7 +2068,7 @@ def main() -> None:
                 if pm >= 0.50:
                     print(f"  [cg_oi_stable_yes_gate] RESCUE YES {c['ticker']} — oi_stable_4h={_cg.oi_stable_pct_4h:+.2f}%>2% BUT pm={pm:.3f}>=0.50 (ITM)")
                 else:
-                    _otm_yes_blocked = True
+                    _otm_yes_blocked = True; _otm_yes_block_gate = "cg_oi_stable_yes_gate"
                     print(f"  [cg_oi_stable_yes_gate] BLOCK YES {c['ticker']} — oi_stable_4h={_cg.oi_stable_pct_4h:+.2f}%>2%, pm={pm:.3f}<0.50 (OTM, longs crowding)")
 
             # [vol_eff_low_yes_gate — BTC YES]
@@ -1701,7 +2082,7 @@ def main() -> None:
             if args.asset == "BTC" and not _otm_yes_blocked and vol_eff_c < 0.000318:
                 _veff_rescue = (prob_c.z_score <= -0.20)
                 if not _veff_rescue:
-                    _otm_yes_blocked = True
+                    _otm_yes_blocked = True; _otm_yes_block_gate = "vol_eff_low_yes_gate"
                     print(f"  [vol_eff_low_yes_gate] BLOCK YES {c['ticker']} — "
                           f"vol_eff={vol_eff_c:.6f}<0.000318, z_score={prob_c.z_score:.3f}>-0.20 "
                           f"(low-vol + OTM-leaning, outcome indecisive)")
@@ -1720,12 +2101,12 @@ def main() -> None:
             if args.asset == "BTC" and _composite_computed and not _otm_yes_blocked and confirm.ema_stack_bias == 0:
                 # G2: active selling pressure below VWAP + OTM contract
                 if confirm.vwap_score == -1 and pm < 0.60:
-                    _otm_yes_blocked = True
+                    _otm_yes_blocked = True; _otm_yes_block_gate = "neutral_ema_g2"
                     print(f"  [neutral_ema_g2] BLOCK YES {c['ticker']} — ema=0, vwap=-1, pm={pm:.3f}<0.60 (bearish VWAP, OTM)")
 
                 # G3: equilibrium tipping bearish (composite trend rolling over)
                 if not _otm_yes_blocked and _active_trend == -1:
-                    _otm_yes_blocked = True
+                    _otm_yes_blocked = True; _otm_yes_block_gate = "neutral_ema_g3"
                     print(f"  [neutral_ema_g3] BLOCK YES {c['ticker']} — ema=0, comp_trend=-1 (equilibrium tipping bearish)")
 
             # [SMC YES gate — BTC composite only]
@@ -1774,10 +2155,10 @@ def main() -> None:
                     _smc_rescue_why = "ema=1+fund=-1"        # WR=96.3% edge=+41.8% n=459
                 elif struct.structure_bias == 0 and confirm.funding_bias == -1:
                     _smc_rescue_why = "struct=0+fund=-1"     # WR=77.9% edge=+19.9% n=1616
-                elif _smc_sk >= 80.0 and struct.structure_bias == 0:
-                    _smc_rescue_why = "stoch>=80+struct=0"   # WR=71.8% edge=+12.0% n=2669
-                elif _smc_sk >= 80.0 and confirm.ema_stack_bias == 1:
-                    _smc_rescue_why = "stoch>=80+ema=1"      # WR=70.1% edge=+9.9%  n=3065
+                elif _smc_sk >= 70.0 and struct.structure_bias == 0:
+                    _smc_rescue_why = "stoch>=70+struct=0"   # WR=75.5%@>=80 / 40.3%@[70,80)+struct=0; BE=36.2%; +$4,563 would_pnl
+                elif _smc_sk >= 70.0 and confirm.ema_stack_bias == 1:
+                    _smc_rescue_why = "stoch>=70+ema=1"      # WR=72.2%@>=80 / 49.8%@[70,80)+ema=1;   BE=49.2%; +$2,821 would_pnl
                 elif _active_rev <= -2 and confirm.ema_stack_bias == 1:
                     _smc_rescue_why = "cr<=-2+ema=1"         # WR=68.0% edge=+7.0%  n=3888
                 elif _active_trend == 0 and confirm.funding_bias == -1:
@@ -1912,11 +2293,30 @@ def main() -> None:
                         offset_pct=offset_c, force_side="yes")
                 # [CoinGlass stablecoin OI 4h gate — BTC NO]
                 # Backtest (1h paper trades): oi_stable_chg_4h>1% blocks 82 NO → WR=56.1%, -$545.
-                # No rescue: all subgroups net-negative. Crowded longs → NO bets lose.
+                # Rescue: pm<0.50 (NO is ITM — strike above spot; longs must push BTC up to flip outcome).
                 # stoch_bounce rescues from this gate when overbought (stoch>83).
-                _btc_oi_no_blocked = (not _stoch_bounce_no) and (_cg is not None and _cg.oi_stable_pct_4h > 1.0)
+                _btc_oi_no_blocked = (not _stoch_bounce_no) and (_cg is not None and _cg.oi_stable_pct_4h > 1.0 and pm >= 0.50)
                 if _btc_oi_no_blocked:
-                    print(f"  [cg_oi_stable_no_gate] BLOCK NO {c['ticker']} — oi_stable_4h={_cg.oi_stable_pct_4h:+.2f}%>1% (crowded longs, NO unlikely)")
+                    print(f"  [cg_oi_stable_no_gate] BLOCK NO {c['ticker']} — oi_stable_4h={_cg.oi_stable_pct_4h:+.2f}%>1%, pm={pm:.3f}>=0.50 (OTM NO, crowded longs)")
+                elif _cg is not None and _cg.oi_stable_pct_4h > 1.0 and pm < 0.50:
+                    print(f"  [cg_oi_stable_no_gate] RESCUE NO {c['ticker']} — oi_stable_4h={_cg.oi_stable_pct_4h:+.2f}%>1% BUT pm={pm:.3f}<0.50 (ITM NO, longs need to push BTC up)")
+                # [hmm_smc_s2_no_gate — BTC NO, State 2 Transition/ChoCH]
+                # During ChoCH, NO bets at pm>0.80 (deep ITM YES) fail catastrophically:
+                # n=112, WR=8%, PnL=-$2,398. Contract expires YES before structure flip completes.
+                # Rescue: ema_stack=-1 + rvol_inv>0.8 (genuine orderly breakdown) OR bp_5m<0.30 (real sellers).
+                # Without rescue: saves full -$2,398; rescued bucket (ema=-1+low-rvol): WR=66.1%, +$1,551.
+                if not _btc_oi_no_blocked and not _stoch_bounce_no and _hmm_smc_state == 2 and pm > 0.80:
+                    _bp5m_s2   = _bp_5m if _bp_5m is not None else 0.5
+                    _s2_rescue = (confirm.ema_stack_bias == -1 and _rvol_inv_btc > 0.8) or (_bp5m_s2 < 0.30)
+                    if _s2_rescue:
+                        _s2_why = ("ema=-1+rvol>0.8" if confirm.ema_stack_bias == -1 and _rvol_inv_btc > 0.8
+                                   else "bp_5m<0.30")
+                        print(f"  [hmm_smc_s2_no_gate] RESCUE NO {c['ticker']} — "
+                              f"State2(ChoCH) pm={pm:.3f}>0.80 BUT {_s2_why} (genuine breakdown)")
+                    else:
+                        _btc_oi_no_blocked = True
+                        print(f"  [hmm_smc_s2_no_gate] BLOCK NO {c['ticker']} — "
+                              f"State2(ChoCH), pm={pm:.3f}>0.80 (WR=8% historically, structure flip too slow)")
                 _p_no_eval = _p_bounce if _stoch_bounce_no else (1.0 - _p_no_btc)
                 _dec_no = None if _btc_oi_no_blocked else evaluate_trade(
                     struct.structure_bias, confirm.confirmation_bias,
@@ -1935,6 +2335,51 @@ def main() -> None:
                 elif _dec_no is not None:
                     dec_c = _dec_no
                 else:
+                    # Both YES and NO hard-blocked before dec_c was computed — log each
+                    # side to blocked_trades.csv so these contracts are visible in analysis.
+                    _bt_signals = {
+                        "ema_stack_bias":    confirm.ema_stack_bias,
+                        "composite_trend":   _active_trend,
+                        "composite_rev":     _active_rev,
+                        "composite_p_up":    _comp_p_up_c,
+                        "stoch_k":           confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else None,
+                        "vwap_stretch":      confirm.stretch_score,
+                        "vol_score":         confirm.vol_score,
+                        "vpin_score":        confirm.vpin_score,
+                        "obi_score":         confirm.obi_score,
+                        "ema_stretch":       confirm.ema_stretch_score,
+                        "structure_bias":    struct.structure_bias,
+                        "funding_bias":      confirm.funding_bias,
+                        "sharp_move_active": _sharp_move_active,
+                        "liq_score":         _liq_signal.liq_score             if _liq_signal else "",
+                        "liq_bias":          round(_liq_signal.liq_bias, 4)    if _liq_signal else "",
+                        "ls_long_pct":       round(_liq_signal.ls_long_pct, 2) if _liq_signal else "",
+                        "oi_chg_pct":        round(_liq_signal.oi_chg_pct, 4)  if _liq_signal else "",
+                    }
+                    _yes_edge = p_yes_adj_c - pm
+                    # near_itm_gate already logged at fire point; skip to avoid double-log.
+                    if _otm_yes_block_gate != "near_itm_gate":
+                        gate_audit_logger.log_block(
+                            gate_name=_otm_yes_block_gate or "btc_otm_yes_hardblock",
+                            ticker=c["ticker"], asset=args.asset, side="yes",
+                            pm=pm, p_model=p_model_comp, net_edge=_yes_edge,
+                            offset_pct=offset_c, strike=s_k, spot=spot,
+                            tau_minutes=tau_c, count=0, kelly_fraction=0.0,
+                            close_ts=c.get("close_time", ""),
+                            signals=_bt_signals, now_utc=now_utc, bankroll=args.bankroll,
+                        )
+                    _no_edge = (_p_no_btc - (1.0 - pm)) if _p_no_btc is not None else float("nan")
+                    gate_audit_logger.log_block(
+                        gate_name="cg_oi_stable_no_gate",
+                        ticker=c["ticker"], asset=args.asset, side="no",
+                        pm=pm,
+                        p_model=(1.0 - _p_no_btc) if _p_no_btc is not None else None,
+                        net_edge=_no_edge,
+                        offset_pct=offset_c, strike=s_k, spot=spot,
+                        tau_minutes=tau_c, count=0, kelly_fraction=0.0,
+                        close_ts=c.get("close_time", ""),
+                        signals=_bt_signals, now_utc=now_utc, bankroll=args.bankroll,
+                    )
                     continue  # both YES and NO hard-blocked — GBDT does not override
             elif args.asset == "ETH" and _p_no_eth is not None:
                 # ETH HYBRID dual-eval:
@@ -2302,25 +2747,11 @@ def main() -> None:
                     _log_block("eth_yesitm_no_gate")
                     continue
 
-            # [eth_bp_gate] Block ETH bets when 5m buying pressure disagrees with bet direction.
-            # bp_5m < 0.40 = sellers dominated last 5m bar — market momentum bearish, don't bet YES.
-            # bp_5m > 0.60 = buyers dominated last 5m bar — market momentum bullish, don't bet NO.
-            # Backtest (567 resolved ETH hourly trades via parquet):
-            #   Block YES when bp<0.40: N=457, WR=75.3%, +$1,406 (+$315 vs $1,091 baseline)
-            #   Block NO  when bp>0.60: N=450, WR=73.3%, +$1,463 (+$372 vs baseline)
-            #   Combined YES<0.40 + NO>0.60: N=340, WR=77.4%, PnL=+$1,778 (+$687 vs baseline)
-            if (dec_c.decision == "trade" and args.asset == "ETH"
-                    and _bp_5m is not None):
-                if dec_c.side == "yes" and _bp_5m < 0.40:
-                    print(f"  [eth_bp_gate] BLOCK YES {c['ticker']} — "
-                          f"bp={_bp_5m:.3f}<0.40 (bearish 5m pressure)")
-                    _log_block("eth_bp_gate")
-                    continue
-                elif dec_c.side == "no" and _bp_5m > 0.60:
-                    print(f"  [eth_bp_gate] BLOCK NO {c['ticker']} — "
-                          f"bp={_bp_5m:.3f}>0.60 (bullish 5m pressure)")
-                    _log_block("eth_bp_gate")
-                    continue
+            # eth_bp_gate REMOVED 2026-05-31: blocked 82% WR trades (+$1,109 missed alltime).
+            # Original backtest was on a different market distribution. Live tracking since
+            # May 21 showed 128 NO blocks at 84% WR (+$983 missed), 20 YES blocks at 70% WR.
+            # Near-ATM NO bets (offset<2%) never appeared in the blocked set — the gate only
+            # fired on deep-OTM NO bets where 5m bp is irrelevant to 1h strike outcome.
 
             # [eth_yes_deepotm_gate] Block YES when offset_c>=0.001 (>=0.10% OTM = strike >$2+ above spot).
             # Analysis (2026-05-23, n=25): WR=0.0%, BE=15.3%, P&L=-$1,068.
@@ -2355,33 +2786,34 @@ def main() -> None:
                 _log_block("eth_yes_chg5m_vwap_gate")
                 continue
 
-            # [eth_no_vwap_stretch2_gate] Block NO when vwap_stretch==2 unless tau>40+vol_score=0.
-            # Analysis (2026-05-23, n=43): WR=65.1%, BE=72.3%, P&L=-$198.
-            # vol_score=-1 (n=13): WR=46.2%, -$239 — low-vol extreme stretch fails badly.
-            # tau<20 (n=6): WR=16.7%, -$208 — near-expiry extreme stretch also fails.
-            # Rescue: tau>40 + vol_score=0 → n=22, WR=81.8%, +$148.
-            # Also: tau>40 + ema_stack_bias=-1 → n=25, WR=80.0%, +$142.
+            # [eth_no_vwap_stretch2_gate] Block NO when vwap_stretch==2 AND composite_rev<=-1.
+            # Refined 2026-06-04: adding rev<=-1 condition (overbought context).
+            # Original gate (stretch==2 all) failed perm p=0.996 (WR≈bkev, no signal).
+            # Refined (stretch==2 + rev<=-1): perm p=0.000, WF p=0.000; OOS edge=-3.3%.
+            #   n=1411 (36 expiries): WR=21.3% vs bkev=23.9%; rev>-1 rows (8854) have edge=+0.6% — pass through.
+            # Rescue: tau>40 + vol_score=0 → still valid (WR=18.3% vs bkev=26.7% within refined set).
             if (args.asset == "ETH"
                     and dec_c.side == "no"
-                    and getattr(confirm, "stretch_score", None) == 2):
+                    and getattr(confirm, "stretch_score", None) == 2
+                    and _active_rev <= -1):
                 _tau_eth = float(tau_c) if tau_c is not None else 0.0
                 _vol_sc_eth = getattr(confirm, "vol_score", None)
                 _stretch2_rescue = (_tau_eth > 40 and _vol_sc_eth == 0)
                 if not _stretch2_rescue:
                     print(f"  [eth_no_vwap_stretch2_gate] BLOCK NO {c['ticker']} — "
-                          f"vwap_stretch=2, tau={_tau_eth:.0f}min, vol_score={_vol_sc_eth} "
-                          f"(rescue needs tau>40+vol=0)")
+                          f"vwap_stretch=2, rev={_active_rev}<=-1, tau={_tau_eth:.0f}min, vol_score={_vol_sc_eth}")
                     _log_block("eth_no_vwap_stretch2_gate")
                     continue
                 else:
                     print(f"  [eth_no_vwap_stretch2_gate] RESCUE NO {c['ticker']} — "
-                          f"vwap_stretch=2 but tau={_tau_eth:.0f}>40+vol=0 (WR=81.8%)")
+                          f"vwap_stretch=2+rev<=-1 but tau={_tau_eth:.0f}>40+vol=0")
 
-            # [eth_no_adx_gate] Block NO when adx_1h>40 unless ema_stack_bias==-1 OR vol_ratio normal.
-            # Analysis (2026-05-23, n=22): WR=63.6%, BE=72.0%, P&L=-$142.
-            # vol_ratio<0.80 (n=12): WR=41.7%, -$238 — low vol in strong trend, NO fails.
-            # Rescue: ema_stack_bias==-1 → n=9, WR=77.8%, +$23.
-            # Rescue: vol_ratio∈[0.80,1.20) → n=8, WR=87.5%, +$72.
+            # [eth_no_adx_gate] Block NO when adx_1h>60 unless ema==-1 OR vwap_stretch==-2.
+            # Refined 2026-06-04: raised threshold 40→60; replaced vol_ratio rescue with vwap_stretch==-2.
+            # Original gate (adx>40) failed perm p=0.980 (adx 40-60 rows had edge≈0, diluting signal).
+            # Refined (adx>60): perm p=0.000, WF p=0.000; blocked edge=-3.9% (1423 rows, 8 expiries).
+            # Rescue ema==-1: edge=+2.8% (950 rows, 5 exp) — strong downtrend, NO bets win.
+            # Rescue vwap_stretch==-2: edge=+5.3% (65 rows, 3 exp) — extended below VWAP, bounce risk.
             _adx_eth = (float(confirm.adx_1h)
                         if hasattr(confirm, "adx_1h")
                         and confirm.adx_1h is not None
@@ -2390,21 +2822,20 @@ def main() -> None:
             if (args.asset == "ETH"
                     and dec_c.side == "no"
                     and _adx_eth is not None
-                    and _adx_eth > 40):
-                _ema_eth = getattr(confirm, "ema_stack_bias", None)
-                _vr_eth2 = vol_ratio_c if vol_ratio_c is not None else 1.0
-                _adx_rescue = (_ema_eth == -1 or (0.80 <= _vr_eth2 < 1.20))
+                    and _adx_eth > 60):
+                _ema_eth    = getattr(confirm, "ema_stack_bias", None)
+                _stretch_eth = getattr(confirm, "stretch_score", None)
+                _adx_rescue = (_ema_eth == -1 or _stretch_eth == -2)
                 if not _adx_rescue:
                     print(f"  [eth_no_adx_gate] BLOCK NO {c['ticker']} — "
-                          f"adx_1h={_adx_eth:.1f}>40, ema={_ema_eth}, "
-                          f"vol_ratio={_vr_eth2:.2f} "
-                          f"(rescue needs ema=-1 or vol_ratio 0.80-1.20)")
+                          f"adx_1h={_adx_eth:.1f}>60, ema={_ema_eth}, vwap_stretch={_stretch_eth} "
+                          f"(rescue: ema=-1 or vwap_stretch=-2)")
                     _log_block("eth_no_adx_gate")
                     continue
                 else:
-                    _rsrc_eth = f"ema={_ema_eth}=-1" if _ema_eth == -1 else f"vol_ratio={_vr_eth2:.2f}∈[0.80,1.20)"
+                    _rsrc_eth = "ema=-1" if _ema_eth == -1 else "vwap_stretch=-2"
                     print(f"  [eth_no_adx_gate] RESCUE NO {c['ticker']} — "
-                          f"adx_1h={_adx_eth:.1f}>40 but {_rsrc_eth} (WR=77-87%)")
+                          f"adx_1h={_adx_eth:.1f}>60 but {_rsrc_eth}")
 
             if dec_c.side == "no" and args.asset == "SOL" and offset_c < 0.002:
                 print(f"  [scan] Skipping {c['ticker']} — SOL NO offset={offset_c*100:+.3f}% < 0.20% minimum")
@@ -2414,30 +2845,66 @@ def main() -> None:
 
             # btc_pup_gate removed: replaced by vol_factor-as-gate + k_drift=0.8 reform.
 
-            # [markov_sideways_gate — BTC YES + NO]
-            # Block trades when the BTC 20-day rolling return is between ±2% (Sideways macro).
-            # Analysis: 114 BTC trades in Sideways (Apr–May 2026): WR=34.2%, P&L=-$735 (-18pp vs BE).
-            #   YES side: WR=33.3%, n=21 — no rescue found → hard block.
-            #   NO side:  WR=34.4%, n=93 overall; rescue: p_market≤0.39 → WR=87.5%, n=24, +$38.
-            # Mechanism: flat 20-day macro = no sustained directional bias; intraday signals
-            # chase noise in both directions. Deep OTM NO (pm≤0.39) wins regardless because
-            # the strike is too far for a choppy market to reach.
-            # Regime fetched once per scan cycle via _get_btc_daily_markov_regime() (cached by date).
-            if args.asset == "BTC" and _markov_regime == "Sideways":
-                if dec_c.side == "yes":
-                    print(f"  [markov_sideways_gate] BLOCK YES {c['ticker']} — "
-                          f"daily Markov=Sideways, flat macro (YES WR=33% in Sideways)")
-                    _log_block("markov_sideways_gate")
-                    continue
-                elif dec_c.side == "no" and pm > 0.39:
-                    print(f"  [markov_sideways_gate] BLOCK NO {c['ticker']} — "
-                          f"daily Markov=Sideways, pm={pm:.3f}>0.39 (NO WR=34% in Sideways)")
-                    _log_block("markov_sideways_gate")
-                    continue
-                elif dec_c.side == "no" and pm <= 0.39:
-                    print(f"  [markov_sideways_gate] RESCUE NO {c['ticker']} — "
-                          f"daily Markov=Sideways but pm={pm:.3f}≤0.39 "
-                          f"(deep OTM NO rescue: WR=87.5% in Sideways)")
+            # [markov_7state_gate — BTC Correction + Consolidation]
+            # Replaces 3-state markov_sideways_gate. Uses 7-state HMM (log_ret, rv20d, ret5d, ret20d).
+            # Validated 2026-06-04 on scan archive (real Kalshi payoffs):
+            #
+            # CORRECTION (YES=-9.4%, NO=+6.7% baseline):
+            #   YES BLOCK by default.
+            #   Rescue YES if (c_trend==0 AND ema∈{-1,0}) [edge=+8.0%] OR rvol∈[0.7,1.0) [+6.4%].
+            #     Causal: neutral 4h trend = correction paused, price may bounce.
+            #   NO BLOCK if c_trend==0 [edge=-5.0%, perm p=0.000] OR rvol∈[0.7,1.0) [-9.2%, p=0.000].
+            #     Causal: neutral trend = no directional drift, NO bets lose on chop.
+            #
+            # CONSOLIDATION (YES=-2.1%, NO=+2.7% baseline):
+            #   YES HARD-BLOCK if ema==+1 [edge=-10.6%, perm p=0.000] OR c_trend==2 [-10.1%, WF p=0.006].
+            #     Causal: bullish EMA / mild uptrend in low-vol range → price extended, YES fails.
+            #   YES SOFT otherwise (let normal edge gates filter).
+            #   NO ALLOW across all conditions (edge positive everywhere).
+            #
+            # Other states (Recovery, Slow_Bull, Bull, Explosive_Bull, Crash_Bear):
+            #   No additional gate — unvalidated in current archive. Monitor as regimes occur.
+            if args.asset == "BTC" and _markov_7state is not None:
+                _7st = _markov_7state
+                _ct  = _active_trend                                           # composite_trend int
+                _ema = confirm.ema_stack_bias                                  # -1 / 0 / +1
+                _rv1 = _rvol_1h if (_rvol_1h == _rvol_1h) else 1.0           # relative vol
+
+                if _7st == "Correction":
+                    if dec_c.side == "yes":
+                        _rescue_ct  = (_ct == 0 and _ema in (-1, 0))
+                        _rescue_rv  = (0.7 <= _rv1 < 1.0)
+                        if not (_rescue_ct or _rescue_rv):
+                            print(f"  [markov_7state_gate] BLOCK YES {c['ticker']} — "
+                                  f"Correction, c_trend={_ct}, ema={_ema:+d}, rvol={_rv1:.2f} "
+                                  f"(YES edge=-9.4%; rescue needs c_trend=0+ema∈{{-1,0}} or rvol[0.7,1.0))")
+                            _log_block("markov_7state_gate")
+                            continue
+                        else:
+                            _why = ("c_trend=0+ema∈{-1,0}" if _rescue_ct else f"rvol={_rv1:.2f}∈[0.7,1.0)")
+                            print(f"  [markov_7state_gate] RESCUE YES {c['ticker']} — "
+                                  f"Correction but {_why} (edge=+6–15%)")
+                    elif dec_c.side == "no":
+                        _block_ct = (_ct == 0)
+                        _block_rv = (0.7 <= _rv1 < 1.0)
+                        if _block_ct or _block_rv:
+                            _why = ("c_trend=0" if _block_ct else f"rvol={_rv1:.2f}∈[0.7,1.0)")
+                            print(f"  [markov_7state_gate] BLOCK NO {c['ticker']} — "
+                                  f"Correction+{_why} (NO edge=-5 to -9%; perm p=0.000)")
+                            _log_block("markov_7state_gate")
+                            continue
+
+                elif _7st == "Consolidation":
+                    if dec_c.side == "yes":
+                        _hard = (_ema == 1 or _ct == 2)
+                        if _hard:
+                            _why = (f"ema={_ema:+d}=+1" if _ema == 1 else f"c_trend={_ct}=2")
+                            print(f"  [markov_7state_gate] BLOCK YES {c['ticker']} — "
+                                  f"Consolidation+{_why} (YES edge=-10%; perm p=0.000)")
+                            _log_block("markov_7state_gate")
+                            continue
+                        # else: SOFT — let normal edge gates handle
+                    # NO: ALLOW (edge=+2.7% across all conditions)
 
             # [btc_highpm_no_gate] Block BTC NO when pm>0.70 AND composite_rev>=0.
             # Analysis (2026-05-23, n=115 resolved): BTC NO bets at pm>0.70 → WR=20.0%, PnL=-$567.
@@ -2458,23 +2925,30 @@ def main() -> None:
                 _log_block("btc_highpm_no_gate")
                 continue
 
-            # [rvol_gate] Block BTC YES when relative volume (current 1h vs 30-bar avg for
-            # same hour) is below 0.80 — quiet period, price unlikely to reach strike.
-            # mispricing_analysis (2026-05-17): rvol<0.5 YES: n=128, WR=38.3%, BE=46.5%, -$105, p=0.023.
-            # ALL rvol<1.0 YES trades show negative edge vs breakeven. Use 0.80 as threshold.
-            # Rescue: vpin==1 (informed buying) OR liq_bias==1.0 (all liquidations are short squeeze).
-            # blocked_trades sweep 2026-05-24: rescue n=62 deduped WR=63.3% vs block n=92 WR=45.7%.
-            if (args.asset == "BTC" and dec_c.side == "yes"
-                    and not math.isnan(_rvol_1h) and _rvol_1h < 0.80):
-                _rvol_liq_bias = float(_liq_signal.liq_bias) if _liq_signal is not None else float("nan")
-                _rvol_rescued = (confirm.vpin_score == 1) or (_rvol_liq_bias == 1.0)
-                if _rvol_rescued:
-                    print(f"  [rvol_gate] RESCUED YES {c['ticker']} — rvol={_rvol_1h:.3f}<0.80 BUT "
-                          f"vpin={confirm.vpin_score}/liq_bias={_rvol_liq_bias:.3f} (informed buying or short squeeze)")
-                else:
-                    print(f"  [rvol_gate] BLOCK YES {c['ticker']} — rvol_1h={_rvol_1h:.3f}<0.80 (quiet hour, YES underperforms)")
-                    _log_block("rvol_gate")
+            # [btc_pup_direction_gate] Block when p_up_v2 is at extremes — strongly bullish
+            # signal should block NO bets; strongly bearish should block YES bets.
+            # Analysis (98 resolved BTC NO bets with p_up_v2 logged):
+            #   p_up_v2>=0.70: N=2, WR=0%, PnL=-$100 — both lost, 0 wins
+            #   p_up_v2>=0.65: N=3, WR=33%, net negative at extremes
+            # Symmetric: p_up_v2<=0.35 applied to YES (mirror logic, thin data — monitor).
+            # Causal: at extremes the LightGBM direction model strongly predicts movement
+            # that fights the bet side. Not a drift multiplier — a hard directional filter.
+            if args.asset == "BTC" and _p_up_v2 is not None:
+                if dec_c.side == "no" and _p_up_v2 >= 0.65:
+                    print(f"  [btc_pup_direction_gate] BLOCK NO {c['ticker']} — "
+                          f"p_up_v2={_p_up_v2:.3f}>=0.65 (strongly bullish, NO fights trend)")
+                    _log_block("btc_pup_direction_gate")
                     continue
+                if dec_c.side == "yes" and _p_up_v2 <= 0.35:
+                    print(f"  [btc_pup_direction_gate] BLOCK YES {c['ticker']} — "
+                          f"p_up_v2={_p_up_v2:.3f}<=0.35 (strongly bearish, YES fights trend)")
+                    _log_block("btc_pup_direction_gate")
+                    continue
+
+            # [rvol_gate] REMOVED 2026-05-28: fired on 97% of YES candidates (rvol mean=0.27),
+            # effectively a permanent YES ban. blocked_trades: n=516, WR=46.3%, PnL=+$4,890
+            # (would have profited). Original -$105 analysis (n=128, May-17) contradicted
+            # by larger dataset. Deep OTM YES pm[0,0.3) alone: +$6,632 blocked profit.
 
             # [btc_garch_highvol_yes_gate] Block BTC YES when GARCH(1,1) cond vol ratio > 1.5.
             # ALL 424 HIGH GARCH trades share an identical Markov fingerprint: 1h=Bull inside
@@ -2549,26 +3023,24 @@ def main() -> None:
                 _log_block("near_atm_ema_gate")
                 continue
 
-            # [strong_trend_nearatm_gate] Hard block BTC YES when pm [0.55, 0.60) + c_trend>=3.
-            # Resim 2026-05-17 (pm[0.55,0.60) n=87):
-            #   c_trend>=3 → n=29, WR=34.5%, BE=57.3%, edge=-22.8%, PnL=-$444
-            #     of which ema=+1 → n=21, WR=28.6%, edge=-28.7%, PnL=-$392 (dominant driver)
-            #   c_trend<3  → n=58, WR=67.2%, BE=57.1%, edge=+10.1%, PnL=+$319
-            # Mechanism: strong trend + near-ATM YES = chasing an extended move; market has
-            # already priced the trend continuation and the strike is right there.
-            # No rescue — even ema=0 sub-bucket loses at -7.3%; no condition saves it.
-            # Note: fires within the pm[0.55,0.60) range that near_atm_ema_gate already covers
-            # for ema=0/1, but this catches ema=-1 + c_trend>=3 edge case if any.
-            # Revert: remove this block.
+            # [strong_trend_nearatm_gate] REMOVED 2026-06-04.
+            # Permutation + walk-forward validation: OOS blocked WR=62.7% > bkev=57.2% —
+            # gate was blocking winning YES bets. Only 1 live fire since May-18.
+            # Shadow observe refined sub-condition: stoch_1h[40,60) + ema≠-1
+            # Scan archive: WR=0% but only 3 expiry events (n=12) — too thin to gate yet.
+            # Grep logs for "[shadow/st_nearatm]" to accumulate 20+ expiry events.
             if (dec_c.decision == "trade" and args.asset == "BTC"
                     and dec_c.side == "yes"
                     and 0.55 <= pm < 0.60
-                    and _active_trend >= 3):
-                print(f"  [strong_trend_nearatm_gate] BLOCK YES {c['ticker']} — "
-                      f"pm={pm:.3f} in [0.55,0.60), c_trend={_active_trend}>=3 "
-                      f"(chasing extended trend at near-ATM, no edge)")
-                _log_block("strong_trend_nearatm_gate")
-                continue
+                    and _active_trend >= 3
+                    and confirm.ema_stack_bias != -1):
+                _c1h  = df_confirm["close"].astype(float)
+                _ll1h = df_confirm["low"].astype(float).rolling(14).min()
+                _hh1h = df_confirm["high"].astype(float).rolling(14).max()
+                _sk_1h = float(((_c1h - _ll1h) / (_hh1h - _ll1h).replace(0, float("nan")) * 100).iloc[-2])
+                if 40 <= _sk_1h < 60:
+                    print(f"  [shadow/st_nearatm] YES {c['ticker']} — pm={pm:.3f}, "
+                          f"c_trend={_active_trend}, stoch_1h={_sk_1h:.1f}, ema={confirm.ema_stack_bias:+d}")
 
             # [btc_stoch_no_gate] Block BTC NO when stoch_k < 20 (oversold, bounce risk).
             # mispricing_analysis [Section 9] 2026-05-17: stoch_k<20 NO: n=49, WR=49.0%,
@@ -3191,17 +3663,53 @@ def main() -> None:
                 _log_block("ema_stack3_gate")
                 continue
 
-            # [2026-05-05] BTC OTM-low gate: hard block YES when p_market<0.20 AND vpin=0.
-            # Backtest n=62, WR=6.5% (BE=12.9%), PnL=-$1,138 (+$1,138 saved). No rescue —
-            # rescue bucket (stoch<35 OR rev>=5) still loses at WR=10%. Logic: market pricing
-            # YES below 20¢ AND zero smart money flow = no edge signal of any kind.
-            # Revert: remove this block.
+            # [Gate 1b — BTC deep-OTM YES block, 2026-05-31]
+            # Hard block YES when pm < 0.15; rescue only on genuine reversal/bounce signals.
+            # Simulation (Apr–May 2026, 63 bets at pm<0.15):
+            #   Hard block (no rescue): n=63, WR=7.8% (BE~10%), Δ=+$1,211
+            #   With rescue: blocked=43 WR=2.3%, rescued=20 kept, Δ=+$1,314 (+$103 vs hard block)
+            # Rescue logic: composite_rev<-2 = multiple reversal indicators firing (mean-reversion
+            #   signal overrides OTM barrier); ema_stack=-1+stoch<15 = stoch_bounce in bear trend.
+            # Backup: paper_trade_runner_pre_yes_gates_20260531.py
             if dec_c.decision == "trade" and args.asset == "BTC" and dec_c.side == "yes":
-                if pm < 0.20 and confirm.vpin_score == 0:
+                if pm < 0.15:
+                    _sk_g1 = float(confirm.stoch_k) if confirm.stoch_k == confirm.stoch_k else 50.0
+                    _rev_rescue  = (_active_rev < -2)
+                    _bnc_rescue  = (confirm.ema_stack_bias == -1 and _sk_g1 < 15.0)
+                    if not (_rev_rescue or _bnc_rescue):
+                        print(f"  [btc_deepotm_gate] BLOCK YES {c['ticker']} — "
+                              f"pm={pm:.3f}<0.15, rev={_active_rev}, ema={confirm.ema_stack_bias}, "
+                              f"stoch={_sk_g1:.1f} (no reversal/bounce rescue)")
+                        _log_block("btc_deepotm_gate")
+                        continue
+                    else:
+                        _why = []
+                        if _rev_rescue: _why.append(f"rev={_active_rev}<-2")
+                        if _bnc_rescue: _why.append(f"ema=-1+stoch={_sk_g1:.1f}<15")
+                        print(f"  [btc_deepotm_gate] RESCUE YES {c['ticker']} — "
+                              f"pm={pm:.3f}<0.15 but {'+'.join(_why)}")
+                # Original VPIN-based gate: retain for pm [0.15, 0.20) with vpin=0
+                elif pm < 0.20 and confirm.vpin_score == 0:
                     print(f"  [btc_otmlow_gate] BLOCK YES {c['ticker']} — "
                           f"p_market={pm:.3f}<0.20 vpin=0 (deep OTM, no smart money)")
                     _log_block("btc_otmlow_gate")
                     continue
+
+            # [Gate mid — BTC OTM YES in neutral EMA trend, 2026-05-31]
+            # Block YES when 0.15 ≤ pm < 0.30 AND ema_stack_bias == 0 (no trend alignment).
+            # Simulation (Apr–May 2026, 100 bets): WR=12.0% (BE~22–25%), PnL=-$1,217.
+            # Full rescue search across 22 signals (stoch_k_4h, rsi_4h, p_up_v2, HMM 3-state,
+            # HMM 7-state, markov_daily, ema20_dist, bb_pct, adx, rvol, composite_rev, etc.)
+            # found no stable cross-month rescue: best candidate (p_yes>=0.40 in Recovery HMM)
+            # is entirely from 9 May 3–6 bets — one market episode, not a pattern.
+            # Losses avoided=88, wins sacrificed=0, Δ=+$1,217.
+            # Backup: paper_trade_runner_pre_yes_gates_20260531.py
+            if (dec_c.decision == "trade" and args.asset == "BTC" and dec_c.side == "yes"
+                    and 0.15 <= pm < 0.30 and confirm.ema_stack_bias == 0):
+                print(f"  [btc_otm_neutral_ema_gate] BLOCK YES {c['ticker']} — "
+                      f"pm={pm:.3f} in [0.15,0.30), ema_stack=0 (no trend, OTM WR=12% vs BE~23%)")
+                _log_block("btc_otm_neutral_ema_gate")
+                continue
 
             # [2026-05-05] ETH/SOL OTM-low gate: hard block YES when p_market<0.20 AND vpin=0.
             # ETH: n=14, WR=0% (BE=11.1%), PnL=-$631 — saves +$631. No rescue warranted.
@@ -3534,6 +4042,110 @@ def main() -> None:
                     print(f"  [eth_kelly_tier] BOOST {dec_c.side.upper()} {c['ticker']} — "
                           f"{_eth_boost_why} 1.5× → ${dec_c.bet_amount:.2f}")
 
+            # [semi_markov_vol_gate] Non-homogeneous semi-Markov R1 gate (BTC only)
+            # Zone thresholds are macro-state-conditional (non-homogeneous Markov):
+            #   P(R1→R0) varies 2.84× across macro states; R1 mean duration:
+            #   Bear=29 bars, Sideways=17 bars, Bull=16 bars (empirical, 84k 15m bars).
+            # Backup: paper_trade_runner_pre_semimarkov_20260602.py
+            #
+            # Lookup: (early_max, mid_max, rvol_rescue_ceil)
+            # early_max: bar threshold for spike zone (hazard-peak region, universal ~3)
+            # mid_max:   bar threshold for settling zone (scales with macro R1 mean duration)
+            # rvol_rescue_ceil: max rvol for deep-R1 rescue (tighter in Bear — episodes genuinely long)
+            _SM_ZONES = {
+                "Bear":     (3, 21, 0.60),  # R1 mean ~29 bars; conservative rescue
+                "Sideways": (3, 12, 1.00),  # R1 mean ~17 bars
+                "Bull":     (3, 11, 1.00),  # R1 mean ~16 bars (weighted Recovery+Bull)
+            }
+            _sm_macro = _markov_regime if _markov_regime in _SM_ZONES else "Sideways"
+            _sm_early_max, _sm_mid_max, _sm_rvol_ceil = _SM_ZONES[_sm_macro]
+
+            if (args.asset == "BTC" and dec_c.decision == "trade"
+                    and _hmm_vol_probs is not None and _hmm_vol_probs[0] == 1):
+                _sm_tis   = _hmm_vol_probs[3]
+                _sm_liq_s = _liq_signal.liq_score if _liq_signal is not None else 0
+                _sm_liq_b = float(_liq_signal.liq_bias) if _liq_signal is not None else 0.0
+                _sm_fund  = confirm.funding_bias
+                _sm_rvol  = _rvol_1h if (_rvol_1h == _rvol_1h) else 1.0
+
+                if _sm_tis <= _sm_early_max:
+                    # Early R1: spike entry. YES always blocked.
+                    # NO rescue: liq cascade (bearish liquidation = tailwind for NO).
+                    if dec_c.side == "yes":
+                        print(f"  [semi_markov_r1_early] BLOCK YES {c['ticker']} — "
+                              f"R1 bar {_sm_tis}/{_sm_early_max} macro={_sm_macro}")
+                        _log_block("semi_markov_r1_early_yes")
+                        continue
+                    if dec_c.side == "no" and not (_sm_liq_s <= -1 and _sm_liq_b < 0.0):
+                        print(f"  [semi_markov_r1_early] BLOCK NO {c['ticker']} — "
+                              f"R1 bar {_sm_tis}/{_sm_early_max} macro={_sm_macro}, "
+                              f"no liq cascade (liq_score={_sm_liq_s} bias={_sm_liq_b:.2f})")
+                        _log_block("semi_markov_r1_early_no")
+                        continue
+                    print(f"  [semi_markov_r1_early] RESCUE NO {c['ticker']} — "
+                          f"liq cascade (liq_score={_sm_liq_s} bias={_sm_liq_b:.2f})")
+
+                elif _sm_tis <= _sm_mid_max:
+                    # Mid R1: settling. Block when funding neutral — no directional anchor.
+                    if _sm_fund == 0:
+                        print(f"  [semi_markov_r1_mid] BLOCK {dec_c.side.upper()} {c['ticker']} — "
+                              f"R1 bar {_sm_tis}/{_sm_mid_max} macro={_sm_macro}, funding neutral")
+                        _log_block("semi_markov_r1_mid_neutral_funding")
+                        continue
+
+                else:
+                    # Deep R1: committed episode, hazard below geometric baseline.
+                    # Rescue when rvol decayed below macro-adjusted ceil (HMM overhang).
+                    # Bear ceil is tighter (0.6) — long episodes can have temporary rvol dips.
+                    if _sm_rvol >= _sm_rvol_ceil:
+                        print(f"  [semi_markov_r1_deep] BLOCK {dec_c.side.upper()} {c['ticker']} — "
+                              f"R1 bar {_sm_tis} macro={_sm_macro}, "
+                              f"rvol={_sm_rvol:.2f}>={_sm_rvol_ceil:.1f}")
+                        _log_block("semi_markov_r1_deep_highrvol")
+                        continue
+                    print(f"  [semi_markov_r1_deep] RESCUE {dec_c.side.upper()} {c['ticker']} — "
+                          f"R1 bar {_sm_tis} macro={_sm_macro}, "
+                          f"rvol={_sm_rvol:.2f}<{_sm_rvol_ceil:.1f} (regime decaying)")
+
+            # [hmm_mtf_st3_gate] Block BTC NO when HMM MTF State 3 (moderate bullish momentum).
+            # State 3: stoch_k_1h≈64, rsi_1h≈57, bp_1h≈0.86, macd_hist_1h≈42 — uptrend/churn.
+            # WR=24.1% across 10,174 obs; -$149.7/trade in model backtests.
+            # Rescue: offset∈[0,5%) + macd_hist_1h<-50 (near-ATM + MACD already rolling over).
+            if (args.asset == "BTC" and dec_c.decision == "trade"
+                    and dec_c.side == "no" and _hmm_mtf_state == 3):
+                _st3_off   = float(offset_c) if not math.isnan(float(offset_c)) else 0.10
+                _st3_macd  = _macd_hist_1h_mtf
+                _st3_rescue = (0.00 <= _st3_off < 0.05 and _st3_macd < -50.0)
+                if _st3_rescue:
+                    print(f"  [hmm_mtf_st3] RESCUE NO {c['ticker']} — "
+                          f"St3 but offset={_st3_off*100:.2f}%∈[0,5%), "
+                          f"macd_hist_1h={_st3_macd:.1f}<-50 (MACD rolling over)")
+                else:
+                    _st3_why = (f"offset={_st3_off*100:.2f}%∉[0,5%)"
+                                if not (0.00 <= _st3_off < 0.05)
+                                else f"macd_hist_1h={_st3_macd:.1f}>=-50")
+                    print(f"  [hmm_mtf_st3] BLOCK NO {c['ticker']} — "
+                          f"St3 (bullish momentum): {_st3_why}")
+                    _log_block("hmm_mtf_st3")
+                    continue
+
+            # [bp_1h_no_gate] Block BTC NO when 1h bar closed near its high (strong buying
+            # pressure) AND pm >= 0.40.  bp_1h = (close-low)/(high-low); >= 0.55 means close
+            # is in the top 45% of the bar's range — momentum is upward against the NO.
+            # Backtest: n=14,706, WR=7.7%, bkev=69.0%, edge=-61.3%, Δ=$+83,862 on 182k scan rows.
+            # MCPT p=0.000 (500 perms, label-shuffle) — not optimization bias.
+            # No rescue: MACD rescue tested and made performance worse on every threshold.
+            # Backup: paper_trade_runner_pre_hmm_mtf_gate_20260603.py
+            if (args.asset == "BTC" and dec_c.decision == "trade"
+                    and dec_c.side == "no" and pm >= 0.40):
+                _bp1h = _bp_1h_mtf if not math.isnan(_bp_1h_mtf) else 0.5
+                if _bp1h >= 0.55:
+                    print(f"  [bp_1h_no_gate] BLOCK NO {c['ticker']} — "
+                          f"bp_1h={_bp1h:.3f}>=0.55, pm={pm:.3f}>=0.40 "
+                          f"(bullish 1h bar, upward momentum against NO)")
+                    _log_block("bp_1h_no_gate")
+                    continue
+
             # Counter-tape severity gate: hard block or dampen by severity zone
             if dec_c.decision == "trade":
                 _sev = _counter_tape_severity(dec_c.side)
@@ -3794,13 +4406,24 @@ def main() -> None:
         "ls_long_pct":        round(_liq_signal.ls_long_pct, 2) if _liq_signal else "",
         "oi_chg_pct":         round(_liq_signal.oi_chg_pct, 4)  if _liq_signal else "",
         "arima_forecast_1h":  round(_arima_forecast_btc, 7) if not math.isnan(_arima_forecast_btc) else "",
-        "markov_regime_daily": _markov_regime or "",
+        "markov_regime_daily":  _markov_regime  or "",
+        "markov_regime_7state": _markov_7state  or "",
         "ob_imbalance":       _gate_signals.get("ob_imbalance", ""),
         "ob_path_ask_usd":    _gate_signals.get("ob_path_ask_usd", ""),
         "ob_path_bid_usd":    _gate_signals.get("ob_path_bid_usd", ""),
         "ob_ask_frac":        _gate_signals.get("ob_ask_frac", ""),
         "ob_bid_wall_pct":    _gate_signals.get("ob_bid_wall_pct", ""),
         "ob_ask_wall_pct":    _gate_signals.get("ob_ask_wall_pct", ""),
+        "hmm_vol_state":      _hmm_vol_probs[0] if _hmm_vol_probs is not None else "",
+        "hmm_r1_prob":        _hmm_vol_probs[1] if _hmm_vol_probs is not None else "",
+        "hmm_vol_k10":        _hmm_vol_probs[2] if _hmm_vol_probs is not None else "",
+        "hmm_time_in_state":  _hmm_vol_probs[3] if _hmm_vol_probs is not None else "",
+        "ou_z_score":         _ou_z_score      if not math.isnan(_ou_z_score)      else "",
+        "ou_halflife_min":    _ou_halflife_min  if not math.isnan(_ou_halflife_min) else "",
+        "ou_tau_drift":       round(
+            # E[log_return | τ] = (mu_log - log(spot)) × (1 - exp(-θ × τ_hours))
+            (_ou_mu_val - math.log(spot)) * (1.0 - math.exp(-_ou_theta * minutes_to_expiry(close_ts) / 60.0)), 6
+        ) if (not math.isnan(_ou_theta) and not math.isnan(_ou_mu_val) and spot > 0 and _ou_theta > 0) else "",
         "resolved_yes":       "",
         "would_win":          "",
         "would_pnl":          "",

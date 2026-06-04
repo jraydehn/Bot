@@ -52,6 +52,93 @@ from live_signal import load_auth, kalshi_get, fetch_live_spot, fetch_recent_can
 from kelly_sizing import compute_kelly_size
 from market_data import compute_realized_volatility
 from probability_engine import implied_vol_from_price, blend_vol, REALIZED_VOL_WEIGHT_BY_ASSET
+from collections import deque as _deque
+
+# ── HMM multi-timeframe regime model ─────────────────────────────────────────
+# Trained on 2,290 BTC scans (5m+15m+1h features). BIC-optimal 8 states.
+# State 0: stoch_5m=66 vs stoch_1h=11 divergence → WR=22%, block trades
+# State 7: all-TF mid-high regime → +$116/trade, elevated Kelly cap
+_HMM_PKL = Path(__file__).parent / "hmm_btc_multitf.pkl"
+_hmm_model, _hmm_scaler, _hmm_feat_cols = None, None, None
+_hmm_obs_buf: _deque = _deque(maxlen=20)   # rolling observation buffer
+
+try:
+    with open(_HMM_PKL, "rb") as _f:
+        _hmm_pkg = pickle.load(_f)
+    _hmm_model    = _hmm_pkg["model"]
+    _hmm_scaler   = _hmm_pkg["scaler"]
+    _hmm_feat_cols= _hmm_pkg["feat_cols"]
+    print(f"  [hmm] Loaded {_HMM_PKL.name}  "
+          f"({_hmm_pkg['n_states']} states, {len(_hmm_feat_cols)} features)")
+except Exception as _hmm_e:
+    print(f"  [hmm] WARNING: could not load {_HMM_PKL.name}: {_hmm_e}")
+
+# Vol-regime HMM (BTC only): 3-state Gaussian HMM on 15m log returns.
+# Rank 0=low-vol-bearish, 1=low-vol-bullish, 2=high-vol. Shadow-logged only —
+# no gate applied until 4-6 weeks of live data confirm the Rank-2 edge gap.
+_VOL_HMM_PKL = Path(__file__).parent / "models" / "hmm_vol_regime_btc_15m.pkl"
+_vol_hmm_model   = None
+_vol_hmm_order   = None   # state indices sorted by ascending sigma
+_vol_hmm_rank_of: "dict | None" = None
+
+try:
+    with open(_VOL_HMM_PKL, "rb") as _vf:
+        _vol_hmm_pkg  = pickle.load(_vf)
+    _vol_hmm_model    = _vol_hmm_pkg["model"]
+    _n_vol_states     = _vol_hmm_pkg["n_states"]
+    _vol_hmm_order    = sorted(range(_n_vol_states),
+                               key=lambda s: float(
+                                   np.sqrt(_vol_hmm_model.covars_[s, 0, 0])))
+    _vol_hmm_rank_of  = {s: i for i, s in enumerate(_vol_hmm_order)}
+    print(f"  [vol_hmm] Loaded {_VOL_HMM_PKL.name}  ({_n_vol_states} states)")
+except Exception as _ve:
+    print(f"  [vol_hmm] WARNING: could not load vol-regime HMM: {_ve}")
+
+
+def _vol_hmm_state(live_1m: "pd.DataFrame") -> "int | None":
+    """Decode current vol-regime HMM rank (0=low-vol … 2=high-vol) from live 1m data."""
+    if _vol_hmm_model is None or _vol_hmm_rank_of is None:
+        return None
+    try:
+        c15 = live_1m["close"].resample("15min").last().dropna()
+        if len(c15) < 22:
+            return None
+        lr  = np.log(c15 / c15.shift(1)).dropna().values[-20:]
+        raw = int(_vol_hmm_model.predict(lr.reshape(-1, 1))[-1])
+        return _vol_hmm_rank_of[raw]
+    except Exception:
+        return None
+
+
+def _hmm_predict_state(sig: dict) -> int:
+    """Build feature vector from sig, append to buffer, predict current HMM state.
+    Returns -1 if model unavailable or buffer too short."""
+    if _hmm_model is None or _hmm_scaler is None:
+        return -1
+    vec = []
+    for col in _hmm_feat_cols:
+        val = sig.get(col)
+        try:
+            vec.append(float(val) if val is not None and val == val else float("nan"))
+        except (TypeError, ValueError):
+            vec.append(float("nan"))
+    if sum(1 for v in vec if v == v) < len(vec) * 0.75:
+        return -1   # too many NaNs
+    # Fill NaNs with 0 (scaler was fit on median-filled data)
+    vec_arr = np.array([0.0 if v != v else v for v in vec], dtype=float).reshape(1, -1)
+    try:
+        vec_scaled = _hmm_scaler.transform(vec_arr)[0]
+    except Exception:
+        return -1
+    _hmm_obs_buf.append(vec_scaled)
+    if len(_hmm_obs_buf) < 3:
+        return -1
+    obs_seq = np.array(list(_hmm_obs_buf))
+    try:
+        states = _hmm_model.predict(obs_seq, lengths=[len(obs_seq)])
+        return int(states[-1])
+    except Exception:
+        return -1
 import coinalyze_liq
 import coinglass_data
 import live_trading
@@ -84,8 +171,9 @@ ASSET_CONFIG = {
 MIN_TAU_MIN      = 2.0    # skip contract if fewer than 2 minutes remain
 MAX_TAU_MIN      = 14.0   # skip contract if more than 14 minutes remain (not opened yet)
 EDGE_THRESHOLD   = 0.04   # minimum model-vs-market edge to bet
-KELLY_MULT       = 0.30   # 30% of full-Kelly (conservative for new model)
-MAX_BET_FRAC     = 0.03   # hard cap at 3% of bankroll per trade
+KELLY_MULT       = 0.08   # 8% of full-Kelly — allows signal variation (was 0.30, always hit cap)
+MAX_BET_FRAC     = 0.06   # hard cap at 6% of bankroll per trade (was 0.03, 98% of bets hit cap)
+MAX_BET_FRAC_ST7 = 0.09   # elevated cap for HMM State 7 (high-payout NO regime, +$2207 historical)
 P_MARKET_VOL_MIN = 0.12   # block YES when p_market < this (deep OTM)
 P_MARKET_VOL_MAX = 0.88   # block NO when p_market > this (deep OTM)
 CANDLES_NEEDED   = 1500   # 1m candles (25h — need 20+ 1h bars for donchian/stoch_k_1h)
@@ -212,8 +300,10 @@ CSV_COLUMNS = [
     "logged_at", "decision_time", "asset", "contract_ticker", "close_time",
     "spot", "floor_strike", "offset_pct", "tau_minutes", "spread",
     "p_market", "p_model_15m", "raw_edge", "side", "decision",
+    # per-contract moneyness
+    "z_score",
     # 5m signals
-    "bp_5m", "vol_ratio", "vol_ratio_5m",
+    "bp_5m", "body_5m", "dir_5m", "vol_ratio", "vol_ratio_5m",
     # 15m signals
     "body_15m", "bp_15m", "dir_15m",
     "upper_wick_15m", "lower_wick_15m",
@@ -222,13 +312,19 @@ CSV_COLUMNS = [
     # price changes
     "chg_1m", "chg_5m", "chg_15m",
     # vwap / ema
-    "vwap_dist", "ema_bias", "ema_bias_1h", "nearest_res_dist_pct",
+    "vwap_dist", "ema_bias", "ema_bias_1h", "ema20_dist_1h", "ema50_dist_1h",
+    "nearest_res_dist_pct",
     # composite / vol
     "composite_p_up", "realized_vol_annual", "vol_ratio_1h",
     # 1h signals
     "bp_1h", "chg_1h", "dir_1h", "consec_dir_1h",
     "stoch_k_1h", "stoch_cross_1h", "rsi_1h", "macd_hist_1h",
     "donchian_breakout_1h", "engulfing_1h",
+    "bb_pct_1h",
+    # 1h rolling drift (matches branched 1h BTC model)
+    "mu6h", "mu12h", "mu24h", "regime_z", "arima_forecast_1h",
+    # 4h signals
+    "stoch_k_4h", "rsi_4h", "chg_4h", "bp_4h",
     # Coinalyze
     "liq_score", "liq_bias", "oi_chg_pct", "ls_long_pct",
     # CoinGlass macro
@@ -244,6 +340,8 @@ CSV_COLUMNS = [
     "p_up_v2_btc",
     # Rolling 6h empirical z_drift (for LGBM feature logging)
     "z_drift_6h",
+    # Shadow LGBM output — lgbm_15m_{asset}.pkl runs alongside primary on every scan
+    "p_gbdt",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -857,6 +955,77 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC") -> dict:
     except Exception:
         sig["nearest_res_dist_pct"] = 999.0
 
+    # ── EMA20 / EMA50 distance from 1h close (%) ─────────────────────────────
+    # EWM works with any bar count; guard only against degenerate empty df.
+    if len(df1h_c) >= 5:
+        _c1h_f = df1h_c["close"].astype(float)
+        _ema20_1h = _c1h_f.ewm(span=20, adjust=False).mean()
+        _ema20_val = float(_ema20_1h.iloc[-1])
+        if _ema20_val > 0:
+            sig["ema20_dist_1h"] = float((_c1h_f.iloc[-1] - _ema20_val) / _ema20_val * 100)
+        if len(df1h_c) >= 20:
+            _ema50_1h = _c1h_f.ewm(span=50, adjust=False).mean()
+            _ema50_val = float(_ema50_1h.iloc[-1])
+            if _ema50_val > 0:
+                sig["ema50_dist_1h"] = float((_c1h_f.iloc[-1] - _ema50_val) / _ema50_val * 100)
+
+    # ── Bollinger Band %B from 1h close (min_periods=5 for short histories) ──
+    if len(df1h_c) >= 5:
+        _c1h_f = df1h_c["close"].astype(float)
+        _n_bb   = min(20, len(df1h_c))
+        _bb_mid = _c1h_f.rolling(_n_bb, min_periods=5).mean()
+        _bb_std = _c1h_f.rolling(_n_bb, min_periods=5).std()
+        _bb_lo  = _bb_mid - 2 * _bb_std
+        _bb_hi  = _bb_mid + 2 * _bb_std
+        _bb_rng = float((_bb_hi - _bb_lo).iloc[-1])
+        if _bb_rng > 0 and not np.isnan(_bb_rng):
+            sig["bb_pct_1h"] = float(
+                (_c1h_f.iloc[-1] - float(_bb_lo.iloc[-1])) / _bb_rng)
+
+    # ── Rolling drift mu + regime_z from 1h log returns ──────────────────────
+    if len(df1h_c) >= 7:
+        _lr_1h = np.log(df1h_c["close"] / df1h_c["close"].shift(1))
+        def _roll_mean(s, w):
+            # min_periods=1 gives partial-window mean rather than NaN → 0.0 fallback
+            v = float(s.rolling(w, min_periods=1).mean().iloc[-1])
+            return 0.0 if np.isnan(v) else v
+        sig["mu6h"]  = _roll_mean(_lr_1h, 6)
+        sig["mu12h"] = _roll_mean(_lr_1h, 12)
+        sig["mu24h"] = _roll_mean(_lr_1h, 24)
+        _ewm_mean = float(_lr_1h.ewm(span=12).mean().iloc[-1])
+        _ewm_std  = float(_lr_1h.ewm(span=24).std().iloc[-1])
+        sig["regime_z"] = float(np.clip(
+            _ewm_mean / _ewm_std if _ewm_std > 0 else 0.0, -3.0, 3.0))
+
+    # ── ARIMA(2,0,1) 1-step forecast from 1h log returns ─────────────────────
+    if len(df1h_c) >= 20:
+        try:
+            from statsmodels.tsa.arima.model import ARIMA as _ARIMA
+            _lr_arima = np.log(df1h_c["close"] / df1h_c["close"].shift(1)).dropna()
+            sig["arima_forecast_1h"] = float(
+                _ARIMA(_lr_arima, order=(2, 0, 1)).fit(disp=False).forecast(steps=1).iloc[0])
+        except Exception:
+            pass
+
+    # ── 4h bars ───────────────────────────────────────────────────────────────
+    df4h = live_1m.resample("4h").agg(
+        {"open": "first", "high": "max", "low": "min",
+         "close": "last", "volume": "sum"}
+    ).dropna()
+    df4h_c = df4h.iloc[:-1] if len(df4h) >= 2 else df4h
+
+    if len(df4h_c) >= 2:
+        h4  = df4h_c.iloc[-1]
+        r4h = float(h4["high"]) - float(h4["low"])
+        sig["chg_4h"] = float((float(h4["close"]) / float(h4["open"]) - 1) * 100)
+        sig["bp_4h"]  = float((float(h4["close"]) - float(h4["low"])) / r4h) if r4h > 0 else 0.5
+
+    if len(df4h_c) >= 5:
+        # Use period=5 when fewer than 14 4h bars available; period=14 when enough data
+        _4h_period = 14 if len(df4h_c) >= 14 else 5
+        sig["stoch_k_4h"] = _stoch_k(df4h_c["high"], df4h_c["low"], df4h_c["close"], _4h_period)
+        sig["rsi_4h"]     = _rsi(df4h_c["close"], period=_4h_period)
+
     return sig
 
 
@@ -928,7 +1097,7 @@ def compute_z_drift_6h(df_resolved: pd.DataFrame) -> "float | None":
         if df.empty:
             return None
         df["decision_time"] = pd.to_datetime(df["decision_time"], format="ISO8601", utc=True)
-        cutoff = df["decision_time"].max() - pd.Timedelta(hours=6)
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=6)  # wall-clock, not last-trade anchor
         window = df[df["decision_time"] >= cutoff]
         if len(window) < 3:
             return None
@@ -1157,36 +1326,33 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     _markov_sol_6h: Optional[str] = None
     _markov_sol_4h: Optional[str] = None
     _markov_sol_1h: Optional[str] = None
-    if asset == "BTC":
-        try:
-            # 1h regime: fetch via yfinance (cached by UTC hour; live_1m only has ~17 1h bars)
-            _markov_1h = _get_btc_markov_regime_1h()
-            # 15m regime: compute from live_1m (20×15m=5h, fits in ~16h of 1m data)
+    # Always compute all asset regimes — cached per hour so overhead is minimal after first call.
+    try:
+        _markov_1h = _get_btc_markov_regime_1h()
+        if asset == "BTC":
             _df15m_reg = live_1m.resample("15min").agg({"close": "last"}).dropna().iloc[:-1]
             _rr15m_s = _df15m_reg["close"].pct_change(20)
             if pd.notna(_rr15m_s.iloc[-1]):
                 _rr15m = float(_rr15m_s.iloc[-1])
                 _markov_15m = "Bull" if _rr15m > 0.004 else "Bear" if _rr15m < -0.004 else "Sideways"
-            print(f"  [markov] 1h={_markov_1h or 'n/a'}  15m={_markov_15m or 'n/a'}")
-        except Exception as _me:
-            print(f"  [markov] Error computing regime: {_me}")
-    elif asset == "ETH":
-        try:
-            _eth_regs = _get_markov_regimes_yf("ETH")
-            _markov_eth_daily = _eth_regs.get("1d")
-            print(f"  [markov] ETH daily={_markov_eth_daily or 'n/a'}")
-        except Exception as _me:
-            print(f"  [markov] ETH error: {_me}")
-    elif asset == "SOL":
-        try:
-            _sol_regs = _get_markov_regimes_yf("SOL")
-            _markov_sol_6h = _sol_regs.get("6h")
-            _markov_sol_4h = _sol_regs.get("4h")
-            _markov_sol_1h = _sol_regs.get("1h")
-            print(f"  [markov] SOL 6h={_markov_sol_6h or 'n/a'}  "
-                  f"4h={_markov_sol_4h or 'n/a'}  1h={_markov_sol_1h or 'n/a'}")
-        except Exception as _me:
-            print(f"  [markov] SOL error: {_me}")
+        print(f"  [markov] BTC 1h={_markov_1h or 'n/a'}  15m={_markov_15m or 'n/a'}")
+    except Exception as _me:
+        print(f"  [markov] BTC error: {_me}")
+    try:
+        _eth_regs = _get_markov_regimes_yf("ETH")
+        _markov_eth_daily = _eth_regs.get("1d")
+        print(f"  [markov] ETH daily={_markov_eth_daily or 'n/a'}")
+    except Exception as _me:
+        print(f"  [markov] ETH error: {_me}")
+    try:
+        _sol_regs = _get_markov_regimes_yf("SOL")
+        _markov_sol_6h = _sol_regs.get("6h")
+        _markov_sol_4h = _sol_regs.get("4h")
+        _markov_sol_1h = _sol_regs.get("1h")
+        print(f"  [markov] SOL 6h={_markov_sol_6h or 'n/a'}  "
+              f"4h={_markov_sol_4h or 'n/a'}  1h={_markov_sol_1h or 'n/a'}")
+    except Exception as _me:
+        print(f"  [markov] SOL error: {_me}")
     sig["markov_regime_1h"]  = _markov_1h       or ""
     sig["markov_regime_15m"] = _markov_15m      or ""
     sig["markov_eth_daily"]  = _markov_eth_daily or ""
@@ -1239,6 +1405,15 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     if _z_drift_6h is not None:
         print(f"  [z_drift_6h] {_z_drift_6h:+.4f}  (6h rolling mean actual_z)")
 
+    # Vol-regime HMM state (BTC only, shadow-logged — no gate applied yet)
+    _vol_state: "int | None" = None
+    if asset == "BTC" and live_1m is not None:
+        _vol_state = _vol_hmm_state(live_1m)
+    sig["hmm_vol_state"] = _vol_state if _vol_state is not None else ""
+    if _vol_state is not None:
+        _rank_labels = {0: "low-vol-bear", 1: "low-vol-bull", 2: "high-vol"}
+        print(f"  [vol_hmm] rank={_vol_state}  ({_rank_labels.get(_vol_state, '?')})")
+
     def _fmt(v, fmt=".3f"):
         return format(v, fmt) if isinstance(v, (int, float)) and v == v else "n/a"
 
@@ -1259,6 +1434,12 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
           f"chg_15m={_fmt(sig.get('chg_15m', 0), '+.3f')}%  "
           f"ema_bias={sig.get('ema_bias', 0)}  "
           f"realized_vol={_fmt(sig.get('realized_vol_annual', 0), '.2%')}")
+
+    # HMM multi-timeframe regime state (BTC only; shadow for ETH/SOL)
+    _hmm_state = _hmm_predict_state(sig) if asset == "BTC" else -1
+    if asset == "BTC":
+        _st_label = {0:"DIVERGE(block)", 7:"HIGH-PM-NO(boost)"}.get(_hmm_state, str(_hmm_state))
+        print(f"    [hmm_state] {_hmm_state}  ({_st_label})")
 
     # Fetch Coinalyze liquidation + OI signal (cached 5 min; None for SOL if unavailable)
     _liq_signal = coinalyze_liq.fetch_liq_signal(asset)
@@ -1292,11 +1473,24 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     decision_time = datetime.now(timezone.utc).isoformat()
     csv_name = ASSET_CONFIG[asset.upper()]["csv_name"]
 
+    # [z_drift_6h_no_gate — BTC NO suppression in extreme uptrend]
+    # When z_drift_6h > 2.5 the model's p_no is structurally unreliable: high p_market
+    # drives implied vol down → blended sigma_tau shrinks → p_no collapses → fake NO edge.
+    # Simulation (205 resolved BTC 15m trades, May 25-30):
+    #   z_drift > 2.5 blocked: n=16, WR=6.3%, PnL=-$539  → 15 losses avoided, 1 win sacrificed.
+    #   All bets kept (z_drift ≤ 2.5): n=189, WR=37.6%, PnL=+$667 vs baseline +$128.
+    # Backup: paper_trade_runner_15m_pre_zdrift_no_gate_20260530.py
+    if asset.upper() == "BTC" and _z_drift_6h is not None and _z_drift_6h > 2.5:
+        print(f"  [z_drift_no_gate] SKIP SCAN — z_drift_6h={_z_drift_6h:+.4f} > 2.5 "
+              f"(extreme uptrend: model p_no unreliable, sim WR=6.3% in this regime)")
+        return
+
     # ── Pass 1: evaluate all contracts, pick the single best edge ─────────────
     # For each contract determine the better side (YES or NO), then among all
     # qualifying contracts place exactly ONE bet on the one with the highest edge.
     candidates = []   # (edge, side, c, p_model, offset_pct)
     evaluated  = []   # same tuple for every contract (including non-qualifiers)
+    _lgbm_shadows: dict = {}  # ticker → shadow LGBM p_yes (logged as p_gbdt)
 
     for c in contracts:
         ticker     = c["ticker"]
@@ -1317,6 +1511,11 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 p_model_yes = compute_p_yes_zdrift_15m(spot, floor_s, tau_min, sig, _zdrift_15m, p_market)
             else:
                 p_model_yes = p_model_no
+
+        # Shadow LGBM: always run lgbm_15m_{asset}.pkl regardless of primary model path.
+        # For BTC this is separate from p_up_v2; for ETH/SOL it equals p_model_no (same model).
+        _lgbm_shadows[ticker] = compute_p_model_15m(
+            spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
 
         # Scan archive: log all evaluated contracts before any skips.
         try:
@@ -1372,6 +1571,65 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             if stoch >= 44:
                 best_side, best_edge = "no", edge_no
 
+        # [eth_15m_yes_lowvol_gate] Block YES when vol_ratio<0.80 + pm<0.65 unless OTM+cpu>=0.45.
+        # Analysis (2026-05-23, n=82): WR=34.1%, BE=45.5%, P&L=-$644.
+        # offset<-0.10% deep-ITM (n=29): WR=10.3%, -$551 — structurally unwinnable in low-vol.
+        # Rescue: offset_pct>=0 (ITM) + composite_p_up>=0.45 → n=30, WR=60.0%, +$182.
+        # Best rescue: OTM + cpu>=0.45 + ema_bias=-1 → n=24, WR=66.7%, +$241.
+        # Blocked remainder: WR=19.2%, -$825.
+        if asset.upper() == "ETH" and best_side == "yes":
+            _vr_eth = float(sig.get("vol_ratio", 1.0) or 1.0)
+            if _vr_eth < 0.80 and p_market < 0.65:
+                _cpu_eth = sig.get("composite_p_up")
+                _cpu_eth_f = float(_cpu_eth) if _cpu_eth is not None else 0.0
+                _lowvol_rescue = (offset_pct >= 0.0 and _cpu_eth_f >= 0.45)
+                if not _lowvol_rescue:
+                    print(f"    [eth_15m_yes_lowvol_gate] BLOCK YES→NO {ticker} — "
+                          f"vol_ratio={_vr_eth:.2f}<0.80, pm={p_market:.3f}<0.65, "
+                          f"offset={offset_pct:+.3f}%, cpu={_cpu_eth_f:.3f} "
+                          f"(rescue needs offset>=0+cpu>=0.45)")
+                    best_side, best_edge = "no", edge_no
+                else:
+                    print(f"    [eth_15m_yes_lowvol_gate] RESCUE YES {ticker} — "
+                          f"vol_ratio={_vr_eth:.2f}<0.80 but offset={offset_pct:+.3f}%>=0"
+                          f"+cpu={_cpu_eth_f:.3f}>=0.45 (WR=60-67%)")
+
+        # [eth_15m_yes_lowcpu_gate] Hard block YES when composite_p_up<0.40.
+        # Analysis (2026-05-23, n=27): WR=33.3%, BE=63.3%, P&L=-$348.
+        # Calibration: cpu<0.35 → WR=23.1%; cpu 0.35-0.40 → WR=42.9% — both far below 63% BE.
+        # No rescue found across all features — model is systematically miscalibrated here.
+        if asset.upper() == "ETH" and best_side == "yes":
+            _cpu_eth2 = sig.get("composite_p_up")
+            if _cpu_eth2 is not None and float(_cpu_eth2) < 0.40:
+                print(f"    [eth_15m_yes_lowcpu_gate] BLOCK YES→NO {ticker} — "
+                      f"composite_p_up={float(_cpu_eth2):.3f}<0.40 "
+                      f"(model miscalibrated, WR=33% vs BE=63%, no rescue)")
+                best_side, best_edge = "no", edge_no
+
+        # [eth_15m_yes_stoch1h_gate] Block YES when 1h stoch in mid-range [30,70); rescue if rsi_1h<35.
+        # Full paper trade history (n=953 with stoch, 2026-05-11 to 2026-06-01):
+        #   stoch[30,70) + rsi>=35: n=59, WR=40.7%, BE≈63%, P&L=-$376 → saves +$376.
+        #   stoch[30,70) + rsi<35 rescue: n=8, WR=100%, P&L=+$97 → kept.
+        # Causal: mid-range stoch = no momentum conviction for YES. Edge only exists when
+        # stoch<30 (oversold bounce) or stoch≥70 (momentum continuation).
+        # rsi<35 rescue: deeply oversold RSI diverges from mid stoch → convergence signal.
+        # Scan archive confirms: 218 blocked at 40.8% WR. Consistent Wk21-23.
+        if asset.upper() == "ETH" and best_side == "yes":
+            _sk1h_eth = float(sig.get("stoch_k_1h", 50.0) or 50.0)
+            if 30.0 <= _sk1h_eth < 70.0:
+                _rsi1h_raw = sig.get("rsi_1h")
+                _rsi1h_f = float(_rsi1h_raw) if _rsi1h_raw is not None else 50.0
+                _stoch1h_rescue = (_rsi1h_raw is not None and _rsi1h_f < 35.0)
+                if not _stoch1h_rescue:
+                    print(f"    [eth_15m_yes_stoch1h_gate] BLOCK YES→NO {ticker} — "
+                          f"stoch_k_1h={_sk1h_eth:.1f}∈[30,70), rsi_1h={_rsi1h_f:.1f} "
+                          f"(no conviction; rescue needs rsi<35)")
+                    best_side, best_edge = "no", edge_no
+                else:
+                    print(f"    [eth_15m_yes_stoch1h_gate] RESCUE YES {ticker} — "
+                          f"stoch_k_1h={_sk1h_eth:.1f}∈[30,70) but rsi_1h={_rsi1h_f:.1f}<35 "
+                          f"(oversold RSI divergence, WR=100% n=8)")
+
         # [BTC YES gate] Gate 3 only — offset flip.
         # Gates 1 (ema=-1 flip) and 2 (pm<0.40 flip) removed 2026-05-23:
         # Audit on 387 scan archive rows showed payout asymmetry destroys value.
@@ -1379,6 +1637,31 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # costs more than the gate recovers regardless of win-rate improvement.
         # Gate 1 cost: -$1,309 vs baseline. Gate 2 cost: -$1,507 vs baseline.
         if asset.upper() == "BTC" and best_side == "yes":
+            # [btc_15m_lowpm_gate] Block BTC YES when pm<0.35; rescue when 1h=Sideways AND tau≥10.
+            # Analysis (2026-05-23, n=51 resolved YES at pm<0.35):
+            #   Overall: WR=17.6%, BE=24.4%, PnL=-$576.
+            #   markov_15m=Bear (n=15): WR=0.0%, -$363 — zero wins across every sub-slice.
+            #   markov_1h=Bear (n=12): WR=8.3%, -$155 — nearly as bad.
+            # Rescue: 1h=Sideways + tau≥10 → n=15, WR=46.7%, Edge=+17.5%, PnL=+$125.
+            #   Causal: BTC not in macro downtrend, enough time for price to reach strike.
+            #   ema=1 looked good (+$137) but shares 9/10 trades with tau≥10 — OR adds 1 losing trade.
+            # Gate blocks n=35 (wins=2, losses=33, saves $671); rescue allows n=16 (+$95).
+            # Net vs flat block: +$190 better (rescue earns $95 on top of savings).
+            if best_side == "yes" and p_market < 0.35:
+                _lowpm_rescue = (
+                    _markov_1h == "Sideways"
+                    and tau_min >= 10.0
+                )
+                if not _lowpm_rescue:
+                    print(f"    [btc_15m_lowpm_gate] BLOCK YES→NO {ticker} — "
+                          f"pm={p_market:.3f}<0.35, 1h_regime={_markov_1h}, tau={tau_min:.1f}min "
+                          f"(rescue requires 1h=Sideways+tau≥10)")
+                    best_side, best_edge = "no", edge_no
+                else:
+                    print(f"    [btc_15m_lowpm_gate] RESCUE YES {ticker} — "
+                          f"pm={p_market:.3f}<0.35 but 1h=Sideways+tau={tau_min:.1f}≥10 "
+                          f"(WR=46.7% historically)")
+
             # Gate 3: insufficient ITM YES — block when offset_pct < 0.025%
             # Sim (1117 15m trades, split-half validated May 11-22):
             #   cutoff=+0.025 → Total=+$1,056 vs baseline +$334
@@ -1414,6 +1697,185 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     print(f"    [markov_15m_bear_gate] RESCUE YES — 15m Markov=Bear but "
                           f"composite_p_up={float(_cpu):.3f} ≤ 0.488 (mean-reversion, WR=75% expected)")
 
+            # [btc_15m_stoch_overbought_gate] Block YES when stoch_k_15m>=80 AND 15m regime != Bull.
+            # Analysis (2026-05-23, n=120): WR=50.8%, BE=59.8%, Edge=-9.0%, PnL=-$535.
+            # markov_15m=Bull (n=45): WR=62.2%, Edge=+0.6%, +$35 — overbought in Bull=momentum.
+            # markov_15m=Sideways (n=62): WR=45.2%, Edge=-15.0%, -$471 — overbought=exhaustion.
+            # Block n=75, saves $574; rescue n=45, earns +$35; net +$605 vs flat block +$535.
+            _stoch15 = float(sig.get("stoch_k_15m", 50.0) or 50.0)
+            if best_side == "yes" and _stoch15 >= 80.0:
+                _stoch_rescue = (_markov_15m == "Bull")
+                if not _stoch_rescue:
+                    print(f"    [btc_15m_stoch_overbought_gate] BLOCK YES→NO {ticker} — "
+                          f"stoch_k_15m={_stoch15:.1f}>=80, 15m_regime={_markov_15m} "
+                          f"(overbought+non-Bull=exhaustion, WR=45-33%)")
+                    best_side, best_edge = "no", edge_no
+                else:
+                    print(f"    [btc_15m_stoch_overbought_gate] RESCUE YES {ticker} — "
+                          f"stoch_k_15m={_stoch15:.1f}>=80 but 15m=Bull "
+                          f"(overbought in Bull=momentum, WR=62.2%)")
+
+            # [btc_15m_upcandle_midpm_gate] Block YES when dir=1+pm=[0.50,0.65) AND 1h != Bull.
+            # Analysis (2026-05-23, n=71): WR=45.1%, BE=58.1%, Edge=-13.0%, PnL=-$430.
+            # markov_1h=Bull (n=12): WR=66.7%, Edge=+7.1%, +$28 — trend supports up-candle YES.
+            # markov_1h=Bear+15m=Bear (n=11): WR=63.6%, +$13 — all have stoch_1h<35 (oversold).
+            # markov_1h=Bear+15m=Sideways (n=10): WR=0.0%, -$285 — death zone.
+            # Block n=48, saves $471; rescue n=23, WR=65.2%, earns +$41.
+            _dir15 = sig.get("dir_15m", 0)
+            if (best_side == "yes"
+                    and _dir15 == 1
+                    and 0.50 <= p_market < 0.65):
+                _stoch_1h = float(sig.get("stoch_k_1h", 50.0) or 50.0)
+                _upcandle_rescue = (
+                    _markov_1h == "Bull"
+                    or (_markov_1h == "Bear" and _markov_15m == "Bear" and _stoch_1h < 35.0)
+                )
+                if not _upcandle_rescue:
+                    print(f"    [btc_15m_upcandle_midpm_gate] BLOCK YES→NO {ticker} — "
+                          f"dir=1, pm={p_market:.3f}∈[0.50,0.65), 1h={_markov_1h}, 15m={_markov_15m} "
+                          f"(momentum spent, WR=43-33%)")
+                    best_side, best_edge = "no", edge_no
+                else:
+                    _rsrc = "1h=Bull" if _markov_1h == "Bull" else f"Bear/Bear+stoch_1h={_stoch_1h:.0f}<35 (oversold bounce)"
+                    print(f"    [btc_15m_upcandle_midpm_gate] RESCUE YES {ticker} — "
+                          f"dir=1+pm={p_market:.3f}: {_rsrc} (WR=63-67%)")
+
+        # [btc_15m_smallbody_sideways_gate] Block BTC YES when body_15m<0.30 AND 1h=Sideways.
+        # Analysis (2026-05-24, n=54 Sideways_1h): WR=42.6%, BE=56.7%, GAP=-14.1%, P&L=-$477.
+        # Bear_1h (n=17, +$15) excluded — marginally profitable; Bull_1h (n=11, +$6) excluded.
+        # Bear_1h trades already handled by markov_1h_bear_gate (flipped to NO before this check).
+        # Rescue: composite_p_up<0.40 OR stoch_k_15m∈[20,40) → n=13, WR=69.2%, +$22.
+        # Non-rescued: n=41, WR=34.1%, GAP=-22.6%, P&L=-$499 — hard block.
+        if asset.upper() == "BTC" and best_side == "yes" and _markov_1h == "Sideways":
+            _body15_btc = float(sig.get("body_15m", 1.0) or 1.0)
+            if _body15_btc < 0.30:
+                _cpu_btc  = sig.get("composite_p_up")
+                _sk15_btc = float(sig.get("stoch_k_15m", 50.0) or 50.0)
+                _smallbody_rescue = (
+                    (_cpu_btc is not None and float(_cpu_btc) < 0.40)
+                    or 20.0 <= _sk15_btc < 40.0
+                )
+                if not _smallbody_rescue:
+                    print(f"    [btc_15m_smallbody_sideways_gate] BLOCK YES→NO {ticker} — "
+                          f"body_15m={_body15_btc:.2f}<0.30, 1h=Sideways, "
+                          f"cpu={_cpu_btc}, stoch_k_15m={_sk15_btc:.1f} "
+                          f"(indecisive candle in sideways regime, WR=34.1% vs BE=56.7%)")
+                    best_side, best_edge = "no", edge_no
+                else:
+                    _rsrc_sb = ("cpu<0.40" if _cpu_btc is not None and float(_cpu_btc) < 0.40
+                                else f"stoch_k_15m={_sk15_btc:.1f}∈[20,40)")
+                    print(f"    [btc_15m_smallbody_sideways_gate] RESCUE YES {ticker} — "
+                          f"body<0.30+1h=Sideways but {_rsrc_sb} (WR=69.2%)")
+
+        # [btc_15m_hmm_state0_gate] Block BTC NO when HMM regime = State 0.
+        # State 0: stoch_k_5m=66 (neutral-high) diverges from stoch_k_1h=11 (deeply oversold).
+        # Sim (N=9, WR=22%, -$174): 7 losses blocked, 2 wins blocked.
+        # Causal: 5m momentum fighting a deeply oversold 1h = potential reversal, NO has no anchor.
+        if asset.upper() == "BTC" and best_side == "no" and _hmm_state == 0:
+            print(f"    [btc_15m_hmm_state0_gate] BLOCK NO {ticker} — "
+                  f"HMM State 0 (stoch_5m/1h divergence, WR=22% historically)")
+            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+            continue
+
+        # [btc_15m_no_uptrend_neutral_gate] Block BTC NO when chg_1h>0 AND stoch_k_1h∈[30,70).
+        # Deep gate analysis (2026-05-29, 143 resolved BTC 15m NO trades):
+        #   chg_1h>0 + stoch_1h[30,70): N=22, WR=27.3%, PnL=-$288 → delta +$288
+        #   Kept (neither): N=121, WR=42.1%, PnL=+$1,274
+        # Causal: BTC rose over the last hour AND 1h momentum is neutral (not oversold).
+        # No structural anchor for a reversal — uptrend intact, no oversold signal to
+        # expect a bounce back below the strike. No rescue found (stoch<20 AND chg_1h>0
+        # are contradictory — can't be oversold while simultaneously rising on the hour).
+        if asset.upper() == "BTC" and best_side == "no":
+            _chg_1h_btc  = float(sig.get("chg_1h",     0.0) or 0.0)
+            _sk1h_btc_no = float(sig.get("stoch_k_1h", 50.0) or 50.0)
+            if _chg_1h_btc > 0 and 30.0 <= _sk1h_btc_no < 70.0:
+                print(f"    [btc_15m_no_uptrend_neutral_gate] BLOCK NO {ticker} — "
+                      f"chg_1h={_chg_1h_btc:+.3f}%>0 + stoch_k_1h={_sk1h_btc_no:.1f}∈[30,70) "
+                      f"(uptrend + neutral 1h, no reversal anchor, N=22 WR=27% PnL=-$288)")
+                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                continue
+
+        # [btc_15m_no_sideways_overbought_gate] Block BTC NO when markov_1h=Sideways + pm>=0.70 + stoch>=70.
+        # Backtest (scan archive May 21-28 + paper trades May 25-Jun 1, combined n=121 gate candidates):
+        #   All 3 conditions (block zone): n=44, WR=6.8%, P&L=-$981 → saves +$981.
+        #   stoch<70 kept (rescue): n=77, WR=22.1%, P&L=+$1,271.
+        #   Scan archive total NO: +$665 improvement. Paper trades: +$317 improvement.
+        #   Weekly consistency: Wk21 block WR=10% (-$187), Wk22 block WR=6% (-$795) — both bad.
+        #   Impossible rescue check: no sub-slice (n>=5) inside block reaches WR>=30%.
+        # Causal: Sideways hourly regime (no trend) + near-ATM strike (pm>=0.70) + overbought
+        # 1h stoch (>=70) = upward momentum actively pushing toward a nearby strike with no
+        # directional anchor. Without overbought stoch, Sideways NO at high pm can still win
+        # (stoch<70 keep zone: WR=22.1%, profitable via payout asymmetry at high p_market).
+        if asset.upper() == "BTC" and best_side == "no":
+            _sk1h_sw = float(sig.get("stoch_k_1h", 0.0) or 0.0)
+            if (_markov_1h == "Sideways"
+                    and p_market >= 0.70
+                    and _sk1h_sw >= 70.0):
+                print(f"    [btc_15m_no_sideways_overbought_gate] BLOCK NO {ticker} — "
+                      f"markov=Sideways, pm={p_market:.3f}>=0.70, stoch_k_1h={_sk1h_sw:.1f}>=70 "
+                      f"(overbought momentum into near-ATM strike, WR=6.8% historically)")
+                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                continue
+
+        # [btc_15m_no_sideways_sideways_gate] Block BTC NO when 1h=Sideways AND 15m=Sideways.
+        # Paper trades (n=42): WR=19.0% vs BE≈31.8%, PnL=-$722 → block saves +$722.
+        # Sub-buckets: pm<0.55 (n=3, WR=100%) rescued; pm 0.55-0.70 (WR=18%) + pm≥0.70 (WR=6%) blocked.
+        # pm≥0.70 already partially caught by btc_15m_no_sideways_overbought_gate (stoch≥70 required);
+        # this gate closes the gap for mid-pm range and stoch<70 Sideways cases.
+        # Causal: both timeframes directionless → no momentum anchor; BTC drifts through YES strikes.
+        if asset.upper() == "BTC" and best_side == "no":
+            if _markov_1h == "Sideways" and _markov_15m == "Sideways" and p_market >= 0.55:
+                print(f"    [btc_15m_no_sideways_sideways_gate] BLOCK NO {ticker} — "
+                      f"1h=Sideways, 15m=Sideways, pm={p_market:.3f}>=0.55 "
+                      f"(no directional anchor on either TF, WR=19% historically)")
+                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                continue
+
+        # [btc_15m_no_bear_bull_gate] Block BTC NO when 1h=Bear AND 15m=Bull (regime divergence).
+        # Paper trades (n=19): WR=26.3% vs BE≈50.4%, PnL=-$322 → block saves +$322.
+        # No sub-bucket above breakeven: pm<0.55 (WR=38.5% vs BE=58.5%), all others worse.
+        # Causal: 1h downtrend but 15m momentum already turning up → mini-rally carries BTC above
+        # strike before the larger trend resumes. NO bets lose to the bounce.
+        if asset.upper() == "BTC" and best_side == "no":
+            if _markov_1h == "Bear" and _markov_15m == "Bull":
+                print(f"    [btc_15m_no_bear_bull_gate] BLOCK NO {ticker} — "
+                      f"1h=Bear, 15m=Bull (regime divergence: 15m bounce kills NO bets, "
+                      f"WR=26% vs BE=50% historically)")
+                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                continue
+
+        # [btc_15m_no_highpm_gate] Block NO when pm>0.85 (market deep ITM YES).
+        # Paper trades n=18: WR=5.6% vs BE=13.5%, PnL=-$420.
+        # liq_score=-1 does NOT rescue here (0/7 wins) — block all regardless of liq.
+        # Cause: inflated edge formula (p_market - p_model_no) produces phantom 70%+ edges
+        # on contracts where BTC is far above the strike; true edge is <1% but Kelly sizes ~$60.
+        if asset.upper() == "BTC" and best_side == "no" and p_market > 0.85:
+            print(f"    [btc_15m_no_highpm_gate] BLOCK NO {ticker} — "
+                  f"pm={p_market:.3f}>0.85 (WR=5.6% vs BE=13.5%, PnL=-$420 historically)")
+            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+            continue
+
+        # [btc_15m_no_midpm_liq_gate] Block NO when pm∈[0.65,0.75) unless liq_score=-1.
+        # Paper trades breakdown (n=63, WR=23.8%, BE=30.8%, PnL=-$549 total):
+        #   liq=-1 (genuine selling/liquidation): n=21, WR=47.6%, +$241 → RESCUE (keep)
+        #   liq= 0 (neutral):                     n=13, WR=23.1%,  -$69 → block
+        #   liq=+1 (buyers dominant):              n=27, WR= 7.4%, -$638 → block
+        # Causal: when buyers dominate (liq=+1), BTC momentum stays bullish and NO fails.
+        # Rescue: liquidation pressure (liq=-1) = genuine sellers compressing price → NO works.
+        if asset.upper() == "BTC" and best_side == "no" and 0.65 <= p_market < 0.75:
+            _liq_s = sig.get("liq_score")
+            _liq_s = float(_liq_s) if _liq_s is not None else 0.0
+            if _liq_s >= 0:
+                print(f"    [btc_15m_no_midpm_liq_gate] BLOCK NO {ticker} — "
+                      f"pm={p_market:.3f}∈[0.65,0.75), liq_score={_liq_s:.0f}≥0 "
+                      f"(buyers dominant or neutral, WR=7-23% historically)")
+                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                continue
+            else:
+                print(f"    [btc_15m_no_midpm_liq_gate] RESCUE NO {ticker} — "
+                      f"pm={p_market:.3f}∈[0.65,0.75) BUT liq_score={_liq_s:.0f}=-1 "
+                      f"(genuine liquidation pressure, WR=47.6% historically)")
+
         # [eth_no_consec_gate — 15m ETH NO]
         # Block NO when in a sustained bearish streak AND stochastic is already oversold.
         # Analysis (26 blocked at consec <= -1, 93 total ETH NO trades with feature):
@@ -1437,6 +1899,53 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     print(f"    [eth_no_consec_gate] RESCUE NO — "
                           f"consec_dir_15m={_cd15:.0f}<=-1 but stoch_k_15m={_sk15:.1f}>40 "
                           f"(genuine breakdown, NO allowed)")
+
+        # [eth_15m_no_downcandle_gate] Block NO when dir_15m==-1+pm>=0.50 unless strong body+pressure.
+        # Analysis (2026-05-23, n=71): WR=25.4%, BE=34.5%, P&L=-$612.
+        # liq_score=-2 (n=42): WR=16.7%, -$704 — hard blocker regardless of other signals.
+        # Rescue: body_15m>0.60 + bp_5m<0.45 → n=24, WR=50.0%, +$260.
+        # Three-feature: body>0.60 + bp<0.45 + liq!=-2 → n=12, WR=75.0%, +$393.
+        if asset.upper() == "ETH" and best_side == "no":
+            _d15_eth = sig.get("dir_15m", 0)
+            if _d15_eth == -1 and p_market >= 0.50:
+                _body_eth = float(sig.get("body_15m", 0.0) or 0.0)
+                _bp_eth   = float(sig.get("bp_5m", 0.5) or 0.5)
+                _liq_eth  = sig.get("liq_score")
+                _liq_eth_ok = (_liq_eth is None or _liq_eth != _liq_eth or float(_liq_eth) != -2)
+                _downcandle_rescue = (_body_eth > 0.60 and _bp_eth < 0.45 and _liq_eth_ok)
+                if not _downcandle_rescue:
+                    print(f"    [eth_15m_no_downcandle_gate] BLOCK NO→YES {ticker} — "
+                          f"dir=-1, pm={p_market:.3f}>=0.50, body={_body_eth:.2f}, "
+                          f"bp={_bp_eth:.2f}, liq={_liq_eth} "
+                          f"(rescue needs body>0.60+bp<0.45+liq!=-2)")
+                    best_side, best_edge = "yes", edge_yes
+                else:
+                    print(f"    [eth_15m_no_downcandle_gate] RESCUE NO {ticker} — "
+                          f"dir=-1+pm={p_market:.3f}: body={_body_eth:.2f}>0.60"
+                          f"+bp={_bp_eth:.2f}<0.45+liq={_liq_eth}!=-2 (WR=50-75%)")
+
+        # [eth_15m_no_stoch1h_gate] Block NO when stoch_k_1h>80 AND no bullish K>D crossover.
+        # Full paper trade history (n=953 with stoch, stoch_cross sub-analysis):
+        #   stoch>80 + cross!=1: n=69, WR=50.7%, BE≈59%, P&L=-$383 → saves +$383.
+        #   stoch>80 + cross=1 rescue: n=28, WR=78.6%, P&L=+$363 → kept.
+        #   stoch>80 + cross=null: n=38, P&L=+$107 → gate skipped (no data).
+        # Causal: stoch>80 + no fresh crossover = overbought grind without breakout signal →
+        # price may drift into strike. cross=1 = K>D just fired = active momentum → NO still wins.
+        # Scan archive confirms: 39 blocked at 5.1% WR. Consistent Wk21-22.
+        if asset.upper() == "ETH" and best_side == "no":
+            _sk1h_no = float(sig.get("stoch_k_1h", 0.0) or 0.0)
+            _sc1h_no = sig.get("stoch_cross_1h")
+            if _sk1h_no > 80.0 and _sc1h_no is not None:
+                _sc1h_no_f = float(_sc1h_no or 0)
+                if _sc1h_no_f != 1.0:
+                    print(f"    [eth_15m_no_stoch1h_gate] BLOCK NO→YES {ticker} — "
+                          f"stoch_k_1h={_sk1h_no:.1f}>80, stoch_cross_1h={_sc1h_no_f:.0f}!=1 "
+                          f"(overbought, no momentum cross; WR=50.7% vs BE≈59%)")
+                    best_side, best_edge = "yes", edge_yes
+                else:
+                    print(f"    [eth_15m_no_stoch1h_gate] RESCUE NO {ticker} — "
+                          f"stoch_k_1h={_sk1h_no:.1f}>80 but stoch_cross_1h=1 "
+                          f"(fresh bullish K>D cross = active momentum, WR=78.6%)")
 
         # [sol_markov_gates — block SOL contracts in adverse Markov regimes]
         # Gates (validated on 784 resolved SOL 15m trades, flat $25 bet):
@@ -1493,6 +2002,86 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                          else f"offset={offset_pct:+.3f}%≤{_OFF_MED_SOL}")
                 print(f"    [sol_markov_gate] RESCUE NO [{_rsrc}] ({_regs})")
 
+        # [sol_15m_yes_stoch_cross_gate] Hard block YES when stoch_cross_1h != 0.
+        # Analysis (2026-05-23, n=77): WR=40.3%, BE=55.7%, P&L=-$335.
+        # stoch_cross_1h=+1: n=45, WR=44.4%, -$133. stoch_cross_1h=-1: n=32, WR=34.4%, -$203.
+        # No rescue found above 58% at n>=10 across all tested features.
+        if asset.upper() == "SOL" and best_side == "yes":
+            if _sc1h != 0:
+                print(f"    [sol_15m_yes_stoch_cross_gate] BLOCK YES→NO {ticker} — "
+                      f"stoch_cross_1h={_sc1h:+.0f} (momentum reversing, "
+                      f"n=77 WR=40.3% vs BE=55.7%, no rescue)")
+                best_side, best_edge = "no", edge_no
+
+        # [sol_15m_yes_oi_vwap_gate] Hard block YES when OI declining or below VWAP + low pm.
+        # Analysis (2026-05-23, n=107): WR=24.3%, BE=36.5%, P&L=-$364.
+        # oi_chg_pct<-0.005 (distribution): n=69, WR=21.7%. vwap_dist<-0.01 (below VWAP): n=80, WR=26.2%.
+        # No rescue found — max WR=33.3% at n=9 across all tested features. Clean hard block.
+        if asset.upper() == "SOL" and best_side == "yes":
+            _oi_sol = float(sig.get("oi_chg_pct", 0) or 0)
+            _vd_sol = float(sig.get("vwap_dist", 0) or 0)
+            if (_oi_sol < -0.005 or _vd_sol < -0.01) and p_market < 0.55:
+                print(f"    [sol_15m_yes_oi_vwap_gate] BLOCK YES→NO {ticker} — "
+                      f"oi_chg={_oi_sol:.4f}, vwap_dist={_vd_sol:.4f}, pm={p_market:.3f} "
+                      f"(distribution/below VWAP at low pm, WR=24.3% vs BE=36.5%, no rescue)")
+                best_side, best_edge = "no", edge_no
+
+        # [sol_15m_yes_highcpu_gate] Block YES when composite_p_up>0.55; rescue if bp_1h>0.55.
+        # Analysis (2026-05-23, n=64): WR=40.6%, BE=53.6%, P&L=-$224.
+        # Rescue bp_1h>0.55: n=10, WR=70.0%, +$29. Remainder n=54, WR=35.0%, -$240 — hard block.
+        # composite_p_up>0.65: n=9, WR=0.0%, -$79 — worst sub-bucket.
+        if asset.upper() == "SOL" and best_side == "yes":
+            _cpu_sol = sig.get("composite_p_up")
+            if _cpu_sol is not None and float(_cpu_sol) > 0.55:
+                _bp1h_sol = float(sig.get("bp_1h", 0.5) or 0.5)
+                _highcpu_rescue = (_bp1h_sol > 0.55)
+                if not _highcpu_rescue:
+                    print(f"    [sol_15m_yes_highcpu_gate] BLOCK YES→NO {ticker} — "
+                          f"composite_p_up={float(_cpu_sol):.3f}>0.55, bp_1h={_bp1h_sol:.3f} "
+                          f"(model overconfident, rescue needs bp_1h>0.55)")
+                    best_side, best_edge = "no", edge_no
+                else:
+                    print(f"    [sol_15m_yes_highcpu_gate] RESCUE YES {ticker} — "
+                          f"cpu={float(_cpu_sol):.3f}>0.55 but bp_1h={_bp1h_sol:.3f}>0.55 "
+                          f"(buy pressure confirms, WR=70.0%)")
+
+        # [sol_15m_yes_offset_gate] Hard block YES when offset_pct in [-10%, 0%) — barely OTM zone.
+        # Analysis (2026-05-23, n=34): WR=20.6%, BE≈50%, P&L≈-$500.
+        # Spot is below floor strike — YES needs a sharp upward move in 15 min. No rescue.
+        if asset.upper() == "SOL" and best_side == "yes":
+            if -10.0 <= offset_pct < 0.0:
+                print(f"    [sol_15m_yes_offset_gate] BLOCK YES→NO {ticker} — "
+                      f"offset={offset_pct:+.3f}%∈[-10%,0) "
+                      f"(OTM YES in barely-below-floor zone, WR=20.6%, no rescue)")
+                best_side, best_edge = "no", edge_no
+
+        # [sol_15m_no_stoch_gate] Block NO when stoch_k_1h∈[60,80); rescue on near-extreme/deep-OTM/low-pm.
+        # Analysis (2026-05-23, non-rescued n=42): WR=28.6%, BE≈35%, P&L=-$532.
+        # Rescue: (pm<0.55 AND cpu<0.45) = market+model both low YES → NO still has edge.
+        #         stoch_k_1h>=75 = near-extreme overbought → mean-reversion thesis strengthens.
+        #         offset_pct<-0.10 = spot >0.10% below floor → NO structurally strong.
+        if asset.upper() == "SOL" and best_side == "no":
+            if 60.0 <= _sk1h < 80.0:
+                _cpu_sol2   = sig.get("composite_p_up")
+                _cpu_sol2_f = float(_cpu_sol2) if _cpu_sol2 is not None else 0.5
+                _nostoch_rescue = (
+                    (p_market < 0.55 and _cpu_sol2_f < 0.45)
+                    or _sk1h >= 75.0
+                    or offset_pct < -0.10
+                )
+                if not _nostoch_rescue:
+                    print(f"    [sol_15m_no_stoch_gate] BLOCK NO→YES {ticker} — "
+                          f"stoch_k_1h={_sk1h:.1f}∈[60,80), pm={p_market:.3f}, "
+                          f"cpu={_cpu_sol2_f:.3f}, offset={offset_pct:+.3f}% "
+                          f"(momentum extended, no rescue)")
+                    best_side, best_edge = "yes", edge_yes
+                else:
+                    _rsrc_sol = ("near-extreme stoch>=75" if _sk1h >= 75.0
+                                 else ("deep-OTM offset<-0.10" if offset_pct < -0.10
+                                       else "pm<0.55+cpu<0.45"))
+                    print(f"    [sol_15m_no_stoch_gate] RESCUE NO {ticker} — "
+                          f"stoch_k_1h={_sk1h:.1f}: {_rsrc_sol}")
+
         # P_MARKET VOLATILITY GATE: skip deep-OTM contracts on either side.
         # Sim (347 resolved trades): 0W/26L blocked at 0.12/0.88 → +$538 PnL delta.
         if p_market < P_MARKET_VOL_MIN or p_market > P_MARKET_VOL_MAX:
@@ -1508,9 +2097,12 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         print(f"\n  Contract: {ticker}")
         print(f"    floor_strike={floor_s:.4f}  offset={offset_pct:+.3f}%  "
               f"tau={tau_min:.1f}min  p_market={p_market:.3f}")
-        _branch_str = (f"  p_yes(zdrift)={p_model_yes:.3f}  p_no(lgbm)={p_model_no:.3f}"
-                       if asset == "BTC" and _zdrift_15m is not None
-                       else f"  p_model={p_model:.3f}")
+        if asset == "BTC" and _p_up_v2_btc is not None:
+            _branch_str = f"  p_yes(pup_v2)={p_model_yes:.3f}  p_no(pup_v2)={p_model_no:.3f}"
+        elif asset == "BTC" and _zdrift_15m is not None:
+            _branch_str = f"  p_yes(zdrift)={p_model_yes:.3f}  p_no(lgbm)={p_model_no:.3f}"
+        else:
+            _branch_str = f"  p_model={p_model:.3f}"
         print(f"   {_branch_str}  edge_yes={edge_yes:+.3f}  edge_no={edge_no:+.3f}"
               f"  → best={best_side.upper()} ({best_edge:+.3f})"
               + (f"  tau_adj={adjusted_edge:+.3f}" if tau_min < 5.0 else ""))
@@ -1528,6 +2120,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         if c["ticker"] == winner_ticker:
             continue  # winner logged below
         p_market = c["p_market"]
+        sig["p_gbdt"] = _lgbm_shadows.get(c["ticker"], "")
         row = _build_row(
             asset=asset, decision_time=decision_time, ticker=c["ticker"],
             close_time=c["close_time"], spot=spot, floor_s=c["floor_strike"],
@@ -1554,10 +2147,12 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     print(f"\n  [best] → {ticker} {side.upper()}  edge={best_edge:+.3f}"
           f"  ({len(candidates)} contract(s) qualified)")
 
+    # HMM State 7 → elevated Kelly cap (high-payout NO regime, +$116/trade historical)
+    _kelly_cap = MAX_BET_FRAC_ST7 if (asset == "BTC" and _hmm_state == 7) else MAX_BET_FRAC
     try:
         kelly = compute_kelly_size(
             p_model=p_model, p_market=p_market, bankroll=bankroll,
-            kelly_multiplier=KELLY_MULT, side=side, max_bet_fraction=MAX_BET_FRAC,
+            kelly_multiplier=KELLY_MULT, side=side, max_bet_fraction=_kelly_cap,
         )
     except ValueError as e:
         print(f"    [kelly] Error: {e}. Skipping.")
@@ -1587,6 +2182,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     print(f"    Kelly: frac={kelly.kelly_fraction:.4f}  bet_frac={kelly.bet_fraction:.4f}  "
           f"amount=${kelly.bet_amount:.2f}  cost=${cost:.2f}")
 
+    sig["p_gbdt"] = _lgbm_shadows.get(ticker, "")
     row = _build_row(
         asset=asset, decision_time=decision_time, ticker=ticker,
         close_time=close_time, spot=spot, floor_s=floor_s,
@@ -1614,7 +2210,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 bet_amount=kelly.bet_amount,
                 bid=bid_pm,
                 ask=ask_pm,
-                max_contracts=50,
+                max_contracts=500,
             )
             if live_count == 0:
                 print(f"  [live] Bet ${kelly.bet_amount:.2f} too small for one contract — skipping.")
@@ -1660,6 +2256,11 @@ def _build_row(
             return round(fv, d) if fv == fv else ""
         except (TypeError, ValueError):
             return ""
+    # z_score: log(K/S) / sigma_tau using realized vol — captures moneyness for LGBM
+    _vol_pm    = float(sig.get("vol_multi") or
+                       sig.get("realized_vol_annual", 0.3) / math.sqrt(MINS_PER_YEAR))
+    _sigma_tau = max(_vol_pm * math.sqrt(tau_min), 1e-6)
+    _z_score   = round(math.log(floor_s / spot) / _sigma_tau, 4) if spot > 0 else ""
     return {
         "logged_at":            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00:00"),
         "decision_time":        decision_time,
@@ -1676,8 +2277,12 @@ def _build_row(
         "raw_edge":             round(raw_edge, 4),
         "side":                 side,
         "decision":             decision,
+        # per-contract moneyness
+        "z_score":              _z_score,
         # 5m
         "bp_5m":                _f(sig.get("bp_5m")),
+        "body_5m":              _f(sig.get("body_5m")),
+        "dir_5m":               sig.get("dir_5m", ""),
         "vol_ratio":            _f(sig.get("vol_ratio"), 3),
         "vol_ratio_5m":         _f(sig.get("vol_ratio_5m"), 3),
         # 15m
@@ -1699,6 +2304,8 @@ def _build_row(
         "vwap_dist":            _f(sig.get("vwap_dist")),
         "ema_bias":             sig.get("ema_bias", ""),
         "ema_bias_1h":          sig.get("ema_bias_1h", ""),
+        "ema20_dist_1h":        _f(sig.get("ema20_dist_1h")),
+        "ema50_dist_1h":        _f(sig.get("ema50_dist_1h")),
         "nearest_res_dist_pct": _f(sig.get("nearest_res_dist_pct")),
         # composite / vol
         "composite_p_up":       _f(sig.get("composite_p_up")),
@@ -1715,6 +2322,18 @@ def _build_row(
         "macd_hist_1h":         _f(sig.get("macd_hist_1h"), 6),
         "donchian_breakout_1h": sig.get("donchian_breakout_1h", ""),
         "engulfing_1h":         sig.get("engulfing_1h", ""),
+        "bb_pct_1h":            _f(sig.get("bb_pct_1h")),
+        # 1h rolling drift
+        "mu6h":                 _f(sig.get("mu6h"), 7),
+        "mu12h":                _f(sig.get("mu12h"), 7),
+        "mu24h":                _f(sig.get("mu24h"), 7),
+        "regime_z":             _f(sig.get("regime_z")),
+        "arima_forecast_1h":    _f(sig.get("arima_forecast_1h"), 7),
+        # 4h
+        "stoch_k_4h":           _f(sig.get("stoch_k_4h"), 2),
+        "rsi_4h":               _f(sig.get("rsi_4h"), 2),
+        "chg_4h":               _f(sig.get("chg_4h")),
+        "bp_4h":                _f(sig.get("bp_4h")),
         # Coinalyze
         "liq_score":            liq_signal.liq_score              if liq_signal is not None else "",
         "liq_bias":             _f(liq_signal.liq_bias)           if liq_signal is not None else "",
@@ -1739,6 +2358,7 @@ def _build_row(
         "markov_sol_1h":        sig.get("markov_sol_1h",     ""),
         "p_up_v2_btc":          _f(sig.get("p_up_v2_btc")),
         "z_drift_6h":           _f(sig.get("z_drift_6h")),
+        "p_gbdt":               _f(sig.get("p_gbdt")),
     }
 
 

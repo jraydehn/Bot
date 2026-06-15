@@ -3024,8 +3024,7 @@ def main() -> None:
                 print(f"  [lgbm_ind] indicator compute failed: {_lgbm_ind_err}")
 
         for c in ladder:
-            _p_gbdt_c     = None   # BTC LGBM p(YES) from YES model
-            _p_gbdt_no_c  = None   # BTC LGBM p(NO) from dedicated NO model (directional flips)
+            _p_gbdt_c     = None   # BTC LGBM p(YES) for this contract
             s_k       = c["floor_strike"]
             pm        = c["p_market"]
             _offset_limit = 0.01 if args.asset == "BTC" else 0.05
@@ -3122,23 +3121,6 @@ def main() -> None:
                 _btc_lgbm_c = _load_btc_lgbm()
                 if _btc_lgbm_c is not None:
                     _p_gbdt_c = _infer_btc_lgbm(_btc_lgbm_c, _gbdt_feats_c)
-                # Dedicated NO model: same features but with directional sign flips so
-                # bearish signals read as "positive" the way bullish signals do in YES model.
-                _btc_lgbm_no_c = _load_btc_lgbm_no()
-                if _btc_lgbm_no_c is not None:
-                    _gbdt_feats_no_c = dict(_gbdt_feats_c)
-                    for _no_col in ("offset_pct", "composite_trend", "ema_stack_bias",
-                                    "composite_rev", "pm_drift_5m", "chg_30m", "chg_10m",
-                                    "chg_5m", "macd_hist_1h", "bp_5m", "dir_15m"):
-                        _v = _gbdt_feats_no_c.get(_no_col, float("nan"))
-                        _gbdt_feats_no_c[_no_col] = -_v if _v == _v else float("nan")
-                    _v = _gbdt_feats_no_c.get("composite_p_up", float("nan"))
-                    _gbdt_feats_no_c["composite_p_up"] = (1.0 - _v) if _v == _v else float("nan")
-                    _gbdt_feats_no_c["di_plus_1h"], _gbdt_feats_no_c["di_minus_1h"] = (
-                        _gbdt_feats_no_c.get("di_minus_1h", float("nan")),
-                        _gbdt_feats_no_c.get("di_plus_1h", float("nan")),
-                    )
-                    _p_gbdt_no_c = _infer_btc_lgbm(_btc_lgbm_no_c, _gbdt_feats_no_c)
                 try:
                     import scan_archive as _sa
                     _sa.log_scan_row(
@@ -3759,12 +3741,8 @@ def main() -> None:
                     _sigma_tau_no if _sigma_tau_no > 0 else sigma_tau_c,
                     asset="BTC", p_up_override=_comp_p_up_c, z_drift_override=_z_drift_no,
                 )
-                # [lgbm_model_btc] Use dedicated NO model when available; fall back to 1-YES.
-                if _p_gbdt_no_c is not None:
-                    _p_no_btc = _p_gbdt_no_c
-                    if _p_gbdt_c is not None and abs(_p_gbdt_no_c - (1.0 - _p_gbdt_c)) > 0.03:
-                        print(f"  [lgbm_no] p_no={_p_gbdt_no_c:.3f}  (1-yes={1.0-_p_gbdt_c:.3f}, div={_p_gbdt_no_c-(1.0-_p_gbdt_c):+.3f})")
-                elif _p_gbdt_c is not None:
+                # [lgbm_model_btc] Use LGBM for NO side: P(NO) = 1 - P(YES from LGBM)
+                if _p_gbdt_c is not None:
                     _p_no_btc = 1.0 - _p_gbdt_c
                 _pm_ask = c["ask"]
                 _pm_bid = c["bid"]

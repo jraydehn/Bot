@@ -221,7 +221,7 @@ for name, imp in fi[:20]:
     print(f"  {name:<28} {imp:>8.1f}{tag}")
 
 # ---------------------------------------------------------------------------
-# 8. Save
+# 8. Save YES model
 # ---------------------------------------------------------------------------
 pkg = {
     "clf":      clf,
@@ -237,5 +237,101 @@ if not BACKUP_PATH.exists():
     print(f"\nBackup: {BACKUP_PATH.name}")
 
 MODEL_PATH.write_bytes(pickle.dumps(pkg))
-print(f"Saved: {MODEL_PATH}")
+MODEL_PATH_YES = REFORM_DIR / "btc_lgbm_yes.pkl"
+MODEL_PATH_YES.write_bytes(pickle.dumps(pkg))
+print(f"Saved: {MODEL_PATH} + {MODEL_PATH_YES.name}")
+
+# ---------------------------------------------------------------------------
+# 9. Train dedicated NO model (same features, directional sign flips)
+#    Flipped features: bearish = positive so model learns the same structure
+#    as YES model but from the NO side.
+# ---------------------------------------------------------------------------
+print("\n" + "=" * 60)
+print("Training dedicated NO model …")
+
+NO_NEGATE      = ["offset_pct", "composite_trend", "ema_stack_bias", "composite_rev",
+                  "pm_drift_5m", "chg_30m", "chg_10m", "chg_5m", "macd_hist_1h",
+                  "bp_5m", "dir_15m"]
+NO_INVERT_PROB = ["composite_p_up"]   # keep in [0,1] — 1-p_up = P(down)
+
+arc_no = arc[ALL_FEATURES].fillna(0).copy()
+for _col in NO_NEGATE:
+    if _col in arc_no.columns:
+        arc_no[_col] = -arc_no[_col]
+for _col in NO_INVERT_PROB:
+    if _col in arc_no.columns:
+        arc_no[_col] = 1.0 - arc_no[_col]
+if "di_plus_1h" in arc_no.columns and "di_minus_1h" in arc_no.columns:
+    arc_no["di_plus_1h"], arc_no["di_minus_1h"] = (
+        arc_no["di_minus_1h"].copy(), arc_no["di_plus_1h"].copy()
+    )
+
+X_all_no = arc_no.values.astype(float)
+y_all_no  = 1 - y_all   # target: P(NO wins)
+
+X_tr_no, y_tr_no = X_all_no[:i_val],        y_all_no[:i_val]
+X_va_no, y_va_no = X_all_no[i_val:i_test],  y_all_no[i_val:i_test]
+X_te_no, y_te_no = X_all_no[i_test:],       y_all_no[i_test:]
+
+print(f"NO split: train={len(y_tr_no):,}  val={len(y_va_no):,}  test={len(y_te_no):,}")
+print(f"  NO WR train={y_tr_no.mean():.3f}  val={y_va_no.mean():.3f}  test={y_te_no.mean():.3f}")
+
+clf_no = LGBMClassifier(
+    n_estimators=500,
+    learning_rate=0.05,
+    max_depth=5,
+    num_leaves=31,
+    min_child_samples=50,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_alpha=0.1,
+    reg_lambda=0.1,
+    random_state=42,
+    verbose=-1,
+)
+clf_no.fit(
+    X_tr_no, y_tr_no,
+    eval_set=[(X_va_no, y_va_no)],
+    feature_name=ALL_FEATURES,
+    callbacks=[],
+)
+
+auc_tr_no = roc_auc_score(y_tr_no, clf_no.predict_proba(X_tr_no)[:, 1])
+auc_va_no = roc_auc_score(y_va_no, clf_no.predict_proba(X_va_no)[:, 1])
+auc_te_no = roc_auc_score(y_te_no, clf_no.predict_proba(X_te_no)[:, 1])
+print(f"\nNO AUC — train={auc_tr_no:.4f}  val={auc_va_no:.4f}  test={auc_te_no:.4f}")
+
+p_raw_va_no   = clf_no.predict_proba(X_va_no)[:, 1]
+logits_va_no  = np.log(np.clip(p_raw_va_no, 1e-6, 1 - 1e-6) / (1 - np.clip(p_raw_va_no, 1e-6, 1 - 1e-6)))
+platt_no      = LogisticRegression(random_state=42)
+platt_no.fit(logits_va_no.reshape(-1, 1), y_va_no)
+print(f"NO Platt — coef={platt_no.coef_[0][0]:.4f}  intercept={platt_no.intercept_[0]:.4f}")
+
+p_raw_te_no   = clf_no.predict_proba(X_te_no)[:, 1]
+logits_te_no  = np.log(np.clip(p_raw_te_no, 1e-6, 1 - 1e-6) / (1 - np.clip(p_raw_te_no, 1e-6, 1 - 1e-6)))
+p_cal_te_no   = platt_no.predict_proba(logits_te_no.reshape(-1, 1))[:, 1]
+print(f"NO Test Brier — raw={brier_score_loss(y_te_no, p_raw_te_no):.4f}  "
+      f"cal={brier_score_loss(y_te_no, p_cal_te_no):.4f}")
+print(f"NO test p_cal mean={p_cal_te_no.mean():.4f}  actual NO WR={y_te_no.mean():.4f}")
+
+print("\nNO Top-15 feature importances (gain):")
+fi_no = sorted(zip(ALL_FEATURES, clf_no.feature_importances_), key=lambda x: -x[1])
+for _name, _imp in fi_no[:15]:
+    _tag = " [FLIP]" if _name in NO_NEGATE + NO_INVERT_PROB else (
+           " [SWAP]" if _name in ("di_plus_1h", "di_minus_1h") else "")
+    print(f"  {_name:<28} {_imp:>8.1f}{_tag}")
+
+MODEL_PATH_NO = REFORM_DIR / "btc_lgbm_no.pkl"
+pkg_no = {
+    "clf":            clf_no,
+    "platt":          platt_no,
+    "features":       ALL_FEATURES,
+    "auc_tr":         auc_tr_no,
+    "auc_va":         auc_va_no,
+    "auc_te":         auc_te_no,
+    "no_negate":      NO_NEGATE,
+    "no_invert_prob": NO_INVERT_PROB,
+}
+MODEL_PATH_NO.write_bytes(pickle.dumps(pkg_no))
+print(f"Saved: {MODEL_PATH_NO}")
 print("\nDone.")

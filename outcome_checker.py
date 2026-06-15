@@ -15,6 +15,7 @@ Requires KALSHI_KEY_ID and KALSHI_KEY_PATH env vars.
 
 import argparse
 import csv
+import math
 import os
 import sys
 import time
@@ -48,7 +49,8 @@ CSV_COLUMNS = [
     "composite_trend", "composite_rev", "composite_p_up",
     "p_up_v2",
     "chg_30m", "chg_10m", "chg_5m",
-    "bp_5m", "body_15m", "dir_15m", "p_gbdt",
+    "bp_5m", "bp_1h", "chg_1h", "chg_2h", "chg_3h",
+    "body_15m", "dir_15m", "p_gbdt",
     "sharp_move_active",
     "smc_4h", "smc_1h", "choch_1h", "choch_4h",
     "supply_pct", "demand_pct", "in_supply_zone", "in_demand_zone",
@@ -63,7 +65,29 @@ CSV_COLUMNS = [
     "ob_bid_wall_pct", "ob_ask_wall_pct",
     "resolved_yes", "would_win", "would_pnl",
     "spot_at_expiry", "price_move_pct", "miss_pct",
+    "loss_margin_pct", "loss_category",
 ]
+
+
+def _loss_category(miss_pct: float, would_win: bool, tau_minutes: float) -> tuple:
+    """Return (loss_margin_pct, loss_category) using tau-scaled thresholds.
+
+    sigma_tau = 0.07% × sqrt(tau_minutes / 30)  — 1-sigma BTC move over remaining window.
+      near_miss  : loss_margin < 1× sigma_tau   — within 1 sigma, genuine bad luck
+      marginal   : 1× ≤ loss_margin < 3× sigma_tau
+      clear_loss : loss_margin ≥ 3× sigma_tau   — decisively wrong signal
+    """
+    if would_win:
+        return 0.0, "win"
+    loss_margin = abs(miss_pct)
+    sigma_tau = 0.07 * math.sqrt(max(tau_minutes, 0.5) / 30.0)
+    if loss_margin < sigma_tau:
+        category = "near_miss"
+    elif loss_margin < 3.0 * sigma_tau:
+        category = "marginal"
+    else:
+        category = "clear_loss"
+    return round(loss_margin, 4), category
 
 
 def fetch_market(ticker: str, auth: KalshiAuth) -> dict:
@@ -313,10 +337,43 @@ def main(csv_path: Path = None) -> None:
             if spot_exp and strike > 0:
                 row["miss_pct"] = round((spot_exp - strike) / strike * 100, 4)
 
+        # Compute tau-scaled loss quality label
+        _miss_s = str(row.get("miss_pct") or "").strip()
+        _tau_s  = str(row.get("tau_minutes") or "").strip()
+        _ww_s   = str(row.get("would_win") or "").strip()
+        if _miss_s and _tau_s and _ww_s:
+            try:
+                _lm, _lc = _loss_category(float(_miss_s), _ww_s.lower() == "true", float(_tau_s))
+                row["loss_margin_pct"] = _lm
+                row["loss_category"]   = _lc
+            except (ValueError, TypeError):
+                pass
+
         updated += 1
         print(f"  {ticker}: resolved_yes={resolved_yes}  would_win={row['would_win']}  "
-              f"would_pnl={row['would_pnl']}")
+              f"would_pnl={row['would_pnl']}  loss_category={row.get('loss_category','?')}")
         time.sleep(0.2)  # rate-limit courtesy
+
+    # Backfill loss_category for already-resolved rows that predate this column
+    backfilled = 0
+    for row in rows:
+        if row.get("loss_category"):
+            continue
+        _miss_s = str(row.get("miss_pct") or "").strip()
+        _tau_s  = str(row.get("tau_minutes") or "").strip()
+        _ww_s   = str(row.get("would_win") or "").strip()
+        if not (_miss_s and _tau_s and _ww_s):
+            continue
+        try:
+            _lm, _lc = _loss_category(float(_miss_s), _ww_s.lower() == "true", float(_tau_s))
+            row["loss_margin_pct"] = _lm
+            row["loss_category"]   = _lc
+            backfilled += 1
+        except (ValueError, TypeError):
+            pass
+    if backfilled:
+        print(f"  [backfill] loss_category filled for {backfilled} existing rows.")
+        updated += backfilled
 
     # Write all rows back
     if updated > 0:

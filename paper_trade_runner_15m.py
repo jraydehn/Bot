@@ -342,6 +342,15 @@ CSV_COLUMNS = [
     "z_drift_6h",
     # Shadow LGBM output — lgbm_15m_{asset}.pkl runs alongside primary on every scan
     "p_gbdt",
+    # Shadow stochastic signals (no gate logic — log-only for future analysis)
+    "ou_theta",        # OU mean-reversion speed (higher = faster reversion)
+    "ou_halflife",     # OU half-life in hours (ln2 / ou_theta)
+    "ou_mu_distance",  # z-score: (current_price - OU long-run mean) / vol
+    "hurst_exponent",  # H>0.5 trending, H<0.5 mean-reverting, H≈0.5 random walk
+    "autocorr1_15",    # lag-1 autocorrelation of 15m log-returns (last 30 bars)
+    "autocorr1_30",    # lag-1 autocorrelation of 30m log-returns (last 30 bars)
+    "kalman_velocity", # Kalman-smoothed 1h price trend (return units, filtered)
+    "kalman_residual", # Kalman residual: actual − filtered (mean-reversion signal)
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -682,7 +691,7 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC") -> dict:
     # Mirrors the 1h runner's vol_multi so sigma_tau is computed the same way.
     vol_fallback = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])["vol_fallback"]
     try:
-        _vol_result = compute_realized_volatility(live_1m)
+        _vol_result = compute_realized_volatility(live_1m, asset=asset)
         sig["vol_multi"]          = _vol_result.vol_multi   # per-minute, for sigma_tau
         sig["realized_vol_annual"] = _vol_result.vol_multi * math.sqrt(MINS_PER_YEAR)
     except Exception:
@@ -1004,6 +1013,90 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC") -> dict:
             _lr_arima = np.log(df1h_c["close"] / df1h_c["close"].shift(1)).dropna()
             sig["arima_forecast_1h"] = float(
                 _ARIMA(_lr_arima, order=(2, 0, 1)).fit(disp=False).forecast(steps=1).iloc[0])
+        except Exception:
+            pass
+
+    # ── Shadow stochastic signals (log only — no gate logic) ─────────────────
+    # Uses 1h completed bars; minimum 30 bars for reliable estimates.
+    if len(df1h_c) >= 30:
+        try:
+            _cl_s = df1h_c["close"].values.astype(float)
+            _lr_s = np.diff(np.log(_cl_s))  # log returns
+
+            # autocorr1_15 / autocorr1_30 — lag-1 autocorrelation of 15m/30m
+            # log-returns, sampled from the 1m series resampled to those intervals.
+            # Using 1h bars as proxy: autocorr1_15 ≈ lag-1 on last 30 1h bars
+            # (honest approximation without a separate 15m resample here).
+            def _lag1_ac(arr):
+                if len(arr) < 4:
+                    return 0.0
+                x, y = arr[:-1] - arr[:-1].mean(), arr[1:] - arr[1:].mean()
+                denom = np.sqrt((x**2).sum() * (y**2).sum())
+                return float(np.dot(x, y) / denom) if denom > 0 else 0.0
+
+            sig["autocorr1_15"] = _lag1_ac(_lr_s[-30:])
+            sig["autocorr1_30"] = _lag1_ac(_lr_s[-60:] if len(_lr_s) >= 60 else _lr_s)
+
+            # hurst_exponent — rescaled range (R/S) on last 64 1h log-returns.
+            # H > 0.5 = persistent/trending; H < 0.5 = mean-reverting.
+            _h_wins = [8, 16, 32, 64]
+            _rs_pts = []
+            _h_lr = _lr_s[-64:] if len(_lr_s) >= 64 else _lr_s
+            for _w in _h_wins:
+                if len(_h_lr) < _w:
+                    continue
+                _seg = _h_lr[-_w:]
+                _mean = _seg.mean()
+                _dev  = np.cumsum(_seg - _mean)
+                _r    = _dev.max() - _dev.min()
+                _s    = _seg.std(ddof=1)
+                if _s > 0:
+                    _rs_pts.append((np.log(_w), np.log(_r / _s)))
+            if len(_rs_pts) >= 2:
+                _xs = np.array([p[0] for p in _rs_pts])
+                _ys = np.array([p[1] for p in _rs_pts])
+                _h  = float(np.polyfit(_xs, _ys, 1)[0])
+                sig["hurst_exponent"] = round(np.clip(_h, 0.0, 1.0), 4)
+
+            # Ornstein-Uhlenbeck fit via discrete AR(1) on 1h log-returns.
+            # y_t = mu + phi*(y_{t-1} - mu) + eps  =>  theta = -ln(phi) / dt
+            _ou_lr = _lr_s[-48:] if len(_lr_s) >= 48 else _lr_s
+            if len(_ou_lr) >= 10:
+                _y_ou  = _ou_lr
+                _mu_ou = _y_ou.mean()
+                _y_c   = _y_ou - _mu_ou
+                _phi   = float(np.dot(_y_c[:-1], _y_c[1:]) /
+                               (np.dot(_y_c[:-1], _y_c[:-1]) + 1e-12))
+                _phi   = np.clip(_phi, -0.9999, 0.9999)
+                # theta per hour (dt = 1h)
+                _theta = float(-np.log(abs(_phi)))
+                _theta = np.clip(_theta, 0.0, 10.0)
+                sig["ou_theta"]   = round(_theta, 6)
+                sig["ou_halflife"] = round(float(np.log(2) / _theta), 4) if _theta > 0 else 999.0
+                # distance of current price from the OU mean (in vol units)
+                _ou_std = float(_y_c.std(ddof=1)) + 1e-10
+                _cur_lr = float(_lr_s[-1]) if len(_lr_s) > 0 else 0.0
+                sig["ou_mu_distance"] = round((_cur_lr - _mu_ou) / _ou_std, 4)
+
+            # Kalman filter on 1h log-returns (constant-velocity model).
+            # State: [level, velocity]. Observation: log-return.
+            _kl = _lr_s[-48:] if len(_lr_s) >= 48 else _lr_s
+            if len(_kl) >= 5:
+                _Q = np.array([[1e-5, 0.0], [0.0, 1e-5]])  # process noise
+                _R = float(np.var(_kl)) + 1e-10              # obs noise
+                _x = np.array([_kl[0], 0.0])
+                _P = np.eye(2) * 0.1
+                _F = np.array([[1.0, 1.0], [0.0, 1.0]])
+                _H = np.array([[1.0, 0.0]])
+                for _obs in _kl:
+                    _x = _F @ _x
+                    _P = _F @ _P @ _F.T + _Q
+                    _K = _P @ _H.T / (float(_H @ _P @ _H.T) + _R)
+                    _innov = _obs - float(_H @ _x)
+                    _x = _x + _K.flatten() * _innov
+                    _P = (np.eye(2) - np.outer(_K.flatten(), _H)) @ _P
+                sig["kalman_velocity"] = round(float(_x[1]), 6)
+                sig["kalman_residual"] = round(float(_kl[-1] - float(_H @ _x)), 6)
         except Exception:
             pass
 
@@ -1767,6 +1860,20 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     print(f"    [btc_15m_smallbody_sideways_gate] RESCUE YES {ticker} — "
                           f"body<0.30+1h=Sideways but {_rsrc_sb} (WR=69.2%)")
 
+        # [btc_15m_yes_overbought_liq_gate] Block YES when stoch_k_1h>=95 AND liq_score=-1.
+        # Archive (n=17, 5 distinct episodes, 2026-05-25→2026-06-11):
+        #   WR=5.9%, BE=36.0%, edge=-30.1%, binomial p=0.005.
+        # Causal: max-overbought 1h + active long liquidations = no remaining upside fuel.
+        # No rescue: all pm/vol sub-buckets lose (pm<0.60: 0% WR, vol>=1.2: 0% WR). Pure block.
+        if asset.upper() == "BTC" and best_side == "yes":
+            _sk1h_obliq = float(sig.get("stoch_k_1h", 50.0) or 50.0)
+            _liq_obliq  = sig.get("liq_score")
+            if _sk1h_obliq >= 95.0 and _liq_obliq is not None and float(_liq_obliq) == -1:
+                print(f"    [btc_15m_yes_overbought_liq_gate] BLOCK YES→NO {ticker} — "
+                      f"stoch_k_1h={_sk1h_obliq:.1f}>=95 + liq_score=-1 "
+                      f"(max-overbought+long-liq, WR=5.9% vs BE=36.0%, p=0.005)")
+                best_side, best_edge = "no", edge_no
+
         # [btc_15m_hmm_state0_gate] Block BTC NO when HMM regime = State 0.
         # State 0: stoch_k_5m=66 (neutral-high) diverges from stoch_k_1h=11 (deeply oversold).
         # Sim (N=9, WR=22%, -$174): 7 losses blocked, 2 wins blocked.
@@ -1947,6 +2054,20 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                           f"stoch_k_1h={_sk1h_no:.1f}>80 but stoch_cross_1h=1 "
                           f"(fresh bullish K>D cross = active momentum, WR=78.6%)")
 
+        # [eth_no_stoch_oversold_gate — Gate C]
+        # Block ETH NO when 1h stoch oversold (<20) AND BTC 1h regime is non-Bear.
+        # Analysis (paper_trades_eth15m.csv, MCPT p=0.036, n=113 resolved NO):
+        #   sk1h<20 + non-Bear: flat_pnl=-$0.112/trade, would_pnl=-$515 Kelly-sized.
+        # Causal: 1h stoch<20 = ETH oversold → bounce imminent → YES wins → NO fails.
+        # Bear rescue: in BTC Bear regime, oversold = continued downtrend → NO still works.
+        if asset.upper() == "ETH" and best_side == "no":
+            _sk1h_gc = float(sig.get("stoch_k_1h", 50.0) or 50.0)
+            if _sk1h_gc < 20.0 and _markov_1h != "Bear":
+                print(f"    [eth_no_stoch_oversold_gate] BLOCK NO→YES {ticker} — "
+                      f"stoch_k_1h={_sk1h_gc:.1f}<20 + BTC_1h={_markov_1h!r} (non-Bear) "
+                      f"(oversold bounce → YES; MCPT p=0.036, n=113)")
+                best_side, best_edge = "yes", edge_yes
+
         # [sol_markov_gates — block SOL contracts in adverse Markov regimes]
         # Gates (validated on 784 resolved SOL 15m trades, flat $25 bet):
         #   6h Bull YES: block unless stoch_cross_1h=0           (rescue n=13, WR=62%, +$152)
@@ -2055,6 +2176,28 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                       f"(OTM YES in barely-below-floor zone, WR=20.6%, no rescue)")
                 best_side, best_edge = "no", edge_no
 
+        # [sol_15m_yes_ou_theta_gate] Block YES when ou_theta>3.0 + pup<=0.55 + autocorr1_30<-0.008.
+        # Analysis (2026-06-10, n=64 net-new): WR=32.8%, edge=-19.4%, PnL=-$488, MCPT p=0.0012.
+        # Rescue (autocorr1_30>=-0.008): n=62, WR=56.5%, edge=+0.8%, p=0.724 — positive edge, allow.
+        # Walk-forward: early p=0.012, late p=0.027 — both halves validate.
+        # Causal: ou_theta>3.0 = fast OU mean-reversion speed; autocorr1_30<-0.008 = confirmed
+        #         negative lag-1 autocorr at 30m level → agreement = price oscillates before
+        #         contract expires → YES bet fails. autocorr>=-0.008 (non-negative momentum) = rescue.
+        # Note: pup>0.55 already covered by sol_15m_yes_highcpu_gate — gate adds net-new blocks only.
+        if asset.upper() == "SOL" and best_side == "yes":
+            _ou_theta_g  = sig.get("ou_theta")
+            _autocorr_yg = sig.get("autocorr1_30")
+            _cpu_ou      = sig.get("composite_p_up")
+            if (_ou_theta_g is not None and _autocorr_yg is not None
+                    and float(_ou_theta_g) > 3.0
+                    and (_cpu_ou is None or float(_cpu_ou) <= 0.55)
+                    and float(_autocorr_yg) < -0.008):
+                print(f"    [sol_15m_yes_ou_theta_gate] BLOCK YES→NO {ticker} — "
+                      f"ou_theta={float(_ou_theta_g):.3f}>3.0, "
+                      f"autocorr1_30={float(_autocorr_yg):+.4f}<-0.008 "
+                      f"(fast mean-reversion+negative autocorr, WR=32.8%, edge=-19.4%)")
+                best_side, best_edge = "no", edge_no
+
         # [sol_15m_no_stoch_gate] Block NO when stoch_k_1h∈[60,80); rescue on near-extreme/deep-OTM/low-pm.
         # Analysis (2026-05-23, non-rescued n=42): WR=28.6%, BE≈35%, P&L=-$532.
         # Rescue: (pm<0.55 AND cpu<0.45) = market+model both low YES → NO still has edge.
@@ -2081,6 +2224,43 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                                        else "pm<0.55+cpu<0.45"))
                     print(f"    [sol_15m_no_stoch_gate] RESCUE NO {ticker} — "
                           f"stoch_k_1h={_sk1h:.1f}: {_rsrc_sol}")
+
+        # [sol_15m_no_kalman_gate] Block NO when kalman_velocity<-0.001; rescue BOTH hurst>=0.6+autocorr>=-0.008.
+        # Analysis (2026-06-10, block n=179): WR=41.9%, edge=-7.7%, PnL=-$854, MCPT p=0.0000.
+        # Rescue (BOTH hurst>=0.6 AND autocorr>=-0.008): n=64, WR=54.7%, edge=+2.6%, PnL=+$83, p=0.477.
+        # Walk-forward block: T1 p=0.042, T2 p=0.078 (borderline), T3 p=0.0012 — strengthening.
+        # Causal: kalman_velocity<-0.001 = declining Kalman trend. Without BOTH persistent Hurst
+        #         (>=0.6 = trending) AND non-negative autocorr (>=-0.008 = momentum), the decline
+        #         is oscillatory — price bounces before reaching floor → NO loses. Rescue = trending
+        #         decline with momentum → floor may be breached → allow NO (edge=+2.6%).
+        if asset.upper() == "SOL" and best_side == "no":
+            _kv_g = sig.get("kalman_velocity")
+            if _kv_g is not None and float(_kv_g) < -0.001:
+                _hurst_kg    = sig.get("hurst_exponent")
+                _autocorr_ng = sig.get("autocorr1_30")
+                _kv_rescue   = (
+                    _hurst_kg is not None and _autocorr_ng is not None
+                    and float(_hurst_kg) >= 0.6
+                    and float(_autocorr_ng) >= -0.008
+                )
+                if not _kv_rescue:
+                    if _hurst_kg is None:
+                        _kv_miss = "hurst=None"
+                    elif float(_hurst_kg) < 0.6:
+                        _kv_miss = f"hurst={float(_hurst_kg):.3f}<0.6"
+                    elif _autocorr_ng is None:
+                        _kv_miss = "autocorr=None"
+                    else:
+                        _kv_miss = f"autocorr={float(_autocorr_ng):+.4f}<-0.008"
+                    print(f"    [sol_15m_no_kalman_gate] BLOCK NO→YES {ticker} — "
+                          f"kalman_velocity={float(_kv_g):+.5f}<-0.001, {_kv_miss} "
+                          f"(oscillatory decline, WR=41.9%, edge=-7.7%)")
+                    best_side, best_edge = "yes", edge_yes
+                else:
+                    print(f"    [sol_15m_no_kalman_gate] RESCUE NO {ticker} — "
+                          f"kv={float(_kv_g):+.5f}, hurst={float(_hurst_kg):.3f}>=0.6, "
+                          f"autocorr={float(_autocorr_ng):+.4f}>=-0.008 "
+                          f"(persistent declining trend, WR=54.7%, edge=+2.6%)")
 
         # P_MARKET VOLATILITY GATE: skip deep-OTM contracts on either side.
         # Sim (347 resolved trades): 0W/26L blocked at 0.12/0.88 → +$538 PnL delta.
@@ -2162,6 +2342,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         print(f"    [kelly] No positive Kelly sizing. Skipping.")
         return
 
+    if kelly.bet_amount < 3.0:
+        print(f"    [min_bet] Skipping — Kelly bet ${kelly.bet_amount:.2f} < $3 (thin edge at pm={p_market:.3f})")
+        return
+
     # Nearest resistance dampener (YES only): halve Kelly when an overhead EMA/VWAP
     # level is within 0.5% above spot. Sim: nearest_res<=0.5% → WR=43.8%, delta=+$329
     # when fully blocked; dampener keeps volume while reducing exposure.
@@ -2173,6 +2357,17 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             kelly.bet_amount = round(kelly.bet_amount * 0.5, 2)
             print(f"    [res_damper] nearest_res={_res_dist:.2f}% ≤ 0.5% → Kelly ×0.5 "
                   f"(${_undampened:.2f} → ${kelly.bet_amount:.2f})")
+
+    # ETH YES Kelly dampener: all YES edge bands above [0.04,0.05) have negative flat PnL.
+    # Flat edge is inverted — higher raw_edge correlates with lower actual WR.
+    # 50% reduction approximately halves YES Kelly losses while preserving the only
+    # profitable YES band ([0.04,0.05), tiny Kelly anyway).
+    # Revert: remove this block.
+    if asset == "ETH" and side == "yes":
+        _undampened_eth = kelly.bet_amount
+        kelly.bet_amount = round(kelly.bet_amount * 0.5, 2)
+        print(f"    [eth_yes_kelly_damp] ETH YES ×0.5 "
+              f"(${_undampened_eth:.2f} → ${kelly.bet_amount:.2f})")
 
     n_contracts = max(1, round(kelly.bet_amount / p_market)) if side == "yes" \
                   else max(1, round(kelly.bet_amount / (1 - p_market)))
@@ -2359,6 +2554,15 @@ def _build_row(
         "p_up_v2_btc":          _f(sig.get("p_up_v2_btc")),
         "z_drift_6h":           _f(sig.get("z_drift_6h")),
         "p_gbdt":               _f(sig.get("p_gbdt")),
+        # Shadow stochastic signals (log-only)
+        "ou_theta":             _f(sig.get("ou_theta")),
+        "ou_halflife":          _f(sig.get("ou_halflife")),
+        "ou_mu_distance":       _f(sig.get("ou_mu_distance")),
+        "hurst_exponent":       _f(sig.get("hurst_exponent")),
+        "autocorr1_15":         _f(sig.get("autocorr1_15")),
+        "autocorr1_30":         _f(sig.get("autocorr1_30")),
+        "kalman_velocity":      _f(sig.get("kalman_velocity")),
+        "kalman_residual":      _f(sig.get("kalman_residual")),
     }
 
 

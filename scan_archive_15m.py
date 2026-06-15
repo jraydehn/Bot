@@ -86,6 +86,8 @@ COLUMNS = [
     "spot_at_expiry", "price_move_pct", "miss_pct",
     # Drift model features (BTC: p_up_v2 + 6h rolling z_drift)
     "p_up_v2_btc", "z_drift_6h",
+    # HMM vol-regime state (BTC only; 0=low-vol, 1=med-vol, 2=high-vol)
+    "hmm_vol_state",
 ]
 
 _META_COLS = {

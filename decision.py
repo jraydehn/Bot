@@ -650,22 +650,27 @@ def evaluate_trade(
     #   NO:  rr = (1 - p_market) / p_market
     #        Lower bound: rr < 0.33 blocks near-ATM NO (pm > 0.75).
     #        Upper bound: rr > 4.0 blocks cheap NO (pm < 0.20).
-    #        Exception: net_edge >= 0.08 overrides both bounds.
+    #        Exception: net_edge >= threshold overrides both bounds.
+    #        BTC NO: threshold = 0.055 — historical n=2,968 ema=-1 pm[0.75,0.90) shows
+    #          WR=21-32% vs BEV=13-23% (profitable), model underestimates NO win rate
+    #          at near-ATM high-pm contracts; 0.08 was too conservative.
+    #          All other assets/sides: 0.08 unchanged.
+    #        Revert: decision_pre_rr_bearema_20260606.py
     RR_MAX_NO  = 4.0
     RR_MIN_NO  = 0.33
     RR_MAX_YES = 3.0
-    RR_EDGE_EXCEPTION = 0.08
+    _rr_exception = 0.055 if (asset == "BTC" and side == "no") else 0.08
     rr = p_market / (1 - p_market) if side == "yes" else (1 - p_market) / p_market
     if side == "yes":
         rr_fail = rr > RR_MAX_YES  # no edge exception — archive shows it loses regardless
     else:
-        rr_fail = (rr < RR_MIN_NO or rr > RR_MAX_NO) and pricing.net_edge < RR_EDGE_EXCEPTION
+        rr_fail = (rr < RR_MIN_NO or rr > RR_MAX_NO) and pricing.net_edge < _rr_exception
     if rr_fail:
         if side == "yes":
             bound = f"> {RR_MAX_YES} (p_market > 0.75 — poor R:R, blocked unconditionally)"
         else:
             bound = f"< {RR_MIN_NO} (near-ATM NO)" if rr < RR_MIN_NO else f"> {RR_MAX_NO} (cheap NO)"
-        edge_clause = "" if side == "yes" else f" and net_edge={pricing.net_edge:+.4f} < {RR_EDGE_EXCEPTION:.0%} exception threshold"
+        edge_clause = "" if side == "yes" else f" and net_edge={pricing.net_edge:+.4f} < {_rr_exception:.1%} exception threshold"
         reasons.append(
             f"Gate R:R FAILED: R:R={rr:.2f} {bound} for {side.upper()} at p_market={p_market:.3f}{edge_clause}."
         )

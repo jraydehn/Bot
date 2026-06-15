@@ -89,10 +89,16 @@ def main() -> None:
     # Per-asset bankroll and loss limit
     parser.add_argument("--btc-bankroll",   type=float, default=250.0)
     parser.add_argument("--btc-loss-limit", type=float, default=50.0)
+    parser.add_argument("--btc-dual", action="store_true",
+                        help="Run BTC in dual mode (place live orders + log to paper CSV)")
     parser.add_argument("--eth-bankroll",   type=float, default=100.0)
     parser.add_argument("--eth-loss-limit", type=float, default=20.0)
     parser.add_argument("--sol-bankroll",   type=float, default=100.0)
     parser.add_argument("--sol-loss-limit", type=float, default=20.0)
+    parser.add_argument("--sol-live", action="store_true",
+                        help="Run SOL in live mode (place real orders)")
+    parser.add_argument("--sol-dual", action="store_true",
+                        help="Run SOL in dual mode (place live orders + log to paper CSV)")
     args = parser.parse_args()
 
     asset_args = {
@@ -103,8 +109,19 @@ def main() -> None:
     if args.live:
         for a in ASSETS:
             asset_args[a] += ["--live", "--max-contracts", str(args.max_contracts)]
+    if args.btc_dual:
+        asset_args["BTC"] += ["--dual", "--max-contracts", str(args.max_contracts)]
+    if args.sol_live:
+        asset_args["SOL"] += ["--live", "--max-contracts", str(args.max_contracts)]
+    if args.sol_dual:
+        asset_args["SOL"] += ["--dual", "--max-contracts", str(args.max_contracts)]
 
-    mode = "LIVE" if args.live else "PAPER"
+    mode = "LIVE" if args.live else (
+        "DUAL-BTC+SOL" if (args.btc_dual and args.sol_dual) else (
+        "DUAL-BTC+SOL-LIVE" if (args.btc_dual and args.sol_live) else (
+        "DUAL-SOL" if args.sol_dual else (
+        "DUAL-BTC" if args.btc_dual else (
+        "SOL-LIVE" if args.sol_live else "PAPER")))))
     print(f"  Mode: {mode}")
     for a in ASSETS:
         print(f"  {a}: {' '.join(asset_args[a])}")

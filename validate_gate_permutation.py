@@ -57,6 +57,8 @@ parser.add_argument("--gate",    choices=["hmm_mtf_st3", "stoch_no", "bp_1h_no",
                                           "btc_highpm_no", "semi_markov_r1",
                                           "near_itm", "beardrift",
                                           "near_atm_ema", "strong_trend_nearatm",
+                                          "near_atm_no_rising",
+                                          "no_bp1h_chg1h",
                                           "all", "all_yes"],
                     default="hmm_mtf_st3")
 parser.add_argument("--csv",     choices=["scan_1h", "scan_15m"], default="scan_1h")
@@ -177,6 +179,8 @@ GATE_SIDE = {
     "beardrift":            "yes",
     "near_atm_ema":         "yes",
     "strong_trend_nearatm": "yes",
+    "near_atm_no_rising":   "no",
+    "no_bp1h_chg1h":        "no",
 }
 
 
@@ -238,6 +242,34 @@ def make_gate_mask(df, gate_name):
         arm1   = base & (sk >= 35) & ~rescue
         arm2   = base & (sk <  25) & (off > 0)
         return arm1 | arm2
+
+    elif gate_name == "near_atm_no_rising":
+        # Block near-ATM NO when price is rising (chg_30m>0) + ema bearish AND
+        # no bullish order-book absorption (obi=-1) OR stoch oversold-but-falling (<20).
+        # Both conditions indicate NO has no path: market rising without exhaustion signals.
+        # Tested 2026-06-06: n=1,006 blocked, edge=-5.9%; allowed set n=2,310, edge=+3.9%.
+        pm   = pd.to_numeric(df.get("p_market",       0.5), errors="coerce").fillna(0.5)
+        off  = pd.to_numeric(df.get("offset_pct",     0.0), errors="coerce").fillna(0.0)
+        ema  = pd.to_numeric(df.get("ema_stack_bias",   0), errors="coerce").fillna(0)
+        chg  = pd.to_numeric(df.get("chg_30m",         0), errors="coerce").fillna(0)
+        sk   = pd.to_numeric(df.get("stoch_k",        50), errors="coerce").fillna(50)
+        obi  = pd.to_numeric(df.get("obi_score",        0), errors="coerce").fillna(0)
+        scope = (off > -0.5) & (off < 0) & (pm >= 0.60) & (pm < 0.90) & (ema == -1) & (chg > 0)
+        block = (sk < 20) | (obi == -1)
+        return scope & block
+
+    elif gate_name == "no_bp1h_chg1h":
+        # Block near-ATM NO (ema=-1) when bp_1h>=0.45 OR chg_1h>=-0.2%.
+        # Both legs signal no realized downward momentum — ema=-1 is positioning, not action.
+        # Deep-gate analysis 2026-06-06: block n=5,913 edge=-17.5%; allow n=6,732 edge=+23.3%.
+        pm   = pd.to_numeric(df.get("p_market",       0.5), errors="coerce").fillna(0.5)
+        off  = pd.to_numeric(df.get("offset_pct",     0.0), errors="coerce").fillna(0.0)
+        ema  = pd.to_numeric(df.get("ema_stack_bias",   0), errors="coerce").fillna(0)
+        bp   = pd.to_numeric(df.get("bp_1h",          0.5), errors="coerce").fillna(0.5)
+        chg  = pd.to_numeric(df.get("chg_1h",         0.0), errors="coerce").fillna(0.0)
+        scope = (off > -0.6) & (off < 0) & (pm >= 0.55) & (pm < 0.92) & (ema == -1)
+        block = (bp >= 0.45) | (chg >= -0.002)
+        return scope & block
 
     elif gate_name == "near_atm_ema":
         # Block YES when pm∈[0.50,0.60) AND ema_stack∈{0,+1} (no mean-reversion setup).
@@ -366,7 +398,8 @@ def run_mcpt(gate_name, pm_arr, won_arr, state_arr, sk_arr,
         sweep_fn  = lambda p, w: _best_hmm_state_delta(p, w, state_arr)
         param_lbl = "state"
     elif gate_name in ("bp_1h_no", "btc_highpm_no", "semi_markov_r1",
-                       "near_itm", "beardrift", "near_atm_ema", "strong_trend_nearatm"):
+                       "near_itm", "beardrift", "near_atm_ema", "strong_trend_nearatm",
+                       "near_atm_no_rising", "no_bp1h_chg1h"):
         # Fixed-condition gates — no parameter to sweep.
         # MCPT reduces to standard Perm for these; skip MCPT and use standard test instead.
         print(f"\n  MCPT: {gate_name} — fixed condition, no parameter to sweep. "
@@ -505,7 +538,9 @@ def run_walkforward(gate_name, sa_sorted, pm_arr, won_arr, state_arr, sk_arr,
         real_oos_delta = gate_oos - base_oos
 
         wr_blk = won_test[block_te].mean() if block_te.sum() else float("nan")
-        bk_blk = pm_test[block_te].mean()  if block_te.sum() else float("nan")
+        _side_oos = GATE_SIDE.get(gate_name, "no")
+        bk_blk = (pm_test[block_te].mean() if _side_oos == "yes"
+                  else 1 - pm_test[block_te].mean()) if block_te.sum() else float("nan")
         print(f"  OOS ungated : ${base_oos:+,.2f}  ({len(test_idx):,} bets)")
         print(f"  OOS gated   : ${gate_oos:+,.2f}  ({len(test_idx)-n_blk:,} bets, {n_blk} blocked)")
         print(f"  OOS Δ (real): ${real_oos_delta:+,.2f}")
@@ -548,7 +583,7 @@ def run_walkforward(gate_name, sa_sorted, pm_arr, won_arr, state_arr, sk_arr,
 
 # ── Run tests ─────────────────────────────────────────────────────────────────
 
-_ALL_NO_GATES  = ["hmm_mtf_st3", "stoch_no", "bp_1h_no", "btc_highpm_no", "semi_markov_r1"]
+_ALL_NO_GATES  = ["hmm_mtf_st3", "stoch_no", "bp_1h_no", "btc_highpm_no", "semi_markov_r1", "near_atm_no_rising", "no_bp1h_chg1h"]
 _ALL_YES_GATES = ["near_itm", "beardrift", "near_atm_ema", "strong_trend_nearatm"]
 _ALL_GATES     = _ALL_NO_GATES + _ALL_YES_GATES
 

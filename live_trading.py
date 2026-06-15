@@ -129,7 +129,8 @@ def compute_order_params(
     count is capped at max_contracts and minimum 1.
     """
     if side == "yes":
-        yes_price = math.ceil(ask * 100)
+        # +1 cent above ask to sweep the next order-book level and improve fill rate.
+        yes_price = math.ceil(ask * 100) + 1
         cost_per  = yes_price / 100.0
     else:
         yes_price = math.floor(bid * 100)
@@ -297,14 +298,20 @@ def log_live_trade(
     path = csv_path or LIVE_TRADES_CSV
     ensure_live_csv_exists(path)
 
-    order   = order_result.get("order", {})
-    cost    = count * (yes_price_cents if side == "yes" else (100 - yes_price_cents)) / 100.0
+    order        = order_result.get("order", {})
+    count_filled = int(order.get("count_filled", 0) or 0)
+    # Use actual filled count when the API reports at least one fill immediately.
+    # If nothing filled yet (purely resting), log the intended count as potential exposure.
+    actual_count = count_filled if count_filled > 0 else count
+    cost         = actual_count * (yes_price_cents if side == "yes" else (100 - yes_price_cents)) / 100.0
+    if count_filled > 0 and count_filled < count:
+        print(f"  [live] Partial fill: {count_filled}/{count} contracts filled → logging ${cost:.2f}")
 
     live_row = {
         "logged_at":       datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "contract_ticker": row.get("contract_ticker", ""),
         "side":            side,
-        "count":           count,
+        "count":           actual_count,
         "yes_price_cents": yes_price_cents,
         "live_cost":       round(cost, 4),
         "order_id":        order.get("order_id", ""),

@@ -61,17 +61,14 @@ SMOOTHING_N = 30      # minimum sample for full weight; below this blend toward 
 ASSET_BASELINES = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}
 
 # Per-asset drift multiplier for YES model (k_drift_yes) applied in score_to_p_model().
-# BTC uses a dual model: k_drift_yes=2.00 (YES) and k_drift_no=0.30 (NO, independent).
-# k_drift_yes=2.00 maximizes YES P&L on backtest (test holdout +$1,000 vs +$669 at k=0.8).
-# ETH/SOL use direct strike-hit HistGradientBoosting model; score_to_p_model is fallback only.
-#   BTC: k=2.00 (dual YES model, optimized for YES P&L independently)
-#   ETH: k=0.80 (legacy calibration, rarely used — direct model takes priority)
-#   SOL: k=0.10 (vol-dominated; sweep on 403 paper YES trades showed 0.10 optimal: +$2,832 vs +$2,223 at 0.20)
-# K_DRIFT_NO_BTC = 0.30 lives in paper_trade_runner.py (used only for independent NO model).
-DRIFT_MULTIPLIER = {"BTC": 0.70, "ETH": 0.80, "SOL": 0.10}
+# Fit per-asset against 15mo data to minimize mean calibration bias (restored April-15 values).
+#   BTC: k=1.40 (drift under-applied at k=1.0; restored 2026-06-16)
+#   ETH: k=0.80
+#   SOL: k=0.20
+DRIFT_MULTIPLIER = {"BTC": 1.40, "ETH": 0.80, "SOL": 0.20}
 
 
-K_DRIFT_NO_BTC = 0.0    # 2026-05-20: set to 0 (pure lognormal); rolling p_up_v2 regime gate handles NO direction in paper_trade_runner
+K_DRIFT_NO_BTC = 0.30   # BTC NO drift (restored April-15 value; was zeroed 2026-05-20)
 K_DRIFT_NO_ETH = 0.20   # ETH NO drift — simulation sweep (2026-05-08) showed K=0.20 closest to breakeven at pm [0.25,0.45)
 K_DRIFT_NO     = {"BTC": K_DRIFT_NO_BTC, "ETH": K_DRIFT_NO_ETH}
 
@@ -1142,8 +1139,6 @@ def score_to_p_model(trend_score: int, reversion_score: int,
         asset_u = asset.upper()
         if asset_u == "ETH":
             k_drift = 1.0 * math.exp(-0.3 * max(0, trend_score))
-        elif asset_u == "BTC":
-            k_drift = 0.0   # 2026-05-20: pure lognormal; p_up_v2 regime gate in runner replaces z_drift
         else:
             k_drift = DRIFT_MULTIPLIER.get(asset_u, 1.0)
         z_drift = norm.ppf(p_up) * k_drift

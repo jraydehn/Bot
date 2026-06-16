@@ -3204,8 +3204,13 @@ def main() -> None:
             # by a calibrated drift derived from empirical win rates on 11,108 test hours.
             # Falls back to pure log-normal (prob_c.p_yes) when composite is unavailable.
             if _composite_computed:
-                # April-15 model: vol_factor scales sigma for both YES and NO.
-                sigma_tau_c   = vol_adj_c * math.sqrt(tau_c)
+                # BTC reform: vol_factor removed from sigma — use vol_eff_c (not vol_adj_c).
+                # vol_factor is now used as a reachability gate (see below), not a sigma scaler.
+                _sigma_base   = vol_eff_c if args.asset == "BTC" else vol_adj_c
+                sigma_tau_c   = _sigma_base * math.sqrt(tau_c)
+                # YES drift computed below after p_up_v2 is available
+                _sq = math.sqrt(tau_c / 60.0) if args.asset == "BTC" else 0.0
+                _z_drift_6h = 0.0
                 # Tau-blended p_up: for BTC, interpolate between 1h and 30m calibration
                 # tables based on how much time remains. At tau>=60 pure 1h; at tau<=30
                 # pure 30m; linear blend between. Falls back to 1h for assets
@@ -3233,6 +3238,11 @@ def main() -> None:
                         if _bar_ts_now != _pup_v2_regime_state["last_bar_ts"]:
                             _pup_v2_buf.append(_p_up_v2)
                             _pup_v2_regime_state["last_bar_ts"] = _bar_ts_now
+                        # YES drift: norm.ppf(p_up_v2) × rvol_inv × k=0.3 × √(τ/60)
+                        if args.asset == "BTC" and sigma_tau_c > 0:
+                            from scipy.stats import norm as _norm_pup
+                            _z_drift_6h = float(_norm_pup.ppf(max(0.01, min(0.99, _p_up_v2)))) * _rvol_inv_btc * 0.3 * _sq
+                            print(f"  [yes_drift] z={_z_drift_6h:+.4f}  (pup={_p_up_v2:.3f} rvol_inv={_rvol_inv_btc:.3f})")
                 p_model_comp  = None
                 _p_no_eth     = None
                 # ETH HYBRID: YES → score_to_p_model (k=0.80, tau-blended p_up)
@@ -3266,10 +3276,18 @@ def main() -> None:
                         print(f"  [direct_p_model] inference error ({args.asset}): {_e} — falling back")
                         p_model_comp = None
                 if p_model_comp is None:
-                    p_model_comp = score_to_p_model(_active_trend, _active_rev, spot, s_k, sigma_tau_c, asset=args.asset, p_up_override=_comp_p_up_c)
+                    p_model_comp = score_to_p_model(_active_trend, _active_rev, spot, s_k, sigma_tau_c, asset=args.asset, p_up_override=_comp_p_up_c,
+                                                    z_drift_override=_z_drift_6h if args.asset == "BTC" else None)
             else:
                 p_model_comp  = prob_c.p_yes
 
+            # [lgbm_model_btc] LGBM replaces composite probability for BTC paper trading.
+            # Composite model is miscalibrated (gives ~27% YES for 0.23% OTM in bull trend).
+            # LGBM: AUC=0.917, Brier=0.132 vs composite Brier=0.308; p_cal mean=0.536 vs WR=0.526.
+            if args.asset == "BTC" and _p_gbdt_c is not None:
+                _composite_p_model_orig = p_model_comp  # keep for logging
+                p_model_comp = _p_gbdt_c
+                print(f"  [lgbm_model] p_model={_p_gbdt_c:.3f}  (composite was {_composite_p_model_orig:.3f})")
 
             # [BTC vol gate] For OTM YES only (offset > 0): block if |z_strike| > 2.0 × vol_factor.
             # Only OTM YES bets need the reachability gate — ITM YES bets are already in the money,
@@ -3709,11 +3727,23 @@ def main() -> None:
             _p_no_btc = None
             _dec_yes = None
             if args.asset == "BTC" and _composite_computed and sigma_tau_c > 0:
+                # NO drift: norm.ppf(p_up_v2) × rvol_inv × k=0.3 × √(τ/60); GARCH σ override
+                _ve_no = _garch_ve_btc if (not math.isnan(_garch_ve_btc) and _garch_ve_btc > 0) else vol_eff_c
+                _sigma_tau_no = _ve_no * math.sqrt(tau_c)
+                _sq_no = math.sqrt(tau_c / 60.0)
+                if _p_up_v2 is not None and _sigma_tau_no > 0:
+                    from scipy.stats import norm as _norm_no
+                    _z_drift_no = float(_norm_no.ppf(max(0.01, min(0.99, _p_up_v2)))) * _rvol_inv_btc * 0.3 * _sq_no
+                else:
+                    _z_drift_no = 0.0
                 _p_no_btc = score_to_p_no_model(
                     _active_trend, _active_rev, spot, s_k,
-                    sigma_tau_c,
-                    asset="BTC", p_up_override=_comp_p_up_c,
+                    _sigma_tau_no if _sigma_tau_no > 0 else sigma_tau_c,
+                    asset="BTC", p_up_override=_comp_p_up_c, z_drift_override=_z_drift_no,
                 )
+                # [lgbm_model_btc] Use LGBM for NO side: P(NO) = 1 - P(YES from LGBM)
+                if _p_gbdt_c is not None:
+                    _p_no_btc = 1.0 - _p_gbdt_c
                 _pm_ask = c["ask"]
                 _pm_bid = c["bid"]
                 # [stoch_bounce — BTC YES/NO extreme-stoch trigger, MT_1h17_4h40]
@@ -3747,6 +3777,16 @@ def main() -> None:
                     print(f"  [stoch_bounce] TRIGGER NO {c['ticker']} — "
                           f"stoch_k={_sk_bounce:.1f}>83, stoch_k_4h={_sk4h_bounce:.1f}>60, "
                           f"pm={pm:.3f}>0.40, p_lognorm={1-_p_bounce:.3f}")
+                # [lgbm_model_btc] Clear composite-tuned gate blocks when LGBM has YES edge.
+                # Composite model gates (bull_flag, neutral_ema, etc.) were calibrated for a broken
+                # probability engine. With LGBM driving p_model, they are redundant and harmful.
+                if _p_gbdt_c is not None and (_p_gbdt_c - pm) > 0.04:
+                    if _otm_yes_blocked:
+                        print(f"  [lgbm_model] RESCUE YES {c['ticker']} — LGBM edge={_p_gbdt_c - pm:+.3f} overrides {_otm_yes_block_gate}")
+                        _otm_yes_blocked = False
+                    if _smc_yes_blocked:
+                        print(f"  [lgbm_model] RESCUE YES {c['ticker']} — LGBM edge={_p_gbdt_c - pm:+.3f} overrides smc_gate")
+                        _smc_yes_blocked = False
                 _dec_yes = None
                 if _stoch_bounce_yes or (not _otm_yes_blocked and not _smc_yes_blocked):
                     _p_yes_eval = _p_bounce if _stoch_bounce_yes else p_yes_adj_c

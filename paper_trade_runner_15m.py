@@ -48,7 +48,7 @@ from scipy.stats import norm
 
 sys.path.insert(0, str(Path(__file__).parent))
 from kalshi_python_sync import KalshiAuth
-from live_signal import load_auth, kalshi_get, fetch_live_spot, fetch_recent_candles
+from live_signal import load_auth, kalshi_get, fetch_live_spot, fetch_recent_candles, fetch_cvd_1h
 from kelly_sizing import compute_kelly_size
 from market_data import compute_realized_volatility
 from probability_engine import implied_vol_from_price, blend_vol, REALIZED_VOL_WEIGHT_BY_ASSET
@@ -93,6 +93,70 @@ try:
     print(f"  [vol_hmm] Loaded {_VOL_HMM_PKL.name}  ({_n_vol_states} states)")
 except Exception as _ve:
     print(f"  [vol_hmm] WARNING: could not load vol-regime HMM: {_ve}")
+
+
+# VWAP Multi-Timeframe HMM (BTC 15m): 8-state model on 1m/5m/15m VWAP distances.
+# St4: price 1.14% above ALL VWAPs, rising → NO block (WR=10%, p=0.000, saves $990).
+# St2: above VWAPs falling, low vol → NO block (WR=14.8%, p=0.006, saves $819).
+# St5: neutral VWAP, not 1h-overbought → NO block (WR=29%, p=0.012, saves $1,233).
+# St7: mildly bull, not 15m-falling → NO block (WR=28.1%, p=0.020, saves $984).
+# St0: below 15m VWAP recovering → NO ×1.25 Kelly boost (WR=58.3%, p=0.000).
+_VWAP_HMM_PKL  = Path(__file__).parent / "models" / "hmm_vwap_mtf_btc_15m.pkl"
+_vwap_hmm_model  = None
+_vwap_hmm_scaler = None
+_vwap_hmm_feats: "list | None" = None
+
+try:
+    with open(_VWAP_HMM_PKL, "rb") as _vf:
+        _vwap_hmm_pkg   = pickle.load(_vf)
+    _vwap_hmm_model  = _vwap_hmm_pkg["model"]
+    _vwap_hmm_scaler = _vwap_hmm_pkg["scaler"]
+    _vwap_hmm_feats  = _vwap_hmm_pkg["feat_cols"]
+    print(f"  [vwap_hmm] Loaded {_VWAP_HMM_PKL.name}  "
+          f"({_vwap_hmm_pkg['n_states']} states, {len(_vwap_hmm_feats)} features)")
+except Exception as _vwap_e:
+    print(f"  [vwap_hmm] WARNING: could not load {_VWAP_HMM_PKL.name}: {_vwap_e}")
+
+
+def _vwap_hmm_state_predict(live_1m: "pd.DataFrame") -> "int | None":
+    """Predict current VWAP MTF HMM state (0-7) from live 1m OHLCV data.
+    Returns None if model unavailable or insufficient data (<3 complete 15m bars)."""
+    if _vwap_hmm_model is None or _vwap_hmm_scaler is None or _vwap_hmm_feats is None:
+        return None
+    try:
+        _AGG = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        df1m  = live_1m.copy()
+        df5m  = df1m.resample("5min").agg(_AGG).dropna()
+        df15m = df1m.resample("15min").agg(_AGG).dropna()
+
+        def _rvwap(df: pd.DataFrame, n: int) -> pd.Series:
+            tp     = (df["high"] + df["low"] + df["close"]) / 3
+            cum_tv = (tp * df["volume"]).rolling(n, min_periods=n).sum()
+            cum_v  = df["volume"].rolling(n, min_periods=n).sum()
+            vwap   = cum_tv / cum_v.replace(0, np.nan)
+            return (df["close"] - vwap) / vwap.replace(0, np.nan) * 100
+
+        dist_1m  = _rvwap(df1m, 20)
+        dist_5m  = _rvwap(df5m, 20)
+        dist_15m = _rvwap(df15m, 20)
+        vel_1m   = dist_1m.diff()
+
+        feat = pd.DataFrame(index=df15m.index)
+        feat["vwap_dist_15m"] = dist_15m
+        feat["vwap_dist_5m"]  = dist_5m.resample("15min").last()
+        feat["vwap_dist_1m"]  = dist_1m.resample("15min").last()
+        feat["vwap_vel_1m"]   = vel_1m.resample("15min").last()
+        feat["vwap_spread"]   = feat["vwap_dist_1m"] - feat["vwap_dist_15m"]
+        feat = feat.dropna()
+
+        if len(feat) < 3:
+            return None
+        X        = feat[_vwap_hmm_feats].values
+        X_scaled = _vwap_hmm_scaler.transform(X)
+        states   = _vwap_hmm_model.predict(X_scaled)
+        return int(states[-1])
+    except Exception:
+        return None
 
 
 def _vol_hmm_state(live_1m: "pd.DataFrame") -> "int | None":
@@ -343,14 +407,24 @@ CSV_COLUMNS = [
     # Shadow LGBM output — lgbm_15m_{asset}.pkl runs alongside primary on every scan
     "p_gbdt",
     # Shadow stochastic signals (no gate logic — log-only for future analysis)
+    "autocorr1_15",    # lag-1 autocorrelation of 15m log-returns (last 30 bars)
+    "autocorr1_30",    # lag-1 autocorrelation of 30m log-returns (last 30 bars)
+    "hurst_exponent",  # H>0.5 trending, H<0.5 mean-reverting, H≈0.5 random walk
     "ou_theta",        # OU mean-reversion speed (higher = faster reversion)
     "ou_halflife",     # OU half-life in hours (ln2 / ou_theta)
     "ou_mu_distance",  # z-score: (current_price - OU long-run mean) / vol
-    "hurst_exponent",  # H>0.5 trending, H<0.5 mean-reverting, H≈0.5 random walk
-    "autocorr1_15",    # lag-1 autocorrelation of 15m log-returns (last 30 bars)
-    "autocorr1_30",    # lag-1 autocorrelation of 30m log-returns (last 30 bars)
     "kalman_velocity", # Kalman-smoothed 1h price trend (return units, filtered)
     "kalman_residual", # Kalman residual: actual − filtered (mean-reversion signal)
+    # Keltner channel (added via migration; keep at end to preserve file header order)
+    "kc_pct_1h",       # Keltner Channel position: (close - mid) / (upper - mid) [LIVE gate: ETH 15m NO]
+    "kc_bo_1h",        # Keltner Channel breakout: +1=above upper, -1=below lower, 0=inside
+    # CoinGlass futures CVD (added via migration; keep at end to preserve file header order)
+    "cvd_4h",                # Binance spot 4h cumulative volume delta (taker buy - sell USDT) [SHADOW]
+    "cg_futures_delta_4h",   # CoinGlass futures buy-sell USD last 4h bar [SHADOW]
+    "cg_futures_ratio_4h",   # CoinGlass futures buy/sell ratio last 4h bar [SHADOW/LIVE gate]
+    "cg_futures_cvd_12h",    # CoinGlass futures rolling 12h cumulative delta [SHADOW]
+    # VWAP MTF HMM state (BTC only; 8-state model on 1m/5m/15m VWAP distances)
+    "vwap_hmm_state",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -396,10 +470,13 @@ def append_row(row: dict, asset: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# p_up_v2 drift model constants (calibrated 2026-05-22, territory-split, recent era)
-# k_yes=1.40 on YES-territory (z<0), k_no=1.56 on NO-territory (z>0)
-K_PUP_V2_YES = 1.40
-K_PUP_V2_NO  = 1.56
+# p_up_v2 drift model — non-coherent (2026-06-30 reform).
+# YES and NO computed independently: K_YES=0.50, K_NO=0.30.
+# Non-coherent: gate flips (YES→NO) produce genuine NO edge, not just -edge_yes.
+# K_NO < K_YES mirrors hourly model ratio (k_no=0.30/k_yes=0.90 = 0.33).
+# NO fires when p_up_v2 <= ~0.20 (strongly bearish); YES fires when p_up_v2 >= ~0.70.
+K_PUP_V2_YES = 0.50
+K_PUP_V2_NO  = 0.30
 
 
 # Composite p_up / p_up_v2 from hourly runner
@@ -673,7 +750,8 @@ def _macd_hist(prices: pd.Series, fast: int = 12, slow: int = 26,
     return float(val) if not pd.isna(val) else 0.0
 
 
-def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC") -> dict:
+def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC",
+                    live_1h: Optional[pd.DataFrame] = None) -> dict:
     """
     Compute microstructure signals from 1m OHLCV data.
     Uses iloc[-2] for completed bars (last bar may be incomplete).
@@ -835,6 +913,14 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC") -> dict:
     # Drop the current (potentially incomplete) 1h bar; use last COMPLETED bar
     df1h_c = df1h.iloc[:-1] if len(df1h) >= 2 else df1h
 
+    # Override with directly-fetched 1h bars when available.
+    # Resampling 1m→1h is capped at ~16 bars (Binance 1m limit=1000); direct fetch
+    # gives 49 completed bars, enabling Kalman/OU/Hurst computation (guard: >= 30).
+    if live_1h is not None and len(live_1h) >= 5:
+        _live_1h_c = live_1h.iloc[:-1] if len(live_1h) >= 2 else live_1h
+        if len(_live_1h_c) > len(df1h_c):
+            df1h_c = _live_1h_c
+
     if len(df1h_c) >= 2:
         h = df1h_c.iloc[-1]   # last completed 1h bar
         h_prev = df1h_c.iloc[-2]
@@ -892,6 +978,9 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC") -> dict:
             sig["donchian_breakout_1h"] = -1
         else:
             sig["donchian_breakout_1h"] = 0
+        # 1h Donchian POSITION (0=at 20h low, 1=at 20h high) — for the donch_low_no_boost.
+        sig["donch_1h_pos"] = ((last_close_1h - dc_low) / (dc_high - dc_low)
+                               if dc_high > dc_low else float("nan"))
 
     if len(df1h_c) >= 3:
         # Consecutive 1h direction count (streak, capped at ±5)
@@ -990,6 +1079,25 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC") -> dict:
         if _bb_rng > 0 and not np.isnan(_bb_rng):
             sig["bb_pct_1h"] = float(
                 (_c1h_f.iloc[-1] - float(_bb_lo.iloc[-1])) / _bb_rng)
+
+        # Keltner Channel (EMA10 ± 1.5×ATR14): channel position and breakout flag.
+        _kc_ema10  = _c1h_f.ewm(span=10, adjust=False).mean()
+        _kc_hi     = df1h_c["high"].astype(float)
+        _kc_lo     = df1h_c["low"].astype(float)
+        _kc_tr     = pd.concat([_kc_hi - _kc_lo,
+                                (_kc_hi - _c1h_f.shift(1)).abs(),
+                                (_kc_lo - _c1h_f.shift(1)).abs()], axis=1).max(axis=1)
+        _kc_atr14  = _kc_tr.ewm(span=14, adjust=False).mean()
+        _kc_upper  = _kc_ema10 + 1.5 * _kc_atr14
+        _kc_lower  = _kc_ema10 - 1.5 * _kc_atr14
+        _kc_width  = float((_kc_upper - _kc_lower).iloc[-1])
+        if _kc_width > 0:
+            sig["kc_pct_1h"] = round(float(
+                (_c1h_f.iloc[-1] - float(_kc_lower.iloc[-1])) / _kc_width), 4)
+            _kc_close = float(_c1h_f.iloc[-1])
+            sig["kc_bo_1h"] = (1 if _kc_close > float(_kc_upper.iloc[-1])
+                               else -1 if _kc_close < float(_kc_lower.iloc[-1])
+                               else 0)
 
     # ── Rolling drift mu + regime_z from 1h log returns ──────────────────────
     if len(df1h_c) >= 7:
@@ -1237,7 +1345,6 @@ def compute_p_yes_pup_v2_15m(
     """
     BTC YES prob: log-normal with p_up_v2 τ-scaled drift.
     z_drift = Φ⁻¹(p_up_v2) × K_PUP_V2_YES × √(τ/60)
-    Calibrated 2026-05-22 on YES-territory (z<0), recent era: k=1.40.
     """
     if tau_min <= 0.5 or spot <= 0 or floor_strike <= 0:
         return 0.5
@@ -1260,10 +1367,10 @@ def compute_p_no_pup_v2_15m(
     sig: dict, p_up_v2: float, p_market: float,
 ) -> float:
     """
-    BTC NO prob: complementary log-normal with p_up_v2 τ-scaled drift.
-    z_drift = Φ⁻¹(p_up_v2) × K_PUP_V2_NO × √(τ/60)
-    Calibrated 2026-05-22 on NO-territory (z>0), recent era: k=1.56.
-    Both YES and NO share the same distribution → coherent cross-strike pricing.
+    BTC NO prob (non-coherent): P(price < strike) = 1 - Φ(z_drift_no - z_strike).
+    Uses K_PUP_V2_NO independently from YES — not constrained to 1 - p_yes.
+    K_NO=0.30 (< K_YES=0.50): NO model muted vs YES; fires only in genuinely bearish
+    conditions (p_up_v2 <= ~0.20). Prevents phantom NO edge in bullish markets.
     """
     if tau_min <= 0.5 or spot <= 0 or floor_strike <= 0:
         return 0.5
@@ -1278,7 +1385,7 @@ def compute_p_no_pup_v2_15m(
     z_strike  = math.log(floor_strike / spot) / sigma_tau
     tau_scale = math.sqrt(min(tau_min, 60.0) / 60.0)
     z_drift   = norm.ppf(float(np.clip(p_up_v2, 0.02, 0.98))) * K_PUP_V2_NO * tau_scale
-    return float(np.clip(norm.cdf(z_strike - z_drift), 0.03, 0.97))
+    return float(np.clip(1.0 - norm.cdf(z_drift - z_strike), 0.03, 0.97))
 
 
 def _compute_1h_drift(sig: dict, tau_min: float) -> float:
@@ -1405,8 +1512,12 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         print(f"  [error] Insufficient 1m candle data ({n} bars).")
         return
 
+    # Fetch 1h candles directly — gives 49 completed bars vs ~16 from resampled 1m.
+    # Passed to compute_signals to enable Kalman/OU/Hurst computation (guard: >= 30).
+    live_1h = fetch_recent_candles("1h", 50, asset=asset)
+
     # Compute signals
-    sig = compute_signals(live_1m, asset=asset)
+    sig = compute_signals(live_1m, asset=asset, live_1h=live_1h)
 
     # Inject composite_p_up from most recent hourly scan
     composite_p_up = fetch_composite_p_up(asset)
@@ -1460,8 +1571,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     if asset == "BTC":
         _p_up_v2_btc = fetch_p_up_v2("BTC")
         if _p_up_v2_btc is not None:
-            print(f"  [p_up_v2_btc] {_p_up_v2_btc:.3f}  "
-                  f"(k_yes={K_PUP_V2_YES}, k_no={K_PUP_V2_NO}, τ-scaled)")
+            print(f"  [p_up_v2_btc] {_p_up_v2_btc:.3f}  (K={K_PUP_V2_YES}, coherent p_no=1-p_yes)")
         else:
             # Fallback to empirical z_drift when p_up_v2 unavailable
             _csv_15m = _csv_path(asset)
@@ -1507,6 +1617,21 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         _rank_labels = {0: "low-vol-bear", 1: "low-vol-bull", 2: "high-vol"}
         print(f"  [vol_hmm] rank={_vol_state}  ({_rank_labels.get(_vol_state, '?')})")
 
+    # VWAP MTF HMM state (BTC only — gates + St0 boost applied in contract loop)
+    _vwap_state: "int | None" = None
+    if asset == "BTC" and live_1m is not None:
+        _vwap_state = _vwap_hmm_state_predict(live_1m)
+    sig["vwap_hmm_state"] = _vwap_state if _vwap_state is not None else ""
+    if _vwap_state is not None:
+        _vwap_labels = {
+            0: "below-15m-VWAP-rising (NO-boost×1.25)",
+            2: "above-VWAPs-falling (NO-block if vol<0.216)",
+            4: "BULL-EXTENSION (NO-pure-block)",
+            5: "neutral-flat (NO-block if sk1h<85)",
+            7: "mildly-bull-rising (NO-block if chg15m>=-0.112)",
+        }
+        print(f"  [vwap_hmm] state={_vwap_state}  ({_vwap_labels.get(_vwap_state, str(_vwap_state))})")
+
     def _fmt(v, fmt=".3f"):
         return format(v, fmt) if isinstance(v, (int, float)) and v == v else "n/a"
 
@@ -1542,6 +1667,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
               f"  [{_liq_signal.label}]  oi_chg={_liq_signal.oi_chg_pct:+.3f}%")
     else:
         print(f"    [liq_signal] unavailable for {asset}")
+
+    # --- Binance.us spot CVD (4h cumulative taker buy - sell pressure) ---
+    _cvd_4h = fetch_cvd_1h(lookback_bars=24, asset=asset)
+    print(f"    [cvd_4h] {_cvd_4h:+,.0f}" if _cvd_4h is not None else "    [cvd_4h] unavailable")
 
     # --- CoinGlass signals: exchange flows, options OI, spot taker, fear & greed ---
     _cg = coinglass_data.fetch_coinglass_signals(asset)
@@ -1594,7 +1723,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         offset_pct = (spot - floor_s) / floor_s * 100
 
         # Compute p_model before already_bet check so scan archive captures all contracts.
-        # BTC: p_up_v2 τ-scaled drift (k_yes=1.40, k_no=1.56); fallback to z_drift / LGBM.
+        # BTC: non-coherent model (2026-06-30 reform). YES and NO computed independently.
+        #   p_yes = Φ(K_YES×Φ⁻¹(p_up_v2)×√(τ/60) − z_strike), K_YES=0.50
+        #   p_no  = 1 − Φ(K_NO×Φ⁻¹(p_up_v2)×√(τ/60) − z_strike), K_NO=0.30
+        #   edge_yes = p_yes − pm; edge_no = p_no − (1−pm). Independent, not sum=1.
         if asset == "BTC" and _p_up_v2_btc is not None:
             p_model_yes = compute_p_yes_pup_v2_15m(spot, floor_s, tau_min, sig, _p_up_v2_btc, p_market)
             p_model_no  = compute_p_no_pup_v2_15m(spot, floor_s, tau_min, sig, _p_up_v2_btc, p_market)
@@ -1603,7 +1735,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             if asset == "BTC" and _zdrift_15m is not None:
                 p_model_yes = compute_p_yes_zdrift_15m(spot, floor_s, tau_min, sig, _zdrift_15m, p_market)
             else:
-                p_model_yes = p_model_no
+                p_model_yes = p_model_no   # ETH/SOL: single model, both sides same (pre-reform)
+            # BTC fallback: non-coherent convention — invert for NO edge
+            if asset == "BTC":
+                p_model_no = 1.0 - p_model_yes
 
         # Shadow LGBM: always run lgbm_15m_{asset}.pkl regardless of primary model path.
         # For BTC this is separate from p_up_v2; for ETH/SOL it equals p_model_no (same model).
@@ -1625,6 +1760,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     "liq_bias":      _liq_signal.liq_bias     if _liq_signal else float("nan"),
                     "oi_chg_pct":    _liq_signal.oi_chg_pct   if _liq_signal else float("nan"),
                     "ls_long_pct":   _liq_signal.ls_long_pct  if _liq_signal else float("nan"),
+                    "cvd_4h":              _cvd_4h                        if _cvd_4h is not None else float("nan"),
+                    "cg_futures_delta_4h": _cg.futures_delta_4h           if _cg else float("nan"),
+                    "cg_futures_ratio_4h": _cg.futures_ratio_4h           if _cg else float("nan"),
+                    "cg_futures_cvd_12h":  _cg.futures_cvd_12h            if _cg else float("nan"),
                     "fear_greed":    _cg.fg_value              if _cg else float("nan"),
                     "cg_composite":  _cg.composite_score       if _cg else float("nan"),
                 },
@@ -1639,7 +1778,12 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             continue
 
         edge_yes = p_model_yes - p_market
-        edge_no  = p_market    - p_model_no
+        # BTC: non-coherent — edge_no = p_no − (1−pm). Independent of edge_yes.
+        # ETH/SOL: legacy formula (p_model_no = P(YES), so pm - P(YES) = real edge).
+        if asset == "BTC":
+            edge_no = p_model_no - (1.0 - p_market)
+        else:
+            edge_no = p_market - p_model_no
 
         # Best side is the one with higher (and positive) edge
         if edge_yes >= edge_no:
@@ -1874,6 +2018,15 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                       f"(max-overbought+long-liq, WR=5.9% vs BE=36.0%, p=0.005)")
                 best_side, best_edge = "no", edge_no
 
+        # [flip_guard] All assets: after any flip gate, block if edge is negative.
+        # With non-coherent BTC model, flipped NO edge is independently computed — block
+        # only if the NO model itself shows negative edge (genuine no-edge condition).
+        if best_edge < 0:
+            print(f"    [flip_guard] BLOCK {ticker} — "
+                  f"edge={best_edge:+.3f} negative after gates (no edge on either side)")
+            evaluated.append((abs(best_edge), best_side, c, p_model, offset_pct))
+            continue
+
         # [btc_15m_hmm_state0_gate] Block BTC NO when HMM regime = State 0.
         # State 0: stoch_k_5m=66 (neutral-high) diverges from stoch_k_1h=11 (deeply oversold).
         # Sim (N=9, WR=22%, -$174): 7 losses blocked, 2 wins blocked.
@@ -1951,37 +2104,92 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 evaluated.append((best_edge, best_side, c, p_model, offset_pct))
                 continue
 
-        # [btc_15m_no_highpm_gate] Block NO when pm>0.85 (market deep ITM YES).
-        # Paper trades n=18: WR=5.6% vs BE=13.5%, PnL=-$420.
-        # liq_score=-1 does NOT rescue here (0/7 wins) — block all regardless of liq.
-        # Cause: inflated edge formula (p_market - p_model_no) produces phantom 70%+ edges
-        # on contracts where BTC is far above the strike; true edge is <1% but Kelly sizes ~$60.
-        if asset.upper() == "BTC" and best_side == "no" and p_market > 0.85:
-            print(f"    [btc_15m_no_highpm_gate] BLOCK NO {ticker} — "
-                  f"pm={p_market:.3f}>0.85 (WR=5.6% vs BE=13.5%, PnL=-$420 historically)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
+        # [btc_15m_overbought_momentum_no_gate] Block NO when 5m overbought AND still ticking up.
+        # Deep gate analysis 2026-06-21 (comprehensive sweep of all signals + OOS archive validation):
+        #   stoch_k_5m>76 & chg_5m>0 → live up-momentum runs the downside NO bet over.
+        #   ARCHIVE (deduped OTM-NO, OOS from taken): NO-EV=-0.105 vs -0.010 base, MCPT p=0.0002,
+        #     5/6 weeks negative. TAKEN n=106: WR=25%, -$1,475, negative EVERY week incl wk25
+        #     (survives the selection test). Blocking lifts BTC 15m NO PnL +$1,126 → +$2,601.
+        #   RESCUE: chg_5m<=0 (overbought but stalling/turning → mean-reverts, NO-EV=+0.045,
+        #     WR=62%) is NOT blocked — only the overbought+continuation pocket loses.
+        # Causal: overbought 5m + live up-tick = momentum continuation; overbought + stall = reversion.
+        if asset.upper() == "BTC" and best_side == "no":
+            _s5 = sig.get("stoch_k_5m")
+            _c5 = sig.get("chg_5m")
+            try:
+                if _s5 is not None and _c5 is not None and float(_s5) > 76.0 and float(_c5) > 0.0:
+                    print(f"    [btc_15m_overbought_momentum_no_gate] BLOCK NO {ticker} — "
+                          f"stoch_k_5m={float(_s5):.1f}>76 & chg_5m={float(_c5):+.3f}%>0 "
+                          f"(5m overbought + up-momentum; NO-EV=-0.105 OOS p=0.0002, -$1,475 taken)")
+                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                    continue
+            except (TypeError, ValueError):
+                pass
 
-        # [btc_15m_no_midpm_liq_gate] Block NO when pm∈[0.65,0.75) unless liq_score=-1.
-        # Paper trades breakdown (n=63, WR=23.8%, BE=30.8%, PnL=-$549 total):
-        #   liq=-1 (genuine selling/liquidation): n=21, WR=47.6%, +$241 → RESCUE (keep)
-        #   liq= 0 (neutral):                     n=13, WR=23.1%,  -$69 → block
-        #   liq=+1 (buyers dominant):              n=27, WR= 7.4%, -$638 → block
-        # Causal: when buyers dominate (liq=+1), BTC momentum stays bullish and NO fails.
-        # Rescue: liquidation pressure (liq=-1) = genuine sellers compressing price → NO works.
-        if asset.upper() == "BTC" and best_side == "no" and 0.65 <= p_market < 0.75:
-            _liq_s = sig.get("liq_score")
-            _liq_s = float(_liq_s) if _liq_s is not None else 0.0
-            if _liq_s >= 0:
-                print(f"    [btc_15m_no_midpm_liq_gate] BLOCK NO {ticker} — "
-                      f"pm={p_market:.3f}∈[0.65,0.75), liq_score={_liq_s:.0f}≥0 "
-                      f"(buyers dominant or neutral, WR=7-23% historically)")
+        # [btc_15m_vwap_hmm_no_gates] BTC NO gates from VWAP multi-timeframe HMM (8-state).
+        # Model trained on 2024-2026 BTC 1m data; states capture structural VWAP regimes across
+        # 1m/5m/15m timeframes. Deep rescue search on 737 paper trades (2026-06-01–07-01):
+        #   St4 pure block:              p=0.000 z=-3.45, WR=10.0%, 4/4 wks, saves $990
+        #   St2 block + rescue(vol≥0.216 released):  p=0.006 z=-2.70, WR=14.8%, 5/5 wks, saves $819
+        #   St5 block + rescue(sk1h≥85 released):    p=0.012 z=-2.50, WR=29.0%, 5/5 wks, saves $1,233
+        #   St7 block + rescue(chg15m<-0.112 released): p=0.020 z=-2.19, WR=28.1%, 4/5 wks, saves $984
+        # St0 NO boost: p=0.000 z=+4.35, WR=58.3% vs 40.5% base → ×1.25 Kelly (applied at sizing step).
+        # Backup: paper_trade_runner_15m_pre_vwap_hmm_gates_20260701.py
+        if asset.upper() == "BTC" and best_side == "no" and _vwap_state is not None:
+            _vhvol   = float(sig.get("vol_ratio",   1.0) or 1.0)
+            _vhsk1h  = float(sig.get("stoch_k_1h", 50.0) or 50.0)
+            _vhc15m  = float(sig.get("chg_15m",     0.0) or 0.0)
+
+            if _vwap_state == 4:
+                # St4: price 1.14% above ALL VWAPs + rising 1m velocity = bull extension.
+                # NO WR=10%; only 3 wins in blocked set — impossible rescue, pure block.
+                print(f"    [btc_15m_vwap_hmm_no_gate] BLOCK NO {ticker} — "
+                      f"vwap_hmm_state=4 (bull extension: price >1% above all VWAPs; "
+                      f"WR=10%, p=0.000, 4/4 wks, saves $990)")
                 evaluated.append((best_edge, best_side, c, p_model, offset_pct))
                 continue
-            else:
-                print(f"    [btc_15m_no_midpm_liq_gate] RESCUE NO {ticker} — "
-                      f"pm={p_market:.3f}∈[0.65,0.75) BUT liq_score={_liq_s:.0f}=-1 "
-                      f"(genuine liquidation pressure, WR=47.6% historically)")
+
+            elif _vwap_state == 2:
+                if _vhvol < 0.216:
+                    # St2 + low volume: above VWAPs falling on low vol = noise, price recovers.
+                    # Rescue: vol_ratio≥0.216 = high-volume selling = real distribution → NO wins.
+                    print(f"    [btc_15m_vwap_hmm_no_gate] BLOCK NO {ticker} — "
+                          f"vwap_hmm_state=2 + vol_ratio={_vhvol:.3f}<0.216 "
+                          f"(above VWAPs falling, low-vol dip; WR=14.8%, p=0.006, 5/5 wks, saves $819)")
+                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                    continue
+                else:
+                    print(f"    [btc_15m_vwap_hmm_no_gate] RESCUE NO {ticker} — "
+                          f"vwap_hmm_state=2 but vol_ratio={_vhvol:.3f}≥0.216 "
+                          f"(high-vol selling = real pressure; WR=66.7%)")
+
+            elif _vwap_state == 5:
+                if _vhsk1h < 85.0:
+                    # St5: neutral/flat VWAP + not 1h-overbought = no structural NO edge.
+                    # Rescue: stoch_k_1h≥85 = 1h exhaustion → pullback → NO wins (WR=81.8%).
+                    print(f"    [btc_15m_vwap_hmm_no_gate] BLOCK NO {ticker} — "
+                          f"vwap_hmm_state=5 + stoch_k_1h={_vhsk1h:.1f}<85 "
+                          f"(neutral VWAP, no 1h-overbought exhaustion; WR=29%, p=0.012, 5/5 wks, saves $1,233)")
+                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                    continue
+                else:
+                    print(f"    [btc_15m_vwap_hmm_no_gate] RESCUE NO {ticker} — "
+                          f"vwap_hmm_state=5 but stoch_k_1h={_vhsk1h:.1f}≥85 "
+                          f"(1h overbought exhaustion → pullback; WR=81.8%)")
+
+            elif _vwap_state == 7:
+                if _vhc15m >= -0.112:
+                    # St7: mildly above VWAPs + not falling on 15m = uptrend still live.
+                    # Rescue: chg_15m<-0.112 = 15m reversal confirms downward momentum → NO wins.
+                    print(f"    [btc_15m_vwap_hmm_no_gate] BLOCK NO {ticker} — "
+                          f"vwap_hmm_state=7 + chg_15m={_vhc15m:+.3f}%≥-0.112 "
+                          f"(mildly bull, no 15m reversal yet; WR=28.1%, p=0.020, 4/5 wks, saves $984)")
+                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                    continue
+                else:
+                    print(f"    [btc_15m_vwap_hmm_no_gate] RESCUE NO {ticker} — "
+                          f"vwap_hmm_state=7 but chg_15m={_vhc15m:+.3f}%<-0.112 "
+                          f"(15m reversal confirms downward; WR=75%)")
 
         # [eth_no_consec_gate — 15m ETH NO]
         # Block NO when in a sustained bearish streak AND stochastic is already oversold.
@@ -2067,6 +2275,34 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                       f"stoch_k_1h={_sk1h_gc:.1f}<20 + BTC_1h={_markov_1h!r} (non-Bear) "
                       f"(oversold bounce → YES; MCPT p=0.036, n=113)")
                 best_side, best_edge = "yes", edge_yes
+
+        # [eth_15m_no_kc_gate] Block ETH NO when price is below KC lower band (kc_pct_1h < 0).
+        # Keltner Channel: KC_lower = EMA10 - 1.5×ATR14.  kc_pct_1h < 0 means price closed
+        # below the lower band — strong mean-reversion bounce territory.
+        # Long-history validation (21,761 ETH 1h bars 2024-2026):
+        #   below-KC bars → 55.67% up_1h vs 50.99% baseline (+4.68pp, MCPT p=0.001)
+        #   consistent every year: 2024 +3.4pp / 2025 +6.2pp / 2026 +4.3pp.
+        # Paper-trade sim (n=1,339 ETH 15m NO bets): blocks 32 (WR=34.4%), saves $463, 6/7 wks.
+        # Rescue: pm < 0.50 AND stoch_k_5m >= 40 → market not pricing a bounce AND 5m
+        #   momentum not coiling for snap-back; these 28 cases still WR=67.9%.
+        # Backup: paper_trade_runner_15m_pre_eth_kc_gate_20260625.py
+        if asset.upper() == "ETH" and best_side == "no":
+            _kc_no = sig.get("kc_pct_1h")
+            if _kc_no is not None and not (isinstance(_kc_no, float) and _kc_no != _kc_no):
+                _kc_no_f = float(_kc_no)
+                if _kc_no_f < 0.0:
+                    _sk5m_kc = float(sig.get("stoch_k_5m", 50.0) or 50.0)
+                    if p_market >= 0.50 or _sk5m_kc < 40.0:
+                        print(f"    [eth_15m_no_kc_gate] BLOCK NO→YES {ticker} — "
+                              f"kc_pct={_kc_no_f:.3f}<0 "
+                              f"pm={p_market:.3f}{'>=0.50' if p_market >= 0.50 else '<0.50'} "
+                              f"sk5m={_sk5m_kc:.1f}{'<40' if _sk5m_kc < 40.0 else '>=40'} "
+                              f"(below KC lower band → bounce; long-hist p=0.001, sim +$463)")
+                        best_side, best_edge = "yes", edge_yes
+                    else:
+                        print(f"    [eth_15m_no_kc_gate] RESCUE NO {ticker} — "
+                              f"kc_pct={_kc_no_f:.3f}<0 but pm={p_market:.3f}<0.50 "
+                              f"+ sk5m={_sk5m_kc:.1f}>=40 (WR=67.9%, n=28 in archive)")
 
         # [sol_markov_gates — block SOL contracts in adverse Markov regimes]
         # Gates (validated on 784 resolved SOL 15m trades, flat $25 bet):
@@ -2262,6 +2498,60 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                           f"autocorr={float(_autocorr_ng):+.4f}>=-0.008 "
                           f"(persistent declining trend, WR=54.7%, edge=+2.6%)")
 
+        # [sol_15m_no_stoch_oversold_gate] Block SOL NO when stoch_k_15m < 20 (oversold).
+        # Mean-reversion bounce: oversold 15m stoch → price snaps back above strike → NO fails.
+        # Archive n=252, WR=42.5% vs BE=51.0%, saves +$1,042; MCPT z=+3.18 p=0.0000; 6/7 wks pos.
+        # Rescue chg_5m < -0.20%: price already dropping (n=35, WR=54.3%) — allow NO.
+        # Implemented 2026-06-24. Backup paper_trade_runner_15m_pre_sol_stoch_gates_20260624.py
+        if asset.upper() == "SOL" and best_side == "no":
+            _sk15m_no = float(sig.get("stoch_k_15m", 50.0) or 50.0)
+            if _sk15m_no < 20.0:
+                _chg5m_no = float(sig.get("chg_5m", 0.0) or 0.0)
+                if _chg5m_no >= -0.20:
+                    print(f"    [sol_15m_no_stoch_oversold_gate] FLIP NO→YES {ticker} — "
+                          f"stoch_k_15m={_sk15m_no:.1f}<20 (oversold bounce risk, WR=42.5%), "
+                          f"chg_5m={_chg5m_no:+.3f}%>=-0.20 (no momentum rescue)")
+                    best_side, best_edge = "yes", edge_yes
+                else:
+                    print(f"    [sol_15m_no_stoch_oversold_gate] RESCUE NO {ticker} — "
+                          f"stoch_k_15m={_sk15m_no:.1f}<20 but chg_5m={_chg5m_no:+.3f}%<-0.20 "
+                          f"(already dropping, NO directionally correct, WR=54.3%)")
+
+        # [sol_15m_yes_allow_gate] Block SOL YES when stoch_k_15m < 30 OR cvd_4h < 0.
+        # Allow only: stoch>=30 AND cvd4h>=0 (WR=62.1%, TRUE_BE=57.3%, +4.8pp edge, +$508, 7/8wks pos).
+        # Blocked group: WR=48.8% vs TRUE_BE=56.4%, -7.6pp, PnL=-$1,735 over 7 weeks.
+        # Rescue: futures_delta_4h > $5M (net long institutional flow overrides stoch/CVD weakness;
+        #   n=127, WR=59.8%, TRUE_BE=56.8%, +3.1pp, +$399, MCPT p=0.0018).
+        # Replaces sol_15m_yes_stoch_oversold_gate (old offset>0.07 rescue was not significant).
+        # Implemented 2026-06-30. Backup: paper_trade_runner_15m_pre_sol_yes_allow_gate_20260630.py
+        if asset.upper() == "SOL" and best_side == "yes":
+            _sk15m_yes = float(sig.get("stoch_k_15m", 50.0) or 50.0)
+            try:
+                _cvd4h_yes = float(_cvd_4h) if _cvd_4h is not None else float("nan")
+            except (TypeError, ValueError):
+                _cvd4h_yes = float("nan")
+            _delta4h_yes = float(_cg.futures_delta_4h) if _cg is not None else float("nan")
+
+            _stoch_blk = _sk15m_yes < 30.0
+            _cvd_blk   = (not math.isnan(_cvd4h_yes)) and _cvd4h_yes < 0
+
+            if _stoch_blk or _cvd_blk:
+                _rescued = (not math.isnan(_delta4h_yes)) and _delta4h_yes > 5_000_000
+                if _rescued:
+                    print(f"    [sol_15m_yes_allow_gate] RESCUE YES {ticker} — "
+                          f"sk15m={_sk15m_yes:.1f}/cvd4h={_cvd4h_yes:+,.0f} blocked but "
+                          f"futures_delta={_delta4h_yes/1e6:+.1f}M>5M (net long flow, WR=59.8%)")
+                else:
+                    _why = " + ".join(filter(None, [
+                        f"sk15m={_sk15m_yes:.1f}<30" if _stoch_blk else "",
+                        f"cvd4h={_cvd4h_yes:+,.0f}<0" if _cvd_blk else "",
+                    ]))
+                    print(f"    [sol_15m_yes_allow_gate] SKIP YES {ticker} — "
+                          f"{_why} (true edge -7.6pp; no futures_delta rescue "
+                          f"delta={_delta4h_yes/1e6:+.1f}M)")
+                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                    continue
+
         # P_MARKET VOLATILITY GATE: skip deep-OTM contracts on either side.
         # Sim (347 resolved trades): 0W/26L blocked at 0.12/0.88 → +$538 PnL delta.
         if p_market < P_MARKET_VOL_MIN or p_market > P_MARKET_VOL_MAX:
@@ -2308,7 +2598,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             p_model=p_model, raw_edge=best_edge, side="", decision="pass",
             sig=sig, kelly_fraction=0.0, bet_fraction=0.0,
             bet_amount=0.0, bankroll=bankroll, liq_signal=_liq_signal,
-            cg=_cg, spread=c["ask"] - c["bid"],
+            cg=_cg, spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
         )
         append_row(row, asset=asset)
 
@@ -2350,7 +2640,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # level is within 0.5% above spot. Sim: nearest_res<=0.5% → WR=43.8%, delta=+$329
     # when fully blocked; dampener keeps volume while reducing exposure.
     # Revert: remove this block.
-    if side == "yes":
+    if side == "yes" and asset == "ETH":
         _res_dist = sig.get("nearest_res_dist_pct", 999.0)
         if isinstance(_res_dist, float) and _res_dist <= 0.5:
             _undampened = kelly.bet_amount
@@ -2369,6 +2659,35 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         print(f"    [eth_yes_kelly_damp] ETH YES ×0.5 "
               f"(${_undampened_eth:.2f} → ${kelly.bet_amount:.2f})")
 
+    # SOL YES Kelly dampener removed 2026-06-30: allow gate (stoch>=30 AND cvd4h>=0 OR
+    # futures_delta>5M rescue) now isolates positive-edge YES bets (WR=62.1%, TRUE_BE=57.3%,
+    # +4.8pp). Dampener was justified when all YES had negative edge; gate makes it unnecessary.
+
+    # [vwap_hmm_st0_no_boost] ×1.25 Kelly for BTC NO when VWAP HMM state=0.
+    # St0: price below 15m VWAP with 1m velocity turning up = bearish structural context.
+    # Short-term recovery doesn't reach high strikes → NO wins at 58.3% vs 40.5% base.
+    # Paper trades: n=115, MCPT p=0.000 z=+4.35, 4/5 wks positive, pnl=+$2,021.
+    if asset == "BTC" and side == "no" and _vwap_state == 0:
+        _boosted_v0 = round(min(kelly.bet_amount * 1.25, MAX_BET_FRAC * bankroll), 2)
+        if _boosted_v0 > kelly.bet_amount:
+            print(f"    [vwap_hmm_st0_no_boost] vwap_state=0 (below-VWAP recovery) → ×1.25 "
+                  f"(${kelly.bet_amount:.2f} → ${_boosted_v0:.2f}, WR=58.3% p=0.000)")
+            kelly.bet_amount = _boosted_v0
+
+    # [donch_low_no_boost 2026-06-22] 1.5x Kelly (ceil 7.5%) for NO when price is LOW in its
+    # 1h Donchian channel (<0.20 = bottom 20% of 20h range → range-bound, NO safe). Validated on
+    # 15m TAKEN NO: donch<0.20 is the best zone — BTC +$3,254 (WR 47%), ETH +$516 (WR 71%).
+    # Ports the hourly donch boost to 15m. NOTE: the hourly donch>0.80 BLOCK was NEUTRAL on 15m
+    # (BTC -$8, ETH +$3) so it is deliberately NOT ported. BTC/ETH only (SOL unvalidated).
+    if asset in ("BTC", "ETH") and side == "no":
+        _dp = sig.get("donch_1h_pos")
+        if isinstance(_dp, (int, float)) and _dp == _dp and _dp < 0.20:
+            _boosted = round(min(kelly.bet_amount * 1.5, 0.075 * bankroll), 2)
+            if _boosted > kelly.bet_amount:
+                print(f"    [donch_low_no_boost] donch_1h={_dp:.3f}<0.20 → Kelly ×1.5 "
+                      f"(${kelly.bet_amount:.2f} → ${_boosted:.2f})")
+                kelly.bet_amount = _boosted
+
     n_contracts = max(1, round(kelly.bet_amount / p_market)) if side == "yes" \
                   else max(1, round(kelly.bet_amount / (1 - p_market)))
     cost = round(n_contracts * (p_market if side == "yes" else 1 - p_market), 2)
@@ -2385,7 +2704,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         p_model=p_model, raw_edge=best_edge, side=side, decision="trade",
         sig=sig, kelly_fraction=kelly.kelly_fraction,
         bet_fraction=kelly.bet_fraction, bet_amount=cost, bankroll=bankroll,
-        liq_signal=_liq_signal, cg=_cg, spread=c["ask"] - c["bid"],
+        liq_signal=_liq_signal, cg=_cg, spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
     )
     append_row(row, asset=asset)
     if already_bet is not None:
@@ -2443,7 +2762,7 @@ def _build_row(
     asset, decision_time, ticker, close_time, spot, floor_s, offset_pct,
     tau_min, p_market, p_model, raw_edge, side, decision, sig,
     kelly_fraction, bet_fraction, bet_amount, bankroll,
-    liq_signal=None, cg=None, spread=0.0,
+    liq_signal=None, cg=None, spread=0.0, cvd_4h=None,
 ) -> dict:
     def _f(v, d=4):
         try:
@@ -2534,6 +2853,10 @@ def _build_row(
         "liq_bias":             _f(liq_signal.liq_bias)           if liq_signal is not None else "",
         "oi_chg_pct":           _f(liq_signal.oi_chg_pct)        if liq_signal is not None else "",
         "ls_long_pct":          _f(liq_signal.ls_long_pct, 2)    if liq_signal is not None else "",
+        "cvd_4h":               round(cvd_4h, 2)                    if cvd_4h is not None else "",
+        "cg_futures_delta_4h":  round(cg.futures_delta_4h, 2)     if cg is not None else "",
+        "cg_futures_ratio_4h":  round(cg.futures_ratio_4h, 6)     if cg is not None else "",
+        "cg_futures_cvd_12h":   round(cg.futures_cvd_12h, 2)      if cg is not None else "",
         # CoinGlass macro
         "fear_greed":           _f(cg.fg_value, 1)               if cg is not None else "",
         "cg_composite":         cg.composite_score                if cg is not None else "",
@@ -2563,6 +2886,8 @@ def _build_row(
         "autocorr1_30":         _f(sig.get("autocorr1_30")),
         "kalman_velocity":      _f(sig.get("kalman_velocity")),
         "kalman_residual":      _f(sig.get("kalman_residual")),
+        "kc_pct_1h":            _f(sig.get("kc_pct_1h")),
+        "kc_bo_1h":             sig.get("kc_bo_1h", ""),
     }
 
 

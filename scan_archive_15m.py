@@ -88,6 +88,8 @@ COLUMNS = [
     "p_up_v2_btc", "z_drift_6h",
     # HMM vol-regime state (BTC only; 0=low-vol, 1=med-vol, 2=high-vol)
     "hmm_vol_state",
+    # VWAP MTF HMM state (BTC only; 8-state model on 1m/5m/15m VWAP distances)
+    "vwap_hmm_state",
 ]
 
 _META_COLS = {

@@ -13,33 +13,12 @@ sol_scan_archive_15m.csv.
 """
 
 import csv
-import fcntl
 import math
-import os
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 _RESULTS_DIR = Path(__file__).parent / "results"
-
-
-@contextmanager
-def _archive_lock(path: Path):
-    """Exclusive advisory lock serializing appends and rewrites per archive file.
-
-    Same race as scan_archive.py (2026-07-02): unlocked full rewrite in
-    fill_scan_outcomes could clobber rows appended during the API loop, or
-    restore a stale copy after a hung call. See scan_archive._archive_lock.
-    """
-    lock_path = path.with_suffix(path.suffix + ".lock")
-    fd = open(lock_path, "w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
 
 COLUMNS = [
     "logged_at",
@@ -136,18 +115,15 @@ def _ensure_csv(path: Path) -> None:
     new_cols = [c for c in COLUMNS if c not in existing]
     if not new_cols:
         return
-    with _archive_lock(path):
-        with open(path, newline="") as f:
-            rows = list(csv.DictReader(f))
-        for row in rows:
-            for col in new_cols:
-                row.setdefault(col, "")
-        tmp = path.with_suffix(".csv.tmp")
-        with open(tmp, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
-            w.writeheader()
-            w.writerows(rows)
-        os.replace(tmp, path)
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        for col in new_cols:
+            row.setdefault(col, "")
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
 
 
 def _fmt(v, digits: int = 6):
@@ -196,9 +172,8 @@ def log_scan_row(
     for col in _FEATURE_COLS:
         row[col] = _fmt(features.get(col))
 
-    with _archive_lock(path):
-        with open(path, "a", newline="") as f:
-            csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore").writerow(row)
+    with open(path, "a", newline="") as f:
+        csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore").writerow(row)
 
 
 def fill_scan_outcomes(asset: str = "BTC", auth=None) -> int:
@@ -225,10 +200,8 @@ def fill_scan_outcomes(asset: str = "BTC", auth=None) -> int:
         print(f"  [scan_archive_15m:{asset}] Import error: {e}")
         return 0
 
-    # Updates keyed by row identity; write path re-reads the file so rows
-    # appended during the (slow) API loop are never lost. See scan_archive.py.
     _cache: dict[str, Optional[int]] = {}
-    updates: dict[tuple, dict] = {}
+    updated = 0
     for row in pending:
         ticker = row.get("contract_ticker", "").strip()
         if not ticker:
@@ -243,39 +216,26 @@ def fill_scan_outcomes(asset: str = "BTC", auth=None) -> int:
             except Exception:
                 _cache[ticker] = None
         if _cache[ticker] is not None:
-            upd: dict = {"resolved_yes": str(_cache[ticker])}
+            row["resolved_yes"] = str(_cache[ticker])
+            # Backfill expiry price if not already logged
             if not (row.get("spot_at_expiry") or "").strip():
                 close_ts = row.get("close_ts", "")
                 spot_scan = float(row.get("spot") or 0)
                 strike    = float(row.get("strike") or 0)
                 from live_signal import fetch_spot_at_time
-                # NOTE: Binance-derived, ~+14bp above Kalshi settlement basis —
-                # diagnostics only; never derive win/loss from spot_at_expiry.
                 spot_exp  = fetch_spot_at_time(close_ts, asset) if close_ts else None
                 if spot_exp and spot_scan > 0:
-                    upd["spot_at_expiry"] = round(spot_exp, 2)
-                    upd["price_move_pct"] = round((spot_exp - spot_scan) / spot_scan * 100, 4)
+                    row["spot_at_expiry"] = round(spot_exp, 2)
+                    row["price_move_pct"] = round((spot_exp - spot_scan) / spot_scan * 100, 4)
                 if spot_exp and strike > 0:
-                    upd["miss_pct"] = round((spot_exp - strike) / strike * 100, 4)
-            updates[(row.get("logged_at", ""), ticker)] = upd
+                    row["miss_pct"] = round((spot_exp - strike) / strike * 100, 4)
+            updated += 1
 
-    updated = len(updates)
     if updated:
-        with _archive_lock(path):
-            with open(path, newline="") as f:
-                fresh = list(csv.DictReader(f))
-            applied = 0
-            for row in fresh:
-                upd = updates.get((row.get("logged_at", ""), row.get("contract_ticker", "")))
-                if upd:
-                    row.update(upd)
-                    applied += 1
-            tmp = path.with_suffix(".csv.tmp")
-            with open(tmp, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
-                w.writeheader()
-                w.writerows(fresh)
-            os.replace(tmp, path)
-        print(f"  [scan_archive_15m:{asset}] Filled {applied} outcomes → {path.name}")
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        print(f"  [scan_archive_15m:{asset}] Filled {updated} outcomes → {path.name}")
 
     return updated

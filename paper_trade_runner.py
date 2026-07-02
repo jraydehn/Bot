@@ -2170,6 +2170,9 @@ def main() -> None:
     # Uses global _ps_prev_sk15m/_ps_prev_sk1h for delta (running tracker across scan cycles).
     _ps_state: "int | None" = None
     if args.asset == "BTC" and _ps_hmm_model is not None and _ps_hmm_scaler is not None:
+        # 2026-07-02: missing `global` made _ps_prev_* local → UnboundLocalError on
+        # every cycle (silently caught below) → hmm_ps_state never logged once.
+        global _ps_prev_sk15m, _ps_prev_sk1h
         try:
             _sk15m_ps = float(locals().get("_sk_15m_mtf", 50.0))
             _sk1h_ps  = float(locals().get("_sk_1h_mtf",  50.0))
@@ -2713,6 +2716,10 @@ def main() -> None:
         _pip_last_slope = float("nan")
         _pip_up_frac    = float("nan")
         _pip_n_turns    = -1
+        # p_up_v2 for archive logging — market-level (identical for every contract in
+        # a cycle), computed lazily once at the first BTC log_scan_row. Was never
+        # passed for BTC → archive column 100% empty (2026-07-01 audit; fixed 07-02).
+        _p_up_v2_scanlog = None
         # Hawkes vol — carried from top-of-loop computation; reset here for safety
         _v_hawk      = _v_hawk_val
         _hawk_regime = _hawk_vol_regime_val
@@ -3311,6 +3318,17 @@ def main() -> None:
                 _btc_lgbm_c = _load_btc_lgbm()
                 if _btc_lgbm_c is not None:
                     _p_gbdt_c = _infer_btc_lgbm(_btc_lgbm_c, _gbdt_feats_c)
+                if _p_up_v2_scanlog is None and _composite_computed and _df_4h_comp is not None:
+                    try:
+                        _p_up_v2_scanlog = _btc_p_up_model.compute_p_up(
+                            df_confirm, _df_4h_comp, confirm,
+                            composite_trend=float(_active_trend),
+                            composite_rev=float(_active_rev),
+                            composite_p_up_1h=_comp_p_up,
+                            pm_drift_5m=float("nan"),
+                        )
+                    except Exception:
+                        _p_up_v2_scanlog = None
                 try:
                     import scan_archive as _sa
                     _sa.log_scan_row(
@@ -3318,6 +3336,7 @@ def main() -> None:
                         spot=spot, strike=s_k, p_market=pm, tau_minutes=tau_c,
                         features=_gbdt_feats_c, p_gbdt=_p_gbdt_c,
                         asset=args.asset, now_utc=now_utc,
+                        p_up_v2=_p_up_v2_scanlog,
                     )
                 except Exception:
                     pass
@@ -7096,6 +7115,11 @@ def main() -> None:
         "hmm_pnl_state":     _hmm_pnl_state if _hmm_pnl_state is not None else "",
         "hmm_ps_state":      _ps_state if _ps_state is not None else "",
         "hmm_gd_state":      _gd_state if _gd_state is not None else "",
+        # pip_* were in COLUMNS but never assembled into the row → always empty.
+        # Wired 2026-07-02 (computed each cycle; see [pip_shadow] log line).
+        "pip_last_slope":    round(_pip_last_slope, 6) if not math.isnan(_pip_last_slope) else "",
+        "pip_up_frac":       round(_pip_up_frac, 4)    if not math.isnan(_pip_up_frac)    else "",
+        "pip_n_turns":       _pip_n_turns              if _pip_n_turns >= 0               else "",
         "hmm_zdrift_state":  (lambda _zd_pm=chosen.get("pm_drift_5m"), _zd_rv=_rvol_1h:
                                int(_zdrift_model.predict(
                                    _zdrift_scaler.transform([[_zd_pm, _zd_rv]]))[0])

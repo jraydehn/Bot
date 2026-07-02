@@ -4467,13 +4467,8 @@ def main() -> None:
             # Decision.py has P_ETH_NO_PM_MIN for ETH, but this belt-and-suspenders runner check
             # catches any edge-case bypass path in the dual-eval routing.
             # VSA flip targets deep ITM YES (pm_bid ≈ 0.89), so this gate never fires for those.
-            # [2026-07-02 audit] BTC floor raised 0.10 → 0.15: taken NO at pm<0.15 lost $91
-            # (n=26, WR 82.4% vs BE 87.5%, negative all 3 weeks); archive confirms deep-OTM
-            # NO gross edge (2.3-4.3pp, 5/5 wks) is real but below the 2c spread at 85c+
-            # NO prices. ETH/SOL stay at 0.10 (not audited).
-            _no_pm_min = 0.15 if args.asset == "BTC" else 0.10
-            if dec_c.side == "no" and pm < _no_pm_min:
-                print(f"  [no_pm_floor] BLOCK NO {c['ticker']} — pm={pm:.3f}<{_no_pm_min:.2f} "
+            if dec_c.side == "no" and pm < 0.10:
+                print(f"  [no_pm_floor] BLOCK NO {c['ticker']} — pm={pm:.3f}<0.10 "
                       f"(R:R={(1-pm)/max(pm,0.01):.0f}:1 unfavorable)")
                 _log_block("no_pm_floor")
                 continue
@@ -6579,10 +6574,6 @@ def main() -> None:
                           f"(squeeze overbought → stall, WR=47.6%)")
                     _log_block("liq_ratio_no_gate__rescue")  # rescue outcome logging (2026-07-01 audit)
 
-            # [boost_stack_cap 2026-07-02 audit] Capture pre-boost Kelly so the cumulative
-            # boost product can be capped at 1.5x after the NO boost chain (see below).
-            _boost_base_frac = dec_c.bet_fraction
-
             # [donch_low_no_boost 2026-06-19] 1.5x Kelly (ceil 7.5%) for NO when price is LOW in its
             # 1h Donchian channel (donch_1h<0.20 = bottom 20% of 20h range → range-bound, NO safe).
             # Archive OOS (BTC+ETH): NO_WR 87-91%, EV +0.07 to +0.10, all-weeks-positive, MCPT p=0.000.
@@ -6710,50 +6701,6 @@ def main() -> None:
                           f"WR=65.3%; ({dec_c.bet_fraction:.4f}→{_spike_boost_frac:.4f})")
                     dec_c.bet_fraction = _spike_boost_frac
                     dec_c.bet_amount   = round(_spike_boost_frac * args.bankroll, 2)
-
-            # [boost_stack_cap 2026-07-02 audit] Cap the cumulative NO boost product at 1.5x.
-            # Live data: single ~1.5x boosts are the best money in the book (n=43, WR 88.4%
-            # vs BE 72.2%, +$898); stacked products >1.5x show no incremental edge
-            # (n=30, WR 66.7%, -$27). BTC only; individual boost ceilings still apply.
-            if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
-                    and dec_c.bet_fraction > _boost_base_frac * 1.5):
-                _cap_frac = _boost_base_frac * 1.5
-                print(f"  [boost_stack_cap] Kelly capped at 1.5x base {c['ticker']} — "
-                      f"stacked {dec_c.bet_fraction/_boost_base_frac:.2f}x → 1.5x "
-                      f"({dec_c.bet_fraction:.4f}→{_cap_frac:.4f})")
-                dec_c.bet_fraction = _cap_frac
-                dec_c.bet_amount   = round(_cap_frac * args.bankroll, 2)
-
-            # [hour14_no_damp 2026-07-02 audit] ×0.5 Kelly for BTC NO on contracts closing
-            # at 14:00 UTC. Taken hour-14 NO: n=28, WR 64.3% vs BE 79.0%, -$309, negative
-            # all 3 live weeks. Independent mechanism: hour-of-day vol audit shows realized
-            # z-std 1.38 (n=220) at UTC 14 → vol under-estimated → NO edges inflated.
-            # Hours 21/22 also vol-under-estimated but taken-PnL flat — monitor, don't damp.
-            if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"):
-                try:
-                    _close_hr_utc = int(str(c.get("close_time", ""))[11:13])
-                except (ValueError, IndexError):
-                    _close_hr_utc = -1
-                if _close_hr_utc == 14:
-                    _h14_frac = dec_c.bet_fraction * 0.5
-                    print(f"  [hour14_no_damp] ×0.5 Kelly NO {c['ticker']} — close hour 14 UTC "
-                          f"(vol under-est z-std=1.38, live -$309 3/3wks; "
-                          f"{dec_c.bet_fraction:.4f}→{_h14_frac:.4f})")
-                    dec_c.bet_fraction = _h14_frac
-                    dec_c.bet_amount   = round(_h14_frac * args.bankroll, 2)
-
-            # [btc_no_conviction_floor 2026-07-02 audit] Skip BTC NO with final conviction
-            # below 1.5% of bankroll (post-boost, post-damp, pre-counter-tape). Bottom
-            # bet_fraction quintile (<0.016) was pure drag: n=80, WR 58.8% vs dollar-weighted
-            # BE 54.3%, -$58 per 2wk — Kelly already flags these as marginal; the floor
-            # converts that into skipping. NO-side only: YES sizes at k_yes=0.05 and lives
-            # in this range by construction (YES last 28d: n=11, WR 90.9%, +$153 — keep).
-            if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
-                    and dec_c.bet_fraction < 0.015):
-                print(f"  [btc_no_conviction_floor] SKIP NO {c['ticker']} — "
-                      f"bet_fraction={dec_c.bet_fraction:.4f}<0.015 (marginal conviction)")
-                _log_block("btc_no_conviction_floor")
-                continue
 
             # [ichi_bear_yes_damp] ×0.5 Kelly for BTC YES when Ichimoku is bearish.
             # Archive (n=102,311): ichi_bear=1 → YES WR=59.8% vs BE=62.4% (gap=-2.6%, z=-29.27).

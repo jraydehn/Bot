@@ -35,22 +35,25 @@ fi
 echo "  All clear."
 
 echo ""
-echo "=== Starting 1h watchdog (BTC/ETH/SOL) ==="
-# BTC/SOL run paper-only; ETH 15m live runner is started separately via restart_15m_traders.sh
+echo "=== Starting 1h watchdog (BTC dual / ETH paper / SOL dual) ==="
+# Config as of 2026-07-02: bankrolls 2500; stop-loss BTC 350 / SOL 250 (shared
+# SOL pool with 15m via live_trades_sol.csv) per stop-level sweep — stops <$300
+# BTC / <$225 SOL were cutting mean-reverting days (-$955 / -$33 historical).
 nohup python3 run_all_assets.py \
-    --btc-bankroll 2000 --btc-loss-limit 300 --max-contracts 1000 \
-    --eth-bankroll 2000 --eth-loss-limit 240 \
-    --sol-bankroll 2000 --sol-loss-limit 240 \
-    > logs/watchdog_1h.log 2>&1 &
+    --btc-dual --btc-bankroll 2500 --btc-loss-limit 350 \
+    --eth-bankroll 2500 --eth-loss-limit 20 \
+    --sol-dual --sol-bankroll 2500 --sol-loss-limit 250 \
+    >> logs/run_all_assets.log 2>&1 &
 echo "  PID=$!"
 
 echo ""
-echo "=== Starting 15m watchdog (BTC/ETH/SOL) ==="
+echo "=== Starting 15m watchdog (BTC paper / ETH paper / SOL live) ==="
 nohup python3 run_all_15m.py \
-    --btc-bankroll 2000 \
-    --eth-bankroll 2000 \
-    --sol-bankroll 2000 \
-    > logs/watchdog_15m.log 2>&1 &
+    --btc-bankroll 2500 \
+    --eth-bankroll 2500 \
+    --sol-bankroll 2500 \
+    --sol-live --sol-loss-limit 250 \
+    >> logs/run_all_15m.log 2>&1 &
 echo "  PID=$!"
 
 echo ""

@@ -111,8 +111,12 @@ COLUMNS = [
 
 _FEATURE_COLS = {c for c in COLUMNS if c not in {
     "logged_at", "contract_ticker", "close_ts", "spot", "strike",
-    "p_market", "tau_minutes", "p_gbdt", "resolved_yes",
+    "p_market", "tau_minutes", "p_gbdt", "p_up_v2", "resolved_yes",
 }}
+# p_up_v2 added to the exclusion set 2026-07-02: it is set explicitly from the
+# p_up_v2 parameter in log_scan_row, but was missing here, so the feature loop
+# overwrote it with features.get("p_up_v2") → None → "" — the column stayed
+# 100% empty for every asset since it was introduced.
 
 
 def get_archive_path(asset: str) -> Path:

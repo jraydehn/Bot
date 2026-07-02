@@ -3327,8 +3327,9 @@ def main() -> None:
                             composite_p_up_1h=_comp_p_up,
                             pm_drift_5m=float("nan"),
                         )
-                    except Exception:
+                    except Exception as _puv2_log_e:
                         _p_up_v2_scanlog = None
+                        print(f"  [p_up_v2_scanlog] compute failed: {type(_puv2_log_e).__name__}: {_puv2_log_e}")
                 try:
                     import scan_archive as _sa
                     _sa.log_scan_row(

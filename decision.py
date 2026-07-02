@@ -708,7 +708,25 @@ def evaluate_trade(
     # These bets are profitable (84% WR, +$47 archive) but the payout ratio is poor
     # — at pm=0.84 you risk $16.80 to win $3.20. Capping at 2% keeps the trade but
     # limits single-trade exposure to ~$8 at a $400 bankroll.
-    kelly_multiplier = 0.50
+    #
+    # [btc_kelly_conviction 2026-06-18] BTC hourly: reduced multipliers restore the
+    # conviction gradient. At 0.50 the 5% cap bound on ~96% of BTC bets — the system
+    # flat-max-bet regardless of edge. Taken-trade analysis (n=55): net_edge
+    # monotonically predicts realized EV (low-edge tercile is -EV, WR 63%<breakeven;
+    # high-edge tercile +0.0585), and p_model is ~7-8pts overconfident (84% predicted
+    # vs 76% realized WR), so fractional Kelly is warranted. NO=0.10/YES=0.05 makes
+    # bets span ~0.5%-5% by conviction; cap binds only on genuine high-conviction.
+    # ETH [eth_kelly_015 2026-06-19]: 0.50→0.15. Same flat-max issue (87% of taken ETH bets
+    # hit the 5% cap), but ETH-archive net-PnL sweep shows the effect is SMALL (PnL flat ±2%,
+    # Sharpe 0.046→0.048) — ETH edge is less conviction-monotonic than BTC. 0.15 restores the
+    # gradient (27% capped vs 49%) with marginal upside; low-risk. SOL keeps 0.50 pending analysis.
+    # Backups: decision_pre_btc_kelly_conviction_20260618.py, decision_pre_eth_kelly_015_20260619.py
+    if asset == "BTC":
+        kelly_multiplier = 0.10 if side == "no" else 0.05
+    elif asset == "ETH":
+        kelly_multiplier = 0.15
+    else:
+        kelly_multiplier = 0.50
     _max_bet = 0.02 if (side == "yes" and p_market > 0.75) else 0.05
     kelly = compute_kelly_size(p_model, p_market, bankroll, kelly_multiplier, side=side,
                                max_bet_fraction=_max_bet)

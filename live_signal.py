@@ -494,6 +494,36 @@ def fetch_recent_candles(interval: str = "1m", lookback_bars: int = 70, asset: s
         return None
 
 
+def fetch_cvd_1h(lookback_bars: int = 24, asset: str = "BTC") -> Optional[float]:
+    """
+    Return the 4h Cumulative Volume Delta from Binance.us 1h spot klines.
+    CVD = sum over last 4 bars of (taker_buy_quote - taker_sell_quote)
+        = sum of (2 * taker_buy_quote - quote_vol) per bar.
+    Positive = net buying pressure; negative = net selling pressure.
+    Returns None on failure.
+    """
+    symbol = ASSET_CONFIG.get(asset.upper(), ASSET_CONFIG["BTC"])["binance_symbol"]
+    try:
+        url = "https://api.binance.us/api/v3/klines"
+        r = requests.get(url, params={"symbol": symbol, "interval": "1h",
+                                      "limit": lookback_bars}, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if not data or isinstance(data, dict) or len(data) < 4:
+            return None
+        df = pd.DataFrame(data, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_vol", "trades", "taker_buy_base", "taker_buy_quote", "ignore",
+        ])
+        df["taker_buy_quote"] = df["taker_buy_quote"].astype(float)
+        df["quote_vol"]       = df["quote_vol"].astype(float)
+        df["delta"]           = 2.0 * df["taker_buy_quote"] - df["quote_vol"]
+        return round(float(df["delta"].iloc[-4:].sum()), 2)
+    except Exception as exc:
+        print(f"  [binance] fetch_cvd_1h({asset}) failed: {exc}")
+        return None
+
+
 def fetch_recent_1m_candles(lookback_bars: int = 70, asset: str = "BTC") -> Optional[pd.DataFrame]:
     """Convenience wrapper for 1m candles (used for short-term momentum)."""
     return fetch_recent_candles("1m", lookback_bars, asset=asset)

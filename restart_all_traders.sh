@@ -38,18 +38,18 @@ echo ""
 echo "=== Starting 1h watchdog (BTC/ETH/SOL) ==="
 # BTC/SOL run paper-only; ETH 15m live runner is started separately via restart_15m_traders.sh
 nohup python3 run_all_assets.py \
-    --btc-bankroll 1000 --btc-loss-limit 150 --max-contracts 1000 \
-    --eth-bankroll 1000 --eth-loss-limit 120 \
-    --sol-bankroll 1000 --sol-loss-limit 120 \
+    --btc-bankroll 2000 --btc-loss-limit 300 --max-contracts 1000 \
+    --eth-bankroll 2000 --eth-loss-limit 240 \
+    --sol-bankroll 2000 --sol-loss-limit 240 \
     > logs/watchdog_1h.log 2>&1 &
 echo "  PID=$!"
 
 echo ""
 echo "=== Starting 15m watchdog (BTC/ETH/SOL) ==="
 nohup python3 run_all_15m.py \
-    --btc-bankroll 1000 \
-    --eth-bankroll 1000 \
-    --sol-bankroll 1000 \
+    --btc-bankroll 2000 \
+    --eth-bankroll 2000 \
+    --sol-bankroll 2000 \
     > logs/watchdog_15m.log 2>&1 &
 echo "  PID=$!"
 

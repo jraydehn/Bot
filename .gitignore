@@ -24,3 +24,9 @@ env/
 *.pem
 .env
 .kalshi_config
+
+# Runtime logs and lock files
+logs/
+*.lock
+nohup.out
+*.out

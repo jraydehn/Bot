@@ -9,6 +9,7 @@ All order amounts are in dollars; Kalshi API uses integer cents (0–99).
 
 import csv
 import math
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -115,7 +116,7 @@ def compute_order_params(
     bet_amount: float,
     bid: float,
     ask: float,
-    max_contracts: int = 20,
+    max_contracts: int = 10_000,
 ) -> tuple:
     """
     Compute (yes_price_cents, count) for a limit buy order.
@@ -126,7 +127,7 @@ def compute_order_params(
              (100 - bid) cents for NO, which matches the current NO ask.
 
     Returns (yes_price_cents: int, count: int).
-    count is capped at max_contracts and minimum 1.
+    Kelly sizing controls bet size; max_contracts is a hard safety ceiling only.
     """
     if side == "yes":
         # +1 cent above ask to sweep the next order-book level and improve fill rate.
@@ -154,15 +155,25 @@ def place_order(
     yes_price: int,
 ) -> dict:
     """
-    Submit a limit buy order to POST /portfolio/orders.
+    Submit a limit buy order to Kalshi's V2 create-order endpoint
+    (POST /portfolio/events/orders).
+
+    Migrated 2026-06-20: the old POST /portfolio/orders (action/side=yes-no/
+    yes_price-cents) was deprecated by Kalshi → HTTP 410 deprecated_v1_order_endpoint.
+    V2 uses order-book semantics: side is "bid" (buy YES) / "ask" (sell YES = buy NO),
+    and `price` is ALWAYS the YES-outcome price in fixed-point DOLLARS. This preserves
+    the existing caller interface (still pass side=yes/no, yes_price in cents) and
+    translates internally, so cost economics are unchanged:
+        YES buy  → bid @ price=yes_price/100      (pay yes_price¢ per YES)
+        NO  buy  → ask @ price=yes_price/100      (pay 100-yes_price¢ per NO, since
+                                                   selling YES at P = buying NO at 1-P)
 
     Args:
         auth:       KalshiAuth instance
         ticker:     contract ticker, e.g. "KXBTCD-26APR0520-T69099.99"
-        side:       "yes" or "no"
+        side:       "yes" or "no" (caller-facing; mapped to bid/ask internally)
         count:      number of whole contracts to buy
-        yes_price:  price in cents (1–99); for NO orders this is the YES-side
-                    limit price (so NO executes at 100 - yes_price cents)
+        yes_price:  YES-side limit price in cents (1–99), for both yes and no orders
 
     Returns:
         Kalshi API response dict, or {} on failure.
@@ -171,30 +182,55 @@ def place_order(
         print(f"  [live] Skipping — count={count} is 0")
         return {}
 
+    # Map caller's yes/no + yes_price(cents) → V2 bid/ask + price(dollars).
+    book_side = "bid" if side == "yes" else "ask"   # ask = sell YES = buy NO
+    price_str = f"{yes_price / 100.0:.2f}"          # YES price in fixed-point dollars
     body = {
-        "ticker":    ticker,
-        "action":    "buy",
-        "side":      side,
-        "count":     count,
-        "type":      "limit",
-        "yes_price": yes_price,
+        "ticker":                     ticker,
+        "client_order_id":            str(uuid.uuid4()),
+        "side":                       book_side,
+        "count":                      str(int(count)),
+        "price":                      price_str,
+        "time_in_force":              "good_till_canceled",   # matches prior limit-can-rest behavior
+        "self_trade_prevention_type": "taker_at_cross",
     }
 
     cost = count * (yes_price if side == "yes" else (100 - yes_price)) / 100.0
-    print(f"  [live] Placing order: {ticker}  {side.upper()} x{count} @ {yes_price}¢"
-          f"  (cost ≈ ${cost:.2f})")
-    result = _kalshi_post("/portfolio/orders", body, auth)
+    print(f"  [live] Placing order (V2): {ticker}  {side.upper()}→{book_side} x{count} "
+          f"@ YES={yes_price}¢ (price={price_str})  (cost ≈ ${cost:.2f})")
+    result = _kalshi_post("/portfolio/events/orders", body, auth)
 
-    if result:
-        order   = result.get("order", {})
-        oid     = order.get("order_id", "?")
-        status  = order.get("status", "?")
-        filled  = order.get("count_filled", 0)
-        print(f"  [live] Order result: id={oid}  status={status}  filled={filled}/{count}")
-    else:
+    if not result:
         print("  [live] Order placement FAILED — no response")
+        return {}
 
-    return result
+    # Normalize the V2 response into the {"order": {order_id, status, count_filled}}
+    # envelope that log_live_trade() and settlement expect. The actual V2 create-order
+    # response (verified live 2026-06-20) is FLAT with fixed-point STRING fields and
+    # NO status field, e.g.:
+    #   {"order_id":..., "fill_count":"1.00", "remaining_count":"0.00",
+    #    "average_fill_price":"0.9900", "client_order_id":..., "ts_ms":...}
+    # So: read fill_count (not count_filled), and SYNTHESIZE status from remaining_count.
+    src = result.get("order", result) if isinstance(result, dict) else {}
+    def _fp(x, d=0.0):
+        try: return float(x)
+        except (TypeError, ValueError): return d
+    oid       = src.get("order_id") or src.get("client_order_id", "")
+    filled    = int(round(_fp(src.get("fill_count", src.get("count_filled", 0)))))
+    remaining = int(round(_fp(src.get("remaining_count", 0))))
+    if "status" in src and src["status"]:
+        status = src["status"]                       # honor explicit status if present
+    elif filled > 0 and remaining == 0:
+        status = "executed"
+    elif filled > 0:
+        status = "partial"
+    elif remaining > 0:
+        status = "resting"
+    else:
+        status = "failed"
+    print(f"  [live] Order result: id={oid}  status={status}  filled={filled}/{count}")
+    return {"order": {"order_id": oid, "status": status, "count_filled": filled},
+            "raw": result}
 
 
 # ---------------------------------------------------------------------------

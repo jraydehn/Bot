@@ -77,6 +77,10 @@ COLUMNS = [
     # Ichimoku signals (BTC only, shadow)
     "ichi_bear",        # 1 = tenkan<kijun AND span_a<span_b on 1h; 0 otherwise
     "cloud_thick_pct",  # |span_a - span_b| / close × 100 (cloud thickness %)
+    # Macro HMM regime posteriors (BTC only, shadow — 3-state: Bull/Sideways/Bear)
+    "macro_regime_bull",   # P(Bull) from 1h directional HMM
+    "macro_regime_sdwy",   # P(Sideways)
+    "macro_regime_bear",   # P(Bear)
     # Outcome (backfilled)
     "resolved_yes",
     "spot_at_expiry", "price_move_pct", "miss_pct",

@@ -23,8 +23,9 @@ _ROOT = Path(__file__).parent
 
 _PATHS = {
     "ETH": _ROOT / "reform_results" / "eth_p_up_v2.pkl",
-    "SOL": _ROOT / "reform_results" / "sol_p_up_v2.pkl",
 }
+
+_SOL_V2_PATH = _ROOT / "reform_results" / "sol_p_up_v2_new.pkl"
 
 _CACHE: dict = {}   # asset -> pipe dict or None
 
@@ -107,6 +108,60 @@ def _bb_pct(c: pd.Series, n: int = 20) -> float:
     hi = mid + 2 * std
     return float((c.iloc[-1] - lo) / (hi - lo)) if (hi - lo) > 0 else NAN
 
+def _rsi_series(s: pd.Series, p: int = 14) -> pd.Series:
+    d = s.diff()
+    g = d.clip(lower=0).ewm(com=p - 1, adjust=False).mean()
+    l = (-d.clip(upper=0)).ewm(com=p - 1, adjust=False).mean()
+    return 100 - 100 / (1 + g / l.replace(0, 1e-10))
+
+def _roll_z_last(s: pd.Series, w: int = 30) -> float:
+    if len(s) < w:
+        return NAN
+    tail = s.iloc[-w:]
+    mu = tail.mean(); sd = tail.std()
+    if sd == 0 or math.isnan(sd):
+        return NAN
+    return float((s.iloc[-1] - mu) / sd)
+
+def _kalman_residual_last(c: pd.Series, n: int = 200) -> float:
+    s = c.iloc[-n:] if len(c) > n else c
+    if len(s) < 10:
+        return NAN
+    F = np.array([[1.0, 1.0], [0.0, 1.0]])
+    Q = np.eye(2) * 1e-5; R = 0.01
+    H = np.array([[1.0, 0.0]])
+    x = np.array([float(s.iloc[0]), 0.0]); P = np.eye(2)
+    innov = NAN
+    for p_val in s:
+        xp = F @ x; Pp = F @ P @ F.T + Q
+        K = Pp @ H.T / (float(H @ Pp @ H.T) + R)
+        innov = float(p_val) - float(H @ xp)
+        x = xp + K.flatten() * innov
+        P = (np.eye(2) - np.outer(K.flatten(), H)) @ Pp
+    return float(innov) if not math.isnan(innov) else NAN
+
+def _pc1_rsi(c1h: pd.Series, c4h: pd.Series) -> float:
+    z1h = _roll_z_last(_rsi_series(c1h, 14), 30)
+    z4h = _roll_z_last(_rsi_series(c4h, 14), 30)
+    if math.isnan(z1h) or math.isnan(z4h):
+        return NAN
+    return (z1h + z4h) / 2.0
+
+def _donchian_pos(c: pd.Series, n: int = 20) -> float:
+    if len(c) < n:
+        return NAN
+    lo = c.rolling(n).min().iloc[-1]; hi = c.rolling(n).max().iloc[-1]
+    rng = hi - lo
+    if rng == 0 or math.isnan(rng):
+        return 0.5
+    return float((c.iloc[-1] - lo) / rng)
+
+def _chg_4h_1h(c: pd.Series) -> float:
+    if len(c) < 5:
+        return NAN
+    c4 = float(c.iloc[-5]); cn = float(c.iloc[-1])
+    return (cn - c4) / c4 * 100 if c4 != 0 else NAN
+
 def _ema50_dist(c: pd.Series) -> float:
     if len(c) < 50:
         return NAN
@@ -136,6 +191,54 @@ def _chg_4h_atr(df_4h: pd.DataFrame) -> float:
     return float((df_4h["close"].iloc[-1] - df_4h["close"].iloc[-5]) / atr_val)
 
 
+# ── SOL v2 (sol_p_up_v2_new.pkl, 15 features) ────────────────────────────────
+
+def _compute_p_up_sol_v2(
+    df_1h: pd.DataFrame,
+    df_4h: pd.DataFrame,
+    confirm,
+    composite_trend: float,
+    composite_rev: float,
+) -> "float | None":
+    if _SOL_V2_PATH not in _CACHE:
+        if not _SOL_V2_PATH.exists():
+            _CACHE[_SOL_V2_PATH] = None
+        else:
+            try:
+                with open(_SOL_V2_PATH, "rb") as f:
+                    _CACHE[_SOL_V2_PATH] = pickle.load(f)
+            except Exception:
+                _CACHE[_SOL_V2_PATH] = None
+    pipe = _CACHE.get(_SOL_V2_PATH)
+    if pipe is None:
+        return None
+
+    clf  = pipe["clf"]
+    c1h  = df_1h["close"]
+    c4h  = df_4h["close"]
+
+    vec = np.array([[
+        _ema50_dist(c1h),
+        _stoch_k(df_4h["high"], df_4h["low"], c4h, 14),
+        _rsi(c1h, 14),
+        _chg_4h_atr(df_4h),
+        _rsi(c4h, 14),
+        _macd_hist(c1h),
+        _daily_vwap_dist(df_1h),
+        _bb_pct(c1h),
+        float(confirm.stretch_score) if confirm.stretch_score is not None else NAN,
+        float(composite_rev),
+        float(composite_trend),
+        _kalman_residual_last(c1h),
+        _pc1_rsi(c1h, c4h),
+        _donchian_pos(c1h),
+        _chg_4h_1h(c1h),
+    ]], dtype=float)
+
+    p = float(clf.predict_proba(vec)[0, 1])
+    return float(np.clip(p, 0.02, 0.98))
+
+
 # ── public API ────────────────────────────────────────────────────────────────
 
 def compute_p_up(
@@ -152,6 +255,11 @@ def compute_p_up(
     Shadow directional p_up for ETH/SOL.
     Returns float in [0.02, 0.98] or None if model not loaded.
     """
+    if asset == "SOL":
+        return _compute_p_up_sol_v2(
+            df_1h, df_4h, confirm, composite_trend, composite_rev
+        )
+
     pipe = _load(asset)
     if pipe is None:
         return None

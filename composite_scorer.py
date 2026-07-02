@@ -171,19 +171,21 @@ def _vwap_1h(close_1m, volume_1m):
 
 def _trend_votes(close_4h, high_4h, low_4h, volume_4h):
     """
-    Returns a pd.Series of trend_score (int, -6 to +6) on the 4h index.
+    Returns a pd.Series of trend_score (int, -10 to +10) on the 4h index.
 
-    Voting rules (each = ±1):
-      Stoch 4h          : overbought/extreme_overbought = +1; oversold = -1
-      Volume 4h         : high_vol_up = +1; high_vol_down = -1
-      MACD 4h crossover : crossed_up/up_lag = +1; crossed_down/down_lag = -1
-      BB 4h             : near_high/upper_zone = +1; near_low/lower_zone = -1
-      Keltner 4h        : above_KC/upper_zone = +1; below_KC/lower_zone = -1
-      Williams %R 4h    : overbought = +1; oversold = -1
+    Voting rules:
+      Stoch 4h          : overbought = +1; oversold = -1           (±1)
+      Volume 4h         : high_vol_up = +1; high_vol_down = -1     (±1)
+      MACD 4h crossover : crossed_up/up_lag = +1; down/lag = -1    (±1)
+      BB 4h             : near_high/upper = +1; near_low/lower = -1(±1)
+      Keltner 4h        : above_KC/upper = +1; below_KC/lower = -1 (±1)
+      Williams %R 4h    : overbought = +1; oversold = -1           (±1)
+      Stoch K-D diff 4h : strong cross up = +2, mild = +1; down ±  (±2)
+      EMA-20 dist z 4h  : large stretch above = +2, mild = +1; ±   (±2)
     """
     score = pd.Series(0, index=close_4h.index)
 
-    # 1. Stochastic 4h
+    # 1. Stochastic 4h (binary threshold)
     stk4 = _stoch_k(high_4h, low_4h, close_4h, 14)
     score += (stk4 > 80).astype(int)
     score -= (stk4 < 20).astype(int)
@@ -213,7 +215,27 @@ def _trend_votes(close_4h, high_4h, low_4h, volume_4h):
     score += (wpr4 > -20).astype(int)    # overbought (near 14-bar high)
     score -= (wpr4 < -80).astype(int)    # oversold   (near 14-bar low)
 
-    return score.clip(-6, 6)
+    # 7. Stochastic K-D momentum 4h (K-D cross captures acceleration; IC=+0.2554 on BTC)
+    # Thresholds from percentile sweep on 2025-2026 train period
+    stk_d4 = stk4.ewm(span=3, adjust=False).mean()
+    kd_diff = stk4 - stk_d4
+    score += 2 * (kd_diff > 10.0).astype(int)
+    score += 1 * ((kd_diff > 5.0) & (kd_diff <= 10.0)).astype(int)
+    score -= 1 * ((kd_diff < -5.0) & (kd_diff >= -10.0)).astype(int)
+    score -= 2 * (kd_diff < -10.0).astype(int)
+
+    # 8. EMA-20 distance z-score 4h (stretched above EMA = continuation; IC=+0.1414)
+    ema_4h   = close_4h.ewm(span=20, adjust=False).mean()
+    ema_dist = (close_4h - ema_4h) / ema_4h.replace(0, float("nan"))
+    ema_mu   = ema_dist.rolling(48, min_periods=24).mean()
+    ema_sig  = ema_dist.rolling(48, min_periods=24).std()
+    ema_z    = (ema_dist - ema_mu) / ema_sig.replace(0, float("nan"))
+    score += 2 * (ema_z > 1.5).astype(int)
+    score += 1 * ((ema_z > 0.75) & (ema_z <= 1.5)).astype(int)
+    score -= 1 * ((ema_z < -0.75) & (ema_z >= -1.5)).astype(int)
+    score -= 2 * (ema_z < -1.5).astype(int)
+
+    return score.clip(-10, 10)
 
 
 def _trend_votes_1h(close_1h, high_1h, low_1h, volume_1h):
@@ -912,8 +934,9 @@ def lookup_p_up(trend_score: int, reversion_score: int, asset: str = "BTC") -> f
     # never read) and forced ETH/SOL's |rev|∈[6, 8] rows to read cells that
     # don't exist (then fall back). Now the clip matches each asset's JSON
     # range exactly. (2026-04-30 — see audit thread.)
-    _REV_CLIP = {"BTC": 11, "ETH": 5, "SOL": 5}.get(asset, 8)
-    tb = int(np.clip(trend_score, -3, 3))
+    _REV_CLIP   = {"BTC": 11, "ETH": 5, "SOL": 5}.get(asset, 8)
+    _TREND_CLIP = {"BTC": 5,  "ETH": 3, "SOL": 3}.get(asset, 3)
+    tb = int(np.clip(trend_score, -_TREND_CLIP, _TREND_CLIP))
     rb = int(np.clip(reversion_score, -_REV_CLIP, _REV_CLIP))
     key = (tb, rb)
     if key in cal:
@@ -942,6 +965,90 @@ def _lookup_p_up_30m_for(trend_score: int, rev_score: int, asset: str = "BTC") -
 # BTC-only alias kept for any legacy callers
 def _lookup_p_up_30m(trend_score: int, rev_score: int) -> float:
     return _lookup_p_up_30m_for(trend_score, rev_score, asset="BTC")
+
+
+# ── Regime-conditioned p_up tables (Phase 3 — Option 3) ─────────────────────
+# JSON format: {"tb": {"rb": float, ...}, ..., "__baseline__": float, "__n__": int}
+# Built from btc_scan_archive.csv joined to HMM macro regime labels.
+# Coarser bins: trend → clip(round(t/2), -3, 3); rev → clip(round(r/3), -5, 5)
+
+import json as _json
+
+_REGIME_TABLE_PATHS = {
+    r: Path(__file__).parent / "reform_results" / f"composite_calibration_regime_{r}.json"
+    for r in ("Bull", "Sideways", "Bear")
+}
+_REGIME_TABLES: dict[str, dict] = {}
+_REGIME_BASELINES: dict[str, float] = {}
+
+def _load_regime_tables():
+    """Load per-regime p_up tables (format: {"tb,rb": float, "__baseline__": float})."""
+    for regime, path in _REGIME_TABLE_PATHS.items():
+        if not path.exists():
+            continue
+        with open(path) as _f:
+            raw = _json.load(_f)
+        # Flat format: {"tb,rb": float, "__baseline__": float, "__n__": int}
+        _REGIME_TABLES[regime]    = raw
+        _REGIME_BASELINES[regime] = float(raw.get("__baseline__", BASELINE_UP))
+
+_load_regime_tables()
+
+
+def lookup_p_up_regime(
+    trend: int,
+    rev: int,
+    regime_probs: dict,            # {"Bull": 0.7, "Sideways": 0.1, "Bear": 0.2}
+    pooled_fallback: float = 0.20, # blend fraction toward pooled table (guards sparse cells)
+) -> float:
+    """
+    Soft-blend p_up across macro regimes.
+
+    Per-regime tables (composite_calibration_regime_*.json) are calibrated on
+    historical 1h next_up outcomes — same target as composite_calibration.json.
+    Key format: "tb,rb" (same as main calibration), tb=clip(trend,-3,3),
+    rb=clip(rev,-11,11) for BTC.
+
+    For each regime, looks up the (trend, rev) cell and weights by posterior prob.
+    Falls back to per-regime baseline when a cell is absent.
+    If tables are not loaded, returns 0.0 (caller uses pooled table).
+
+    Args:
+        trend           : composite_trend score (-6..+6)
+        rev             : composite_rev score (-15..+15)
+        regime_probs    : {"Bull": p, "Sideways": p, "Bear": p} summing to ~1
+        pooled_fallback : blend = (1-f)*regime_val + f*lookup_p_up(trend,rev,"BTC")
+                          Reduces impact of sparse regime cells (default 0.20).
+
+    Returns:
+        float in (0.25, 0.85), or 0.0 if tables absent (use pooled fallback).
+    """
+    if not _REGIME_TABLES:
+        return 0.0
+
+    tb  = int(np.clip(trend, -5, 5))
+    rb  = int(np.clip(rev,  -11, 11))
+    key = f"{tb},{rb}"
+
+    p_regime = 0.0
+    total_w  = 0.0
+    for regime, prob in regime_probs.items():
+        table    = _REGIME_TABLES.get(regime)
+        if table is None:
+            continue
+        cell_val = table.get(key, _REGIME_BASELINES.get(regime, BASELINE_UP))
+        p_regime += prob * float(cell_val)
+        total_w  += prob
+
+    if total_w < 1e-6:
+        return 0.0
+    p_regime /= total_w
+
+    if pooled_fallback > 0.0:
+        p_pooled = lookup_p_up(trend, rev, asset="BTC")
+        p_regime = (1.0 - pooled_fallback) * p_regime + pooled_fallback * p_pooled
+
+    return float(np.clip(p_regime, 0.25, 0.85))
 
 
 def lookup_p_up_blended(
@@ -1423,10 +1530,10 @@ if __name__ == "__main__":
         print(f"  {rv_val:>+8d}   {n:>6,}   {up:>6.1%}   {edge:>+7.1%}   {pv_str:>7}  {sig}")
 
     # ── 3. Bucketed calibration grid ─────────────────────────────────────────────
-    # Bucket trend: -3 to +3 (clipped)
+    # Bucket trend: BTC uses ±5 bins (2 new signals add ±4), others keep ±3.
     # Bucket rev:   ≤-8 (pooled into -8), -7 to +7 individual, ≥+8 (pooled into +8)
-    # Pooling extremes at ±8 gives sufficient n at tails for stable monotonic estimates.
-    df["tb"] = df["trend"].clip(-3, 3)
+    _tb_clip = 5 if _CAL_ASSET == "BTC" else 3
+    df["tb"] = df["trend"].clip(-_tb_clip, _tb_clip)
     df["rb"] = df["rev"].clip(-8, 8)
 
     print(f"\n{SEP}")

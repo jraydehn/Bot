@@ -84,7 +84,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run all asset traders simultaneously")
     parser.add_argument("--live", action="store_true",
                         help="Place real orders on Kalshi (default: paper only)")
-    parser.add_argument("--max-contracts", type=int, default=50)
+    parser.add_argument("--max-contracts", type=int, default=10000)
 
     # Per-asset bankroll and loss limit
     parser.add_argument("--btc-bankroll",   type=float, default=250.0)
@@ -93,6 +93,8 @@ def main() -> None:
                         help="Run BTC in dual mode (place live orders + log to paper CSV)")
     parser.add_argument("--eth-bankroll",   type=float, default=100.0)
     parser.add_argument("--eth-loss-limit", type=float, default=20.0)
+    parser.add_argument("--eth-dual", action="store_true",
+                        help="Run ETH in dual mode (place live orders + log to paper CSV)")
     parser.add_argument("--sol-bankroll",   type=float, default=100.0)
     parser.add_argument("--sol-loss-limit", type=float, default=20.0)
     parser.add_argument("--sol-live", action="store_true",
@@ -111,17 +113,17 @@ def main() -> None:
             asset_args[a] += ["--live", "--max-contracts", str(args.max_contracts)]
     if args.btc_dual:
         asset_args["BTC"] += ["--dual", "--max-contracts", str(args.max_contracts)]
+    if args.eth_dual:
+        asset_args["ETH"] += ["--dual", "--max-contracts", str(args.max_contracts)]
     if args.sol_live:
         asset_args["SOL"] += ["--live", "--max-contracts", str(args.max_contracts)]
     if args.sol_dual:
         asset_args["SOL"] += ["--dual", "--max-contracts", str(args.max_contracts)]
 
+    _duals = [a for a, on in (("BTC", args.btc_dual), ("ETH", args.eth_dual), ("SOL", args.sol_dual)) if on]
     mode = "LIVE" if args.live else (
-        "DUAL-BTC+SOL" if (args.btc_dual and args.sol_dual) else (
-        "DUAL-BTC+SOL-LIVE" if (args.btc_dual and args.sol_live) else (
-        "DUAL-SOL" if args.sol_dual else (
-        "DUAL-BTC" if args.btc_dual else (
-        "SOL-LIVE" if args.sol_live else "PAPER")))))
+        f"DUAL-{'+'.join(_duals)}" + ("+SOL-LIVE" if args.sol_live else "") if _duals else (
+        "SOL-LIVE" if args.sol_live else "PAPER"))
     print(f"  Mode: {mode}")
     for a in ASSETS:
         print(f"  {a}: {' '.join(asset_args[a])}")

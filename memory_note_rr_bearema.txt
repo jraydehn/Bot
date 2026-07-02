@@ -1,0 +1,7 @@
+2026-06-06 Gate R:R + bearema refinement:
+- Gate R:R BTC NO exception: 0.08 → 0.055 (decision.py)
+  Rationale: n=2968 btc_highpm_no_gate ema=-1 pm[0.75,0.90) shows WR=21-32% vs BEV=13-23%
+  Model underestimates NO win rate for near-ATM high-pm contracts
+- btc_no_highpm_bearema_gate refined: pm>0.70+ema=-1 → pm∈(0.70,0.75)+ema=-1+ct=-1
+  Losing bucket: ct=-1+ema=-1+pm[0.70,0.75) WR=24.4%<BEV=27.2% (n=45)
+  Profitable (now allowed): ct=0+ema=-1 WR=34.8%, pm[0.75,0.90)+ema=-1 WR=21-32%

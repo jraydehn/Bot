@@ -55,13 +55,21 @@ _FLOW_CACHE_TTL = 1800    # exchange flows update slowly; 30-min cache
 _OPTIONS_CACHE_TTL = 600  # options OI updates more often; 10-min cache
 _FG_CACHE_TTL = 3600      # fear & greed is daily; 1-hour cache
 _TAKER_CACHE_TTL    = 3600  # spot taker daily (legacy); 1-hour cache
-_TAKER_4H_CACHE_TTL = 3600  # 4h taker bar; 1-hour cache (bar changes every 4h)
-_FR_VOL_CACHE_TTL   = 3600  # vol-weighted funding rate is daily; 1-hour cache
-_OI_STABLE_CACHE_TTL = 3600  # stablecoin OI 4h bar; 1-hour cache
+_TAKER_4H_CACHE_TTL    = 3600  # spot taker 4h bar; 1-hour cache (bar changes every 4h)
+_FR_VOL_CACHE_TTL      = 3600  # vol-weighted funding rate is daily; 1-hour cache
+_OI_STABLE_CACHE_TTL   = 3600  # stablecoin OI 4h bar; 1-hour cache
+_FUTURES_TAKER_TTL     = 3600  # futures aggregated taker 4h bar; 1-hour cache
+_SPOT_CB_CACHE_TTL     = 3600  # cross-exchange spot CVD (Binance+Coinbase+OKX) 4h bar; 1-hour cache
+_LIQ_CACHE_TTL         = 3600  # aggregated liquidation 4h bar; 1-hour cache
+_HL_SHADOW_TTL         =  900  # Hyperliquid whale snapshot; 15-min cache (real-time endpoint)
+_EXCH_LIQ_TTL          =  900  # exchange-list liquidation rolling windows; 15-min cache
+_OPT_MAXPAIN_TTL       = 3600  # Deribit option max pain snapshot; 1-hour cache
 
 _CACHE: dict = {}
 
-_SPOT_EXCHANGES = "Binance,OKX,Bybit"
+_SPOT_EXCHANGES    = "Binance,OKX,Bybit"
+_SPOT_CB_EXCHANGES = "Binance,Coinbase,OKX"   # Coinbase-inclusive for spot CVD gate
+_FUTURES_EXCHANGES = "Binance,OKX,Bybit"
 
 
 class CoinGlassSignals(NamedTuple):
@@ -101,6 +109,34 @@ class CoinGlassSignals(NamedTuple):
 
     # Spot taker buy/sell ratio (most recent completed 4h bar)
     taker_ratio_4h:         float   # buy/sell ratio (>1 = buyers dominant, <1 = sellers)
+
+    # Futures aggregated taker (Binance+OKX+Bybit perps, most recent completed 4h bar)
+    futures_delta_4h:       float   # buy_usd - sell_usd; +ve = net buying pressure
+    futures_ratio_4h:       float   # buy/sell ratio; >1 = buyers dominant
+    futures_cvd_12h:        float   # rolling 12h futures delta (3 × 4h bars); trend window
+
+    # Cross-exchange spot CVD (Binance+Coinbase+OKX, most recent completed 4h bar)
+    spot_cb_ratio_4h:       float   # buy/sell ratio; >1.05 = buyers dominant → NO loses
+                                    # Block BTC/ETH NO when >1.05 (stoch_k<=80 for BTC)
+                                    # Boost BTC NO ×1.25 when <0.90 + futures_ratio>=0.90
+
+    # Aggregated liquidation data (Binance+OKX+Bybit, most recent completed 4h bar)
+    liq_ratio_4h:           float   # long_liq_usd / short_liq_usd; >1 = more longs liquidated (bearish)
+                                    # Block NO when <0.70 (short squeeze; BTC rescue stoch_k>80)
+                                    # Boost BTC NO ×1.25 when >5.0; SOL ×1.25 when >1.5
+    liq_total_4h:           float   # total liquidation USD (long + short) in last 4h bar
+                                    # Boost BTC NO ×1.5 when >$60M (extreme liquidation event)
+
+    # Hyperliquid whale signals (real-time snapshot; shadow-logged only)
+    hl_ls_ratio:            float   # HL whale long_value / short_value; >1 = net long
+    hl_squeeze_idx:         float   # (short_liq_near - long_liq_near) / total; +ve = squeeze risk
+    hl_liq_ratio_4h:        float   # HL-only rolling 4h long_liq / short_liq [SHADOW]
+    all_liq_ratio_1h:       float   # All-exchange rolling 1h long_liq / short_liq [SHADOW]
+    all_liq_ratio_4h:       float   # All-exchange rolling 4h long_liq / short_liq [SHADOW]
+
+    # Deribit option max pain (snapshot; shadow-logged only)
+    max_pain_nearest:       float   # max pain price of nearest Deribit expiry [SHADOW]
+    opt_pc_ratio:           float   # put_notional / call_notional of nearest expiry; >1 = bearish [SHADOW]
 
     # Composite
     composite_score:        int     # exchange_flow_score + fg_score, clamped [-2, +2]
@@ -352,6 +388,249 @@ def _fetch_taker_ratio_4h(asset: str) -> float:
     return val
 
 
+def _fetch_futures_taker_4h(asset: str) -> tuple:
+    """Returns (delta_4h, ratio_4h, cvd_12h) from aggregated futures taker volume
+    (Binance+OKX+Bybit perps). Uses the last completed 4h bar; 12h = 3-bar rolling sum.
+    delta = buy_usd - sell_usd; ratio = buy/sell; cvd_12h = sum of 3 bar deltas."""
+    cache_key = f"fut_taker4h_{asset}"
+    now = time.monotonic()
+    if cache_key in _CACHE and now - _CACHE[cache_key][1] < _FUTURES_TAKER_TTL:
+        return _CACHE[cache_key][0]
+
+    try:
+        r = requests.get(
+            f"{_BASE}/api/futures/aggregated-taker-buy-sell-volume/history",
+            headers=_HEADERS,
+            params={"symbol": asset.upper(), "interval": "4h", "limit": 5,
+                    "exchange_list": _FUTURES_EXCHANGES},
+            timeout=8,
+        )
+        data = r.json().get("data") or []
+        # data[-1] = current (possibly incomplete) bar; data[-2] = last completed bar
+        if len(data) < 2:
+            result = (0.0, 1.0, 0.0)
+        else:
+            completed = data[:-1]   # exclude current incomplete bar
+            last  = completed[-1]
+            buy1  = float(last.get("aggregated_buy_volume_usd",  0))
+            sell1 = float(last.get("aggregated_sell_volume_usd", 1))
+            delta_4h  = buy1 - sell1
+            ratio_4h  = buy1 / sell1 if sell1 > 0 else 1.0
+
+            # 12h CVD = sum of last 3 completed bars' deltas
+            last3 = completed[-3:] if len(completed) >= 3 else completed
+            cvd_12h = sum(
+                float(b.get("aggregated_buy_volume_usd", 0)) -
+                float(b.get("aggregated_sell_volume_usd", 0))
+                for b in last3
+            )
+            result = (round(delta_4h, 2), round(ratio_4h, 6), round(cvd_12h, 2))
+    except Exception:
+        result = (0.0, 1.0, 0.0)
+
+    _CACHE[cache_key] = (result, now)
+    return result
+
+
+def _fetch_liquidation_4h(asset: str) -> tuple:
+    """Returns (liq_ratio_4h, liq_total_4h) from aggregated futures liquidations
+    (Binance+OKX+Bybit). Uses the last completed 4h bar.
+    liq_ratio = long_usd / short_usd; >1 = more longs liquidated (price fell = bearish cascade).
+    liq_total = total USD liquidated (long + short); spike >$60M = extreme event."""
+    cache_key = f"liq4h_{asset}"
+    now = time.monotonic()
+    if cache_key in _CACHE and now - _CACHE[cache_key][1] < _LIQ_CACHE_TTL:
+        return _CACHE[cache_key][0]
+
+    try:
+        r = requests.get(
+            f"{_BASE}/api/futures/liquidation/aggregated-history",
+            headers=_HEADERS,
+            params={"symbol": asset.upper(), "interval": "4h", "limit": 3,
+                    "exchange_list": "Binance,OKX,Bybit"},
+            timeout=8,
+        )
+        data = r.json().get("data") or []
+        if len(data) >= 2:
+            bar      = data[-2]   # last completed bar
+            long_liq = float(bar.get("aggregated_long_liquidation_usd",  0))
+            shrt_liq = float(bar.get("aggregated_short_liquidation_usd", 0))
+            total    = long_liq + shrt_liq
+            ratio    = long_liq / shrt_liq if shrt_liq > 0 else 1.0
+        else:
+            ratio, total = 1.0, 0.0
+    except Exception:
+        ratio, total = 1.0, 0.0
+
+    result = (round(ratio, 4), round(total, 2))
+    _CACHE[cache_key] = (result, now)
+    return result
+
+
+def _fetch_hl_whale_signals(asset: str) -> tuple:
+    """Returns (hl_ls_ratio, hl_squeeze_idx) from Hyperliquid whale-position snapshot.
+    hl_ls_ratio = total_long_value / total_short_value for positions >$1M on HL.
+    hl_squeeze_idx = (short_liq_near - long_liq_near) / total_value; positive = short squeeze risk."""
+    cache_key = "hl_whale_all"
+    now = time.monotonic()
+    if cache_key in _CACHE and now - _CACHE[cache_key][1] < _HL_SHADOW_TTL:
+        all_results = _CACHE[cache_key][0]
+        return all_results.get(asset.upper(), (1.0, 0.0))
+
+    try:
+        r = requests.get(f"{_BASE}/api/hyperliquid/whale-position",
+                         headers=_HEADERS, timeout=8)
+        rows = r.json().get("data") or []
+    except Exception:
+        rows = []
+
+    all_results: dict = {}
+    from collections import defaultdict
+    buckets: dict = defaultdict(list)
+    for row in rows:
+        sym = str(row.get("symbol", "")).upper()
+        buckets[sym].append(row)
+
+    for sym, positions in buckets.items():
+        total_long = total_short = 0.0
+        short_liq_near = long_liq_near = 0.0
+        for p in positions:
+            try:
+                size  = float(p.get("position_size", 0))
+                val   = float(p.get("position_value_usd", 0))
+                mark  = float(p.get("mark_price", 0))
+                liq   = float(p.get("liq_price", 0))
+            except (TypeError, ValueError):
+                continue
+            if mark <= 0:
+                continue
+            dist = (liq - mark) / mark  # positive = liq above mark (short side)
+            if size > 0:
+                total_long += val
+                if -0.10 < dist < 0:   # long near liq (liq below mark)
+                    long_liq_near += val
+            else:
+                total_short += val
+                if 0 < dist < 0.10:    # short near liq (liq above mark)
+                    short_liq_near += val
+        total_val = total_long + total_short
+        ls_ratio     = total_long / total_short if total_short > 0 else 1.0
+        squeeze_idx  = (short_liq_near - long_liq_near) / total_val if total_val > 0 else 0.0
+        all_results[sym] = (round(ls_ratio, 4), round(squeeze_idx, 4))
+
+    _CACHE[cache_key] = (all_results, now)
+    return all_results.get(asset.upper(), (1.0, 0.0))
+
+
+def _fetch_exchange_liq_signals(asset: str) -> tuple:
+    """Returns (hl_liq_ratio_4h, all_liq_ratio_1h, all_liq_ratio_4h) from
+    /api/futures/liquidation/exchange-list. Rolling windows (not bar-aligned)."""
+    cache_key = f"exch_liq_{asset}"
+    now = time.monotonic()
+    if cache_key in _CACHE and now - _CACHE[cache_key][1] < _EXCH_LIQ_TTL:
+        return _CACHE[cache_key][0]
+
+    def _liq_ratio(rows: list, exchange: str) -> float:
+        row = next((r for r in rows if r.get("exchange") == exchange), None)
+        if not row:
+            return 1.0
+        long_l = float(row.get("longLiquidation_usd", 0))
+        shrt_l = float(row.get("shortLiquidation_usd", 0))
+        return round(long_l / shrt_l if shrt_l > 0 else 1.0, 4)
+
+    try:
+        r1h = requests.get(f"{_BASE}/api/futures/liquidation/exchange-list",
+                           headers=_HEADERS,
+                           params={"symbol": asset.upper(), "range": "1h"},
+                           timeout=6)
+        data_1h = r1h.json().get("data") or []
+        r4h = requests.get(f"{_BASE}/api/futures/liquidation/exchange-list",
+                           headers=_HEADERS,
+                           params={"symbol": asset.upper(), "range": "4h"},
+                           timeout=6)
+        data_4h = r4h.json().get("data") or []
+    except Exception:
+        data_1h, data_4h = [], []
+
+    hl_liq_ratio_4h  = _liq_ratio(data_4h, "Hyperliquid")
+    all_liq_ratio_1h = _liq_ratio(data_1h, "All")
+    all_liq_ratio_4h = _liq_ratio(data_4h, "All")
+
+    result = (hl_liq_ratio_4h, all_liq_ratio_1h, all_liq_ratio_4h)
+    _CACHE[cache_key] = (result, now)
+    return result
+
+
+def _fetch_option_max_pain(asset: str) -> tuple:
+    """Returns (max_pain_nearest, opt_pc_ratio) from Deribit option max pain snapshot.
+    max_pain_nearest = max pain price of nearest upcoming expiry.
+    opt_pc_ratio = put_notional / call_notional of nearest expiry; >1 = bearish hedging dominates.
+    Only meaningful for BTC and ETH (Deribit options)."""
+    cache_key = f"opt_maxpain_{asset}"
+    now = time.monotonic()
+    if cache_key in _CACHE and now - _CACHE[cache_key][1] < _OPT_MAXPAIN_TTL:
+        return _CACHE[cache_key][0]
+
+    nan = float("nan")
+    try:
+        r = requests.get(
+            f"{_BASE}/api/option/max-pain",
+            headers=_HEADERS,
+            params={"symbol": asset.upper(), "exchange": "Deribit"},
+            timeout=8,
+        )
+        data = r.json().get("data") or []
+        if not data:
+            result = (nan, nan)
+            _CACHE[cache_key] = (result, now)
+            return result
+
+        rows = sorted(data, key=lambda x: x.get("date", ""))
+        nearest = rows[0]
+        max_pain  = float(nearest.get("max_pain_price", nan))
+        call_notl = float(nearest.get("call_open_interest_notional", 0) or 0)
+        put_notl  = float(nearest.get("put_open_interest_notional",  0) or 0)
+        opt_pc    = put_notl / call_notl if call_notl > 0 else nan
+
+        result = (max_pain, opt_pc)
+    except Exception:
+        result = (nan, nan)
+
+    _CACHE[cache_key] = (result, now)
+    return result
+
+
+def _fetch_spot_cb_ratio_4h(asset: str) -> float:
+    """Returns most recent completed 4h bar's spot taker buy/sell ratio across
+    Binance+Coinbase+OKX. >1.05 = buyers dominant (blocks BTC/ETH NO); <0.90 = sellers dominant."""
+    cache_key = f"spot_cb4h_{asset}"
+    now = time.monotonic()
+    if cache_key in _CACHE and now - _CACHE[cache_key][1] < _SPOT_CB_CACHE_TTL:
+        return _CACHE[cache_key][0]
+
+    try:
+        r = requests.get(
+            f"{_BASE}/api/spot/aggregated-taker-buy-sell-volume/history",
+            headers=_HEADERS,
+            params={"symbol": asset.upper(), "interval": "4h", "limit": 3,
+                    "exchange_list": _SPOT_CB_EXCHANGES},
+            timeout=6,
+        )
+        data = r.json().get("data") or []
+        if len(data) >= 2:
+            bar  = data[-2]  # last completed bar (data[-1] = current incomplete)
+            buy  = float(bar.get("aggregated_buy_volume_usd",  0))
+            sell = float(bar.get("aggregated_sell_volume_usd", 0))
+            val  = buy / sell if sell > 0 else 1.0
+        else:
+            val = 1.0
+    except Exception:
+        val = 1.0
+
+    _CACHE[cache_key] = (val, now)
+    return val
+
+
 def fetch_coinglass_signals(asset: str) -> Optional[CoinGlassSignals]:
     """
     Fetch all available CoinGlass Hobbyist signals for the given asset.
@@ -364,9 +643,15 @@ def fetch_coinglass_signals(asset: str) -> Optional[CoinGlassSignals]:
     oi_usd, oi_chg_24h, vol_24h, opts_score = _fetch_options(asset)
     buy_usd, sell_usd, taker_ratio = _fetch_spot_taker(asset)
     fg_val, fg_trend, fg_regime, fg_score = _fetch_fear_greed()
-    fr_vol          = _fetch_vol_weighted_funding(asset)
-    oi_stable_pct4h = _fetch_stablecoin_oi_pct_change_4h(asset)
-    taker_ratio_4h  = _fetch_taker_ratio_4h(asset)
+    fr_vol               = _fetch_vol_weighted_funding(asset)
+    oi_stable_pct4h      = _fetch_stablecoin_oi_pct_change_4h(asset)
+    taker_ratio_4h       = _fetch_taker_ratio_4h(asset)
+    fut_delta, fut_ratio, fut_cvd12h = _fetch_futures_taker_4h(asset)
+    spot_cb_ratio_4h     = _fetch_spot_cb_ratio_4h(asset)
+    liq_ratio_4h, liq_total_4h = _fetch_liquidation_4h(asset)
+    hl_ls_ratio, hl_squeeze_idx = _fetch_hl_whale_signals(asset)
+    hl_liq_ratio_4h, all_liq_ratio_1h, all_liq_ratio_4h = _fetch_exchange_liq_signals(asset)
+    max_pain_nearest, opt_pc_ratio = _fetch_option_max_pain(asset)
 
     composite = max(-2, min(2, flow_score + fg_score))
 
@@ -401,6 +686,19 @@ def fetch_coinglass_signals(asset: str) -> Optional[CoinGlassSignals]:
         fr_vol_1d=fr_vol,
         oi_stable_pct_4h=oi_stable_pct4h,
         taker_ratio_4h=taker_ratio_4h,
+        futures_delta_4h=fut_delta,
+        futures_ratio_4h=fut_ratio,
+        futures_cvd_12h=fut_cvd12h,
+        spot_cb_ratio_4h=spot_cb_ratio_4h,
+        liq_ratio_4h=liq_ratio_4h,
+        liq_total_4h=liq_total_4h,
+        hl_ls_ratio=hl_ls_ratio,
+        hl_squeeze_idx=hl_squeeze_idx,
+        hl_liq_ratio_4h=hl_liq_ratio_4h,
+        all_liq_ratio_1h=all_liq_ratio_1h,
+        all_liq_ratio_4h=all_liq_ratio_4h,
+        max_pain_nearest=max_pain_nearest,
+        opt_pc_ratio=opt_pc_ratio,
         composite_score=composite,
         label=lbl,
     )
@@ -416,4 +714,10 @@ if __name__ == "__main__":
             print(f"  Spot taker:   buy=${s.spot_buy_usd/1e9:.2f}B  sell=${s.spot_sell_usd/1e9:.2f}B  ratio={s.spot_taker_ratio:.3f}")
             print(f"  Fear & Greed: {s.fg_value:.0f} ({s.fg_regime})  trend={s.fg_trend}  score={s.fg_score:+d}")
             print(f"  Fr live:      {s.fr_vol_1d:+.6f} (Binance/OKX/Bybit avg)  oi_stable_chg_4h={s.oi_stable_pct_4h:+.2f}%  taker_4h={s.taker_ratio_4h:.3f}")
+            print(f"  Fut CVD:      delta_4h={s.futures_delta_4h/1e6:+.0f}M  ratio_4h={s.futures_ratio_4h:.4f}  cvd_12h={s.futures_cvd_12h/1e6:+.0f}M")
+            print(f"  Spot CVD(CB): ratio_4h={s.spot_cb_ratio_4h:.4f}  (Binance+Coinbase+OKX; >1.05 blocks BTC/ETH NO)")
+            print(f"  Liq 4h:       ratio={s.liq_ratio_4h:.3f}  total=${s.liq_total_4h/1e6:.1f}M  (>5 boosts BTC NO; <0.7 blocks BTC/SOL NO)")
+            print(f"  HL whale:     ls_ratio={s.hl_ls_ratio:.3f}  squeeze_idx={s.hl_squeeze_idx:+.4f}  [shadow]")
+            print(f"  HL liq 4h:    hl_ratio={s.hl_liq_ratio_4h:.3f}  all_1h={s.all_liq_ratio_1h:.3f}  all_4h={s.all_liq_ratio_4h:.3f}  [shadow]")
+            print(f"  Max pain:     nearest=${s.max_pain_nearest:,.0f}  pc_ratio={s.opt_pc_ratio:.3f}  [shadow]")
             print(f"  Composite:    {s.composite_score:+d}  → {s.label}")

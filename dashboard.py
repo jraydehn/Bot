@@ -23,8 +23,21 @@ RESULTS_DIR     = Path(__file__).parent / "results"
 REFRESH_SECONDS = 60
 DISPLAY_FROM    = "2026-05-16 06:56:42"   # hide trades before this UTC time (dashboard cleared May 15 11:56 PM PDT — ETH 15m z_drift sim complete, BTC 15m branched model live)
 ASSET_DISPLAY_FROM = {
-    "BTC": "2026-05-23 15:51:18",  # cleared 2026-05-23 — p_up_v2 τ-scaled + territory-split k (k_yes=1.40, k_no=1.56), z_drift_6h logging live
+    "BTC": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 300)
+    "ETH": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 240)
+    "SOL": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 240)
 }
+ASSET_DISPLAY_FROM_15M = {
+    "BTC": "2026-06-29 23:31:53",  # cleared 2026-06-29 — 5m stoch zone gates live
+}
+
+# Supplement paper_trades with live_trades for gap periods when paper logging was broken.
+# Dedup logic in load_trades() prevents double-counting dual-mode rows already in paper_trades.
+ASSET_LIVE_CSV = {
+    "BTC": RESULTS_DIR / "live_trades.csv",
+    "SOL": RESULTS_DIR / "live_trades_sol.csv",
+}
+LIVE_SUPPLEMENT_FROM = "2026-06-18 00:00:00"
 
 ASSET_CSV = {
     "BTC": RESULTS_DIR / "paper_trades.csv",
@@ -127,6 +140,53 @@ def _load_csv(path) -> pd.DataFrame:
     return df
 
 
+_MONTH_NUM = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
+              'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+
+def _ticker_to_close_ts(ticker: str):
+    """Parse close timestamp from Kalshi hourly ticker (KXBTCD/KXSOLD/KXETHD-YYMMMDDHH-TSTRIKE).
+    close_ts = ticker date + (ticker_hour + 4) hours UTC."""
+    import re, datetime as dt
+    m = re.match(r'KX\w+-(\d{2})([A-Z]{3})(\d{2})(\d{2})-T', str(ticker))
+    if not m:
+        return None
+    yy, mmm, dd, hh = m.groups()
+    month = _MONTH_NUM.get(mmm)
+    if month is None:
+        return None
+    base = dt.datetime(2000 + int(yy), month, int(dd), 0, 0, tzinfo=dt.timezone.utc)
+    return base + dt.timedelta(hours=int(hh) + 4)
+
+
+@st.cache_data(ttl=55)
+def _load_live_supplement(path) -> pd.DataFrame:
+    """Load live_trades hourly contracts only, mapped to paper_trades schema for gap-filling."""
+    if path is None or not path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(path, low_memory=False)
+    df["logged_at"] = pd.to_datetime(df["logged_at"], format="mixed", utc=True, errors="coerce").dt.tz_convert("America/Los_Angeles")
+    df = df[df["logged_at"].notna()].copy()
+    # Keep only hourly contracts (KXSOLD / KXETHD) — exclude 15m tickers already in paper_trades_*15m.csv
+    df = df[~df["contract_ticker"].str.contains("15M", na=False)]
+    df = df.rename(columns={"live_pnl": "would_pnl"})
+    # Derive would_win from P&L sign (works for both YES and NO bets; resolved_yes alone is wrong for NO)
+    pnl_num = pd.to_numeric(df["would_pnl"], errors="coerce")
+    df["would_win"] = pnl_num.apply(lambda x: True if x > 0 else (False if x < 0 else pd.NA))
+    df["decision"]  = "trade"
+    df["timeframe"] = "1h"
+    # Compute tau_minutes from ticker close_ts (live_trades CSVs don't store it)
+    logged_utc = df["logged_at"].dt.tz_convert("UTC")
+    def _tau(row):
+        close = _ticker_to_close_ts(row["contract_ticker"])
+        if close is None:
+            return float("nan")
+        return (close - row["_logged_utc"]).total_seconds() / 60.0
+    df["_logged_utc"] = logged_utc
+    df["tau_minutes"] = df.apply(_tau, axis=1)
+    df = df.drop(columns=["_logged_utc"])
+    return df
+
+
 def load_trades(asset: str) -> pd.DataFrame:
     df_1h  = _load_csv(ASSET_CSV.get(asset))
     df_15m = _load_csv(ASSET_CSV_15M.get(asset))
@@ -147,6 +207,20 @@ def load_trades(asset: str) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.concat(frames, ignore_index=True, sort=False)
     df = df.sort_values("logged_at").reset_index(drop=True)
+
+    # For ETH/SOL: supplement with live_trades for Jun18+ to fill the paper_trades gap
+    if asset in ASSET_LIVE_CSV:
+        live_supp = _load_live_supplement(ASSET_LIVE_CSV[asset])
+        if not live_supp.empty:
+            cutoff_ts = pd.Timestamp(LIVE_SUPPLEMENT_FROM, tz="UTC").tz_convert("America/Los_Angeles")
+            live_supp = live_supp[live_supp["logged_at"] >= cutoff_ts].copy()
+            # Exclude tickers already recorded in paper_trades for this window (avoids double-counting dual-mode rows)
+            existing_tickers = set(df[df["logged_at"] >= cutoff_ts]["contract_ticker"].dropna())
+            live_supp = live_supp[~live_supp["contract_ticker"].isin(existing_tickers)]
+            if not live_supp.empty:
+                df = pd.concat([df, live_supp], ignore_index=True, sort=False)
+                df = df.sort_values("logged_at").reset_index(drop=True)
+
     return df
 
 
@@ -307,9 +381,18 @@ def render_asset(asset: str):
         st.markdown("<p style='color:#666;text-align:center;padding:30px 0;'>No trades logged yet.</p>", unsafe_allow_html=True)
         return
 
-    # Apply display cutoff for all assets
-    cutoff = pd.Timestamp(ASSET_DISPLAY_FROM.get(asset, DISPLAY_FROM), tz="UTC").tz_convert("America/Los_Angeles")
-    df = df_all[df_all["logged_at"] >= cutoff].copy()
+    # Apply display cutoff — per-timeframe override takes precedence over per-asset
+    def _row_cutoff(row):
+        tf = row.get("timeframe", "1h")
+        if tf == "15m" and asset in ASSET_DISPLAY_FROM_15M:
+            return pd.Timestamp(ASSET_DISPLAY_FROM_15M[asset], tz="UTC").tz_convert("America/Los_Angeles")
+        return pd.Timestamp(ASSET_DISPLAY_FROM.get(asset, DISPLAY_FROM), tz="UTC").tz_convert("America/Los_Angeles")
+    cutoff_1h  = pd.Timestamp(ASSET_DISPLAY_FROM.get(asset, DISPLAY_FROM), tz="UTC").tz_convert("America/Los_Angeles")
+    cutoff_15m = pd.Timestamp(ASSET_DISPLAY_FROM_15M.get(asset, ASSET_DISPLAY_FROM.get(asset, DISPLAY_FROM)), tz="UTC").tz_convert("America/Los_Angeles")
+    df = df_all[
+        ((df_all["timeframe"] == "15m") & (df_all["logged_at"] >= cutoff_15m)) |
+        ((df_all["timeframe"] != "15m") & (df_all["logged_at"] >= cutoff_1h))
+    ].copy()
 
     if df.empty:
         st.markdown("<p style='color:#666;text-align:center;padding:30px 0;'>No trades in display window.</p>", unsafe_allow_html=True)
@@ -407,36 +490,75 @@ def render_asset(asset: str):
 
     # ── Equity Curve ────────────────────────────────────────────────────────
     with t2:
-        if not resolved.empty:
-            res_sorted = resolved.sort_values("logged_at")
-            res_sorted["cumulative_pnl"] = res_sorted["would_pnl_num"].cumsum()
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=res_sorted["logged_at"],
-                y=res_sorted["cumulative_pnl"],
-                mode="lines+markers",
-                line=dict(color="#00c076", width=2),
-                marker=dict(size=5, color="#00c076"),
-                fill="tozeroy",
-                fillcolor="rgba(0,192,118,0.08)",
-                name="Cumulative P&L",
-                hovertemplate="<b>%{x}</b><br>P&L: $%{y:,.2f}<extra></extra>",
-            ))
-            fig.add_hline(y=0, line_dash="dash", line_color="#444", opacity=0.8)
-            fig.update_layout(
-                xaxis_title=None,
-                yaxis_title="Cumulative P&L ($)",
-                height=320,
-                margin=dict(l=0, r=0, t=10, b=0),
-                plot_bgcolor="#0e0e0e",
-                paper_bgcolor="#0e0e0e",
-                font=dict(color="#888"),
-                xaxis=dict(gridcolor="#1f1f1f", zeroline=False),
-                yaxis=dict(gridcolor="#1f1f1f", zeroline=False),
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
+        if resolved.empty:
             st.markdown("<p style='color:#555;padding:20px 0;'>No resolved trades yet.</p>", unsafe_allow_html=True)
+        else:
+            def _equity_fig(data: pd.DataFrame, color: str, fillcolor: str, label: str = "", height: int = 260) -> go.Figure:
+                d = data.sort_values("logged_at").copy()
+                d["cum_pnl"] = d["would_pnl_num"].cumsum()
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=d["logged_at"], y=d["cum_pnl"],
+                    mode="lines+markers",
+                    line=dict(color=color, width=2),
+                    marker=dict(size=4, color=color),
+                    fill="tozeroy", fillcolor=fillcolor,
+                    hovertemplate="<b>%{x}</b><br>P&L: $%{y:,.2f}<extra></extra>",
+                ))
+                fig.add_hline(y=0, line_dash="dash", line_color="#444", opacity=0.8)
+                annotations = []
+                if label:
+                    annotations.append(dict(
+                        text=label,
+                        xref="paper", yref="paper",
+                        x=0.01, y=0.97,
+                        xanchor="left", yanchor="top",
+                        font=dict(size=13, color=color, family="monospace"),
+                        bgcolor="rgba(0,0,0,0.45)",
+                        bordercolor=color,
+                        borderwidth=1,
+                        borderpad=4,
+                        showarrow=False,
+                    ))
+                fig.update_layout(
+                    xaxis_title=None, yaxis_title="Cumul. P&L ($)", height=height,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    plot_bgcolor="#0e0e0e", paper_bgcolor="#0e0e0e",
+                    font=dict(color="#888"),
+                    xaxis=dict(gridcolor="#1f1f1f", zeroline=False),
+                    yaxis=dict(gridcolor="#1f1f1f", zeroline=False),
+                    showlegend=False,
+                    annotations=annotations,
+                )
+                return fig
+
+            # Combined
+            st.plotly_chart(_equity_fig(resolved, "#00c076", "rgba(0,192,118,0.08)", label="ALL  1h + 15m", height=300), use_container_width=True)
+
+            # Per-timeframe
+            ec1, ec2 = st.columns(2)
+            for col_ui, tf, color, fillc in [
+                (ec1, "1h",  "#4da6ff", "rgba(77,166,255,0.08)"),
+                (ec2, "15m", "#f0a500", "rgba(240,165,0,0.08)"),
+            ]:
+                with col_ui:
+                    if "timeframe" not in resolved.columns:
+                        st.markdown(f"<p style='color:#555;font-size:0.8rem;'>{tf.upper()} — no timeframe data</p>", unsafe_allow_html=True)
+                        continue
+                    sub = resolved[resolved["timeframe"] == tf]
+                    if sub.empty:
+                        st.markdown(f"<p style='color:#555;font-size:0.8rem;'>{tf.upper()} — no resolved trades yet</p>", unsafe_allow_html=True)
+                        continue
+                    wr   = sub["would_win_bool"].mean()
+                    pnl  = sub["would_pnl_num"].sum()
+                    wr_c  = "#00c076" if wr  >= 0.5 else "#ff4d4d"
+                    pnl_c = "#00c076" if pnl >= 0   else "#ff4d4d"
+                    chart_label = (
+                        f"{tf.upper()}  "
+                        f"{wr:.0%} WR  "
+                        f"{'+'if pnl>=0 else ''}${pnl:,.0f}"
+                    )
+                    st.plotly_chart(_equity_fig(sub, color, fillc, label=chart_label, height=220), use_container_width=True)
 
     # ── Trade log ───────────────────────────────────────────────────────────
     with t1:
@@ -678,7 +800,7 @@ st.markdown(f"""
   <span style="font-size:1.8rem;font-weight:800;color:#ffffff;letter-spacing:-0.5px;">Kalshi Trader</span>
   &nbsp;
   <span style="background:#c97a00;color:#fff;font-size:0.72rem;font-weight:700;
-               padding:3px 10px;border-radius:20px;letter-spacing:0.1em;">PAPER</span>
+               padding:3px 10px;border-radius:20px;letter-spacing:0.1em;">BTC+SOL LIVE</span>
 </div>
 <div style="color:#555;font-size:0.78rem;margin-bottom:4px;">
   BTC · ETH · SOL Event Contracts &nbsp;|&nbsp; Live Signal Engine &nbsp;|&nbsp;
@@ -720,8 +842,12 @@ with tab_cmp:
             if df_a.empty:
                 st.markdown("<p style='color:#555;font-size:0.8rem;'>No data yet.</p>", unsafe_allow_html=True)
                 continue
-            cutoff = pd.Timestamp(ASSET_DISPLAY_FROM.get(asset, DISPLAY_FROM), tz="UTC").tz_convert("America/Los_Angeles")
-            df_a = df_a[df_a["logged_at"] >= cutoff]
+            cutoff_1h_a  = pd.Timestamp(ASSET_DISPLAY_FROM.get(asset, DISPLAY_FROM), tz="UTC").tz_convert("America/Los_Angeles")
+            cutoff_15m_a = pd.Timestamp(ASSET_DISPLAY_FROM_15M.get(asset, ASSET_DISPLAY_FROM.get(asset, DISPLAY_FROM)), tz="UTC").tz_convert("America/Los_Angeles")
+            df_a = df_a[
+                ((df_a["timeframe"] == "15m") & (df_a["logged_at"] >= cutoff_15m_a)) |
+                ((df_a["timeframe"] != "15m") & (df_a["logged_at"] >= cutoff_1h_a))
+            ]
             trades_a   = df_a[(df_a["decision"] == "trade") & (df_a["contract_ticker"].fillna("").str.strip() != "")]
             resolved_a = trades_a.dropna(subset=["would_win"]).copy()
             if not resolved_a.empty:

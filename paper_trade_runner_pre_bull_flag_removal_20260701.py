@@ -3749,10 +3749,36 @@ def main() -> None:
                             now_utc=now_utc, bankroll=args.bankroll,
                         )
 
-            # [bull_flag_ct2_yes_gate REMOVED 2026-07-01]
-            # Live blocked_trades audit (n=6,225): YES_WR=68.3% — blocking winners.
-            # Gate was incorrectly shorting YES momentum after bull flag breakouts.
-            # Backup: paper_trade_runner_pre_bull_flag_removal_20260701.py
+            # [bull_flag_ct2_yes_gate — BTC YES]
+            # Block YES when a bull flag/pennant is active AND composite_trend>=2.
+            # After a bull flag breaks out, the market prices in continuation immediately;
+            # WR=34.7% vs bkev=40.8% (edge=-6.1%) for ct>=2 rows the ct<=1 gate misses.
+            # Additive value: +$575 on top of existing gate stack (p=0.059, n=1,006).
+            # Causal story: flag breakout = short-term exhaustion; post-breakout reversion
+            # likely within the 1h contract window even in a strong bull trend.
+            # Audit at 50+ fires: verify WR<bkev, check if freshness (bars_ago) matters.
+            if (args.asset == "BTC" and _composite_computed and not _otm_yes_blocked
+                    and _flag_signal == 1 and _active_trend >= 2):
+                _otm_yes_blocked = True; _otm_yes_block_gate = "bull_flag_ct2_yes_gate"
+                print(f"  [bull_flag_ct2_yes_gate] BLOCK YES {c['ticker']} — "
+                      f"bull_flag {_flag_bull_bars_ago}h ago "
+                      f"pole={_flag_bull_pole_pct:.1f}%, c_trend={_active_trend}>=2 "
+                      f"(post-breakout reversion)")
+                gate_audit_logger.log_block(
+                    gate_name="bull_flag_ct2_yes_gate",
+                    ticker=c["ticker"], asset=args.asset, side="yes",
+                    pm=pm, p_model=p_model_comp or float("nan"),
+                    net_edge=max(0.0, (p_model_comp or 0.0) - pm - 0.04),
+                    offset_pct=offset_c, strike=s_k, spot=spot, tau_minutes=tau_c,
+                    count=0, kelly_fraction=0.0, close_ts=c.get("close_time", ""),
+                    signals={
+                        "flag_signal":        _flag_signal,
+                        "flag_bull_bars_ago": _flag_bull_bars_ago,
+                        "flag_bull_pole_pct": round(_flag_bull_pole_pct, 2),
+                        "composite_trend":    _active_trend,
+                    },
+                    now_utc=now_utc, bankroll=args.bankroll,
+                )
 
             # adx_mid_ct_neg_yes_gate REMOVED 2026-06-11.
             # 06-06 audit: no signal. 48h live data: n=55, WR=95% (blocking winners).

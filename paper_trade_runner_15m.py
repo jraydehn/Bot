@@ -2714,7 +2714,8 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # ── Live order placement ──────────────────────────────────────────────────
     if is_live and auth is not None:
         _live_csv = live_trading.get_live_csv_path(asset)
-        if not live_trading.check_daily_loss_limit(daily_loss_limit or 150.0, _live_csv):
+        if not live_trading.check_daily_loss_limit(daily_loss_limit or 150.0, _live_csv,
+                                                   series="15m"):
             print("  [live] Daily loss limit reached — skipping live order.")
         else:
             bid_pm = c.get("bid", p_market - 0.01)

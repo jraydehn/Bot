@@ -83,9 +83,8 @@ def main() -> None:
     parser.add_argument("--btc-live", action="store_true",
                         help="Run BTC 15m in live mode (place real orders)")
     parser.add_argument("--btc-loss-limit", type=float, default=250.0,
-                        help="Daily loss limit for BTC live 15m runner (NOTE: computed from "
-                             "live_trades.csv, which BTC hourly dual also writes — the two BTC "
-                             "runners share one exposure pool)")
+                        help="Daily loss limit for BTC live 15m runner (counts only this "
+                             "runner's own 15m fills — per-runner stops since 2026-07-03)")
     parser.add_argument("--skip", type=str, default="",
                         help="Comma-separated assets to NOT run here (e.g. BTC when a standalone "
                              "live 15m runner owns BTC — avoids two processes logging the same paper book)")

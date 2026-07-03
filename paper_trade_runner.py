@@ -7087,7 +7087,8 @@ def main() -> None:
 
     if _is_live_or_dual and dec.decision == "trade" and auth is not None:
         _live_csv = live_trading.get_live_csv_path(args.asset)
-        _live_limit_ok = live_trading.check_daily_loss_limit(args.daily_loss_limit, _live_csv)
+        _live_limit_ok = live_trading.check_daily_loss_limit(args.daily_loss_limit, _live_csv,
+                                                             series="hourly")
 
         if _vol_skip_live:
             print("  [live] Vol-filter hour — skipping live order only.")

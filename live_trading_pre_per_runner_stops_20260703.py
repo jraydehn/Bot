@@ -245,28 +245,16 @@ def place_order(
 # Winning trades reduce the exposure so recovered capital doesn't count.
 # ---------------------------------------------------------------------------
 
-def compute_daily_exposure(csv_path: Path = None, series: str = None) -> float:
+def compute_daily_exposure(csv_path: Path = None) -> float:
     """
     Return today's net P&L exposure from live_trades.csv.
     Negative = net loss / at-risk. Zero = break-even or no trades.
-
-    series: None = all rows (legacy shared-pool behavior);
-            "15m" = only 15-minute contracts (ticker contains "15M");
-            "hourly" = only hourly contracts (ticker does NOT contain "15M").
-    Added 2026-07-03 so each runner's daily stop counts only its own fills
-    instead of sharing one pool per asset (user decision).
     """
     path = csv_path or LIVE_TRADES_CSV
     if not path.exists():
         return 0.0
     try:
         df = pd.read_csv(path)
-        if df.empty:
-            return 0.0
-        if series == "15m":
-            df = df[df["contract_ticker"].astype(str).str.contains("15M", na=False)]
-        elif series == "hourly":
-            df = df[~df["contract_ticker"].astype(str).str.contains("15M", na=False)]
         if df.empty:
             return 0.0
         _local_tz = datetime.now().astimezone().tzinfo
@@ -306,20 +294,17 @@ def record_wagered(amount: float) -> None:
     pass
 
 
-def check_daily_loss_limit(limit: float, csv_path: Path = None, series: str = None) -> bool:
+def check_daily_loss_limit(limit: float, csv_path: Path = None) -> bool:
     """
     Return True if today's net exposure is within the limit (safe to trade).
     Winning trades reduce exposure so recovered capital doesn't count.
-    series: restrict the exposure calc to this runner's own contracts
-    ("15m" / "hourly" / None=all) — per-runner stops since 2026-07-03.
     """
-    exposure = compute_daily_exposure(csv_path, series=series)
-    _tag = f" [{series}]" if series else ""
+    exposure = compute_daily_exposure(csv_path)
     if exposure <= -abs(limit):
-        print(f"  [live] Daily loss limit reached{_tag}: net={exposure:.2f} <= -{abs(limit):.2f}"
+        print(f"  [live] Daily loss limit reached: net={exposure:.2f} <= -{abs(limit):.2f}"
               f" — no more live trades today")
         return False
-    print(f"  [live] Daily exposure{_tag}: ${exposure:.2f}  (limit: -${abs(limit):.2f})")
+    print(f"  [live] Daily exposure: ${exposure:.2f}  (limit: -${abs(limit):.2f})")
     return True
 
 

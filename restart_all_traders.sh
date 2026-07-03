@@ -49,8 +49,8 @@ echo "  PID=$!"
 echo ""
 echo "=== Starting 15m watchdog (BTC live / ETH paper / SOL live) ==="
 # BTC 15m live since 2026-07-03 (user go-live decision): $2,500 bankroll, $250 stop.
-# NOTE: BTC 15m and BTC hourly dual share live_trades.csv → one combined BTC
-# exposure pool; 15m stops placing at combined -$250, hourly at -$350.
+# Stops are PER-RUNNER since 2026-07-03: each runner's daily limit counts only its
+# own contract series (15M vs hourly tickers) even though both write live_trades.csv.
 nohup python3 run_all_15m.py \
     --btc-bankroll 2500 \
     --btc-live --btc-loss-limit 250 \

@@ -5151,43 +5151,6 @@ def main() -> None:
             if _vd4_conviction:
                 print(f"  [vd_hmm] SOL NO vd_state=4 (low_vol_flat conviction — WR=87.3%, bypasses vwap/bp gates, 1.5x Kelly)")
 
-            # [sol_no_oversold_bounce_gate 2026-07-03] Block SOL NO when 1h stoch is oversold
-            # after a big 24h move — the next hour statistically bounces up through nearby
-            # strikes. SOL MEAN-REVERTS at 1h (opposite of BTC — BTC-style rally NO gates
-            # FAIL on SOL long history; donch>0.8 blocks winners there).
-            # Long-history (3yrs SOL 1h, split by year): P(next-hour up through +0.25%)
-            #   stoch<20 & ret24h>+1%: +5.8/+4.2/+8.0pts over base (2024/2025/2026)
-            #   stoch<20 & ret24h<-3%: +9.6/+6.8/+7.1pts — both arms pass every year.
-            # Taken trades: 8 blocked (2W/6L), +$254 saved, MCPT p=0.0088, 3/4 firing wks
-            # positive (n=8 caveat — long-history causality carries it). Archive n=46,
-            # -$813 blocked, p=0.008 (wk23-crash-heavy). Mirrors validated SOL 15m stoch<20
-            # NO block. Rescue: offset>=0.6% — strike beyond typical one-hour bounce reach.
-            # Est +$35-70/wk. Backup: paper_trade_runner_pre_sol_bounce_gate_20260703.py
-            if (args.asset == "SOL"
-                    and dec_c.side == "no"
-                    and confirm.stoch_k == confirm.stoch_k  # not NaN
-                    and confirm.stoch_k <= 25.0):
-                _ret_24h_sol = float("nan")
-                try:
-                    _c1h_sol = df_confirm["close"].astype(float)
-                    if len(_c1h_sol) >= 25 and _c1h_sol.iloc[-25] > 0:
-                        _ret_24h_sol = spot / float(_c1h_sol.iloc[-25]) - 1.0
-                except Exception:
-                    pass
-                if _ret_24h_sol == _ret_24h_sol and (_ret_24h_sol > 0.01 or _ret_24h_sol < -0.03):
-                    if offset_c >= 0.006:
-                        print(f"  [sol_no_oversold_bounce_gate] RESCUE NO {c['ticker']} — "
-                              f"stoch_k={confirm.stoch_k:.1f}<=25, ret_24h={_ret_24h_sol*100:+.2f}% "
-                              f"BUT offset={offset_c*100:.2f}%>=0.6% (strike beyond bounce reach)")
-                        _log_block("sol_no_oversold_bounce_gate__rescue")  # rescue outcome logging
-                    else:
-                        print(f"  [sol_no_oversold_bounce_gate] BLOCK NO {c['ticker']} — "
-                              f"stoch_k={confirm.stoch_k:.1f}<=25, ret_24h={_ret_24h_sol*100:+.2f}% "
-                              f"offset={offset_c*100:.2f}%<0.6% (oversold bounce risk, "
-                              f"long-hist +4-10pts up-through all 3yrs)")
-                        _log_block("sol_no_oversold_bounce_gate")
-                        continue
-
             # [sol_no_vwap_neutral_gate] Hard block SOL NO when vwap_stretch=0 AND (ema_stretch=1 OR stoch_k<40).
             # Analysis (2026-05-23, n=38): WR=52.6%, BE≈75.8%, P&L=-$374.
             # Baseline NO (not blocked): n=193, WR=85.0%, +$1,004 — confirms gate carves out losers.

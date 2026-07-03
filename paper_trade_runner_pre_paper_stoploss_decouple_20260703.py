@@ -7040,13 +7040,6 @@ def main() -> None:
     _is_dual = getattr(args, 'dual', False)
 
     _live_order_placed = False  # True only when a real Kalshi order is confirmed placed
-    # [2026-07-03] Daily loss limit must gate ONLY the live order, never paper.
-    # Set when check_daily_loss_limit() is the specific reason no order was attempted,
-    # so the CSV-logging block below can treat it exactly like a vol-skip hour (paper
-    # keeps trading normally) instead of downgrading the row to "no_trade" — which
-    # silently dropped the would_win/would_pnl counterfactual for real trade candidates
-    # for as long as the stop stayed tripped.
-    _live_loss_limit_blocked = False
 
     if _is_live_or_dual and dec.decision == "trade" and auth is not None:
         _live_csv = live_trading.get_live_csv_path(args.asset)
@@ -7056,7 +7049,6 @@ def main() -> None:
             print("  [live] Vol-filter hour — skipping live order only.")
         elif not _live_limit_ok:
             print("  [live] Daily loss limit reached — skipping live order only.")
-            _live_loss_limit_blocked = True
         else:
             bid_c = chosen.get("bid", p_market - 0.01)
             ask_c = chosen.get("ask", p_market + 0.01)
@@ -7125,20 +7117,17 @@ def main() -> None:
     # Paper CSV logging: dual mode logs both trades and no_trades; pure paper mode logs everything
     if _is_dual:
         if dec.decision == "trade":
-            if _vol_skip_live or _live_loss_limit_blocked:
-                # Skip-hour OR daily-loss-limit-blocked: paper continues for data collection
-                # as if no stop applied — the stop is a live-money control, not a data-collection
-                # one. Advance paper session state independently so paper doesn't re-trade the
-                # same ticker in subsequent scans.
+            if _vol_skip_live:
+                # Skip-hour: paper continues for data collection; advance paper session state
+                # independently so paper doesn't re-trade the same ticker in subsequent scans.
                 _SESSION_TRADED[contract_ticker] = dec.net_edge
                 _SIDE_COOLDOWN[(_expiry_prefix(contract_ticker), dec.side)] = now_utc
             elif _live_order_placed:
                 # Live placed: session state already advanced at line 1831-1832; paper mirrors.
                 pass
             else:
-                # Live couldn't place for a genuine execution reason (count=0, balance, API
-                # error) — NOT the daily loss limit, which is handled above. Paper mirrors
-                # live: downgrade to no_trade so logs stay in sync.
+                # Live couldn't place (count=0, balance, API error) outside skip-hours.
+                # Paper mirrors live: downgrade to no_trade so logs stay in sync.
                 row["decision"] = "no_trade"
                 print("  [dual] Live order not placed — paper logging as no_trade to stay in sync.")
         csv_path = get_csv_path(args.asset)

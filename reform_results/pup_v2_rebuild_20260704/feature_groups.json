@@ -1,0 +1,88 @@
+{
+ "A": [
+  "stoch_k_4h",
+  "ema50_dist",
+  "rsi_4h",
+  "rsi_14",
+  "macd_hist_1h",
+  "stoch_k",
+  "vwap_distance_pct",
+  "chg_4h_atr",
+  "bb_pct",
+  "composite_trend",
+  "composite_rev",
+  "composite_p_up",
+  "ema_stack_bias",
+  "ema_stretch_score",
+  "vwap_stretch_score",
+  "rvol_1h"
+ ],
+ "B": [
+  "eth_ret_1h",
+  "sol_ret_1h",
+  "eth_ret_4h",
+  "sol_ret_4h",
+  "spread_eth_1h",
+  "spread_sol_1h",
+  "spread_eth_24h",
+  "spread_sol_24h"
+ ],
+ "C": [
+  "xrp_ret_1h",
+  "xrp_ret_4h",
+  "doge_ret_1h",
+  "doge_ret_4h",
+  "ada_ret_1h",
+  "ada_ret_4h",
+  "alt_basket_ret_1h",
+  "btc_dom_1h",
+  "btc_dom_24h",
+  "us_x_ret1h",
+  "asia_x_ret1h",
+  "wknd_x_ret1h",
+  "wknd_x_ret24h"
+ ],
+ "Ft": [
+  "tbr_1h",
+  "tbr_4h",
+  "tbr_24h",
+  "tbr_z_10d",
+  "dvol_z_10d"
+ ],
+ "Fcg": [
+  "fut_ratio_1h",
+  "fut_cvd_4h",
+  "fut_cvd_12h",
+  "fut_cvd_24h",
+  "spot_ratio_1h",
+  "spot_cvd_24h",
+  "oi_chg_1h",
+  "oi_chg_4h",
+  "oi_chg_24h",
+  "oi_z_10d",
+  "funding_close",
+  "funding_z_10d",
+  "funding_chg_24h",
+  "liq_imb_1h",
+  "liq_imb_4h",
+  "liq_tot_z_10d"
+ ],
+ "R": [
+  "er_24h",
+  "er_72h",
+  "vov_7d",
+  "rv_ratio_24_168",
+  "donch_pos_20d",
+  "dist_30d_high",
+  "dist_30d_low"
+ ],
+ "M": [
+  "rv_60m",
+  "rv60_z_10d",
+  "upmin_frac",
+  "ret_first45",
+  "ret_last15",
+  "maxdd_60m",
+  "volskew_last20"
+ ]
+}

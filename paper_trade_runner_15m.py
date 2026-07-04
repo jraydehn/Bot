@@ -425,6 +425,13 @@ CSV_COLUMNS = [
     "cg_futures_cvd_12h",    # CoinGlass futures rolling 12h cumulative delta [SHADOW]
     # VWAP MTF HMM state (BTC only; 8-state model on 1m/5m/15m VWAP distances)
     "vwap_hmm_state",
+    # 2026-07-04: honest p_up rebuild — SHADOW ONLY (added via migration; keep at end).
+    # p_up_v3 = latest hourly v3 score from paper_trades.csv (BTC rows only).
+    # v3_agree = 1 if v3@0.50 agrees with the trade side (yes: v3>=0.50, no: v3<0.50),
+    #            0 if it disagrees, blank when v3 unavailable or no side.
+    # NO decision path reads these — logged for the replay-confirmation audit only.
+    "p_up_v3",
+    "v3_agree",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -526,6 +533,31 @@ def fetch_p_up_v2(asset: str) -> Optional[float]:
         if age_min > 120:
             return None
         val = float(recent["p_up_v2"].iloc[-1])
+        return val if 0.0 < val < 1.0 else None
+    except Exception:
+        return None
+
+
+def fetch_p_up_v3(asset: str) -> Optional[float]:
+    """Read most recent p_up_v3 (honest rebuild, SHADOW) from the hourly paper
+    trade CSV. Same source/staleness pattern as fetch_p_up_v2: None if the
+    file/column is missing or the last value is older than 2 hours. The value
+    is LOGGED ONLY — no decision path may consume it."""
+    path = HOURLY_CSV_MAP.get(asset.upper())
+    if path is None or not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path, usecols=["logged_at", "p_up_v3"], low_memory=False)
+        df["p_up_v3"] = pd.to_numeric(df["p_up_v3"], errors="coerce")
+        df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce")
+        recent = df.dropna(subset=["p_up_v3", "logged_at"]).sort_values("logged_at")
+        if recent.empty:
+            return None
+        last_time = recent["logged_at"].iloc[-1].to_pydatetime()
+        age_min = (datetime.now(timezone.utc) - last_time).total_seconds() / 60.0
+        if age_min > 120:
+            return None
+        val = float(recent["p_up_v3"].iloc[-1])
         return val if 0.0 < val < 1.0 else None
     except Exception:
         return None
@@ -1589,6 +1621,19 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 except Exception as _ze:
                     print(f"  [zdrift_15m] fallback error: {_ze}")
     sig["p_up_v2_btc"] = _p_up_v2_btc if _p_up_v2_btc is not None else ""
+
+    # p_up_v3 (honest rebuild, 2026-07-04) — SHADOW ONLY: fetched from the
+    # hourly CSV like p_up_v2 (2h staleness rule), logged to p_up_v3/v3_agree
+    # columns. NO decision path reads it — BTC 15m trades real money.
+    _p_up_v3_btc: Optional[float] = None
+    if asset == "BTC":
+        try:
+            _p_up_v3_btc = fetch_p_up_v3("BTC")
+        except Exception:
+            _p_up_v3_btc = None
+        if _p_up_v3_btc is not None:
+            print(f"  [p_up_v3_btc] {_p_up_v3_btc:.3f}  (shadow)")
+    sig["p_up_v3_btc"] = _p_up_v3_btc if _p_up_v3_btc is not None else ""
 
     # Rolling 6h z_drift logged for all assets (LGBM feature)
     _z_drift_6h: Optional[float] = None
@@ -2759,6 +2804,19 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 )
 
 
+def _v3_agree_val(p_v3, side) -> "int | str":
+    """SHADOW audit field: 1 if p_up_v3@0.50 agrees with the trade side
+    (yes: v3 >= 0.50, no: v3 < 0.50), 0 if it disagrees, "" when v3 is
+    unavailable or the row has no side (pass/no-trade rows)."""
+    try:
+        v = float(p_v3)
+        if v != v or side not in ("yes", "no"):
+            return ""
+        return int(v >= 0.50) if side == "yes" else int(v < 0.50)
+    except (TypeError, ValueError):
+        return ""
+
+
 def _build_row(
     asset, decision_time, ticker, close_time, spot, floor_s, offset_pct,
     tau_min, p_market, p_model, raw_edge, side, decision, sig,
@@ -2889,6 +2947,9 @@ def _build_row(
         "kalman_residual":      _f(sig.get("kalman_residual")),
         "kc_pct_1h":            _f(sig.get("kc_pct_1h")),
         "kc_bo_1h":             sig.get("kc_bo_1h", ""),
+        # honest p_up rebuild — SHADOW columns (2026-07-04); never read by decisions
+        "p_up_v3":              _f(sig.get("p_up_v3_btc")),
+        "v3_agree":             _v3_agree_val(sig.get("p_up_v3_btc"), side),
     }
 
 

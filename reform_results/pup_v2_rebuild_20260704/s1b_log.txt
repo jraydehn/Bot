@@ -1,0 +1,11 @@
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+2020: 526,000 bars (116s)
+2021: 525,000 bars (118s)
+2022: 526,000 bars (118s)
+2023: 526,000 bars (118s)
+2024: 528,000 bars (117s)
+2025: 526,000 bars (116s)
+2026: 265,985 bars (59s)
+TOTAL 3,419,806 bars 2020-01-01 00:00:00+00:00 -> 2026-07-04 17:04:00+00:00
+S1B DONE

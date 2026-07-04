@@ -1,0 +1,26 @@
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+BTCUSDT 1h: fetched 57,000 bars 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00 (21s)
+  overlap vs repo parquet: n=21,944 corr=1.000000 max_rel_diff=3.89e-03
+  saved hist_BTCUSDT_1h.parquet: 57,000 rows 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00
+ETHUSDT 1h: fetched 57,000 bars 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00 (20s)
+  overlap vs repo parquet: n=21,977 corr=1.000000 max_rel_diff=4.47e-03
+  saved hist_ETHUSDT_1h.parquet: 57,000 rows 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00
+SOLUSDT 1h: fetched 50,747 bars 2020-09-18 13:00:00+00:00 -> 2026-07-04 16:00:00+00:00 (18s)
+  overlap vs repo parquet: n=21,977 corr=1.000000 max_rel_diff=5.99e-03
+  saved hist_SOLUSDT_1h.parquet: 50,747 rows 2020-09-18 13:00:00+00:00 -> 2026-07-04 16:00:00+00:00
+XRPUSDT 1h: fetched 35,128 bars 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00 (13s)
+  no repo parquet to splice (fresh only)
+  saved hist_XRPUSDT_1h.parquet: 35,128 rows 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00
+DOGEUSDT 1h: fetched 57,000 bars 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00 (21s)
+  no repo parquet to splice (fresh only)
+  saved hist_DOGEUSDT_1h.parquet: 57,000 rows 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00
+ADAUSDT 1h: fetched 57,000 bars 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00 (20s)
+  no repo parquet to splice (fresh only)
+  saved hist_ADAUSDT_1h.parquet: 57,000 rows 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00
+BTCUSDT 15m: fetched 227,989 bars 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:45:00+00:00 (81s)
+  overlap vs repo parquet: n=77,857 corr=1.000000 max_rel_diff=5.09e-05
+  saved hist_BTCUSDT_15m.parquet: 227,989 rows 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:45:00+00:00
+BTC 4h resample vs repo 4h: n=5,487 corr=1.000000 max_rel_diff=1.68e-03
+saved hist_BTCUSDT_4h.parquet: 14,255 rows 2020-01-01 00:00:00+00:00 -> 2026-07-04 16:00:00+00:00
+S1 DONE

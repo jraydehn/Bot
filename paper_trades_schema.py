@@ -185,4 +185,8 @@ CSV_COLUMNS = [
     "would_pnl",      # filled by outcome_checker.py
     "spot_at_expiry", "price_move_pct", "miss_pct",  # filled by outcome_checker.py
     "loss_margin_pct", "loss_category",              # filled by outcome_checker.py; tau-scaled quality labels
+    # 2026-07-04: honest p_up rebuild (btc_p_up_v3_model.py) — SHADOW ONLY.
+    # Market-level score, one value per cycle, BTC only. NO decision path may
+    # read this column until shadow data confirms the replay (approved step).
+    "p_up_v3",       # BTC honest v3 hour-level p_up [SHADOW — keep at end for header order]
 ]

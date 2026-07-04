@@ -30,3 +30,6 @@ logs/
 *.lock
 nohup.out
 *.out
+
+# >100MB, refetchable via s1b_fetch_1m.py
+reform_results/pup_v2_rebuild_20260704/hist_BTCUSDT_1m.parquet

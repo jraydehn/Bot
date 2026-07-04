@@ -1766,6 +1766,19 @@ def main() -> None:
     # 1h candles for MS/VD HMM — Binance 1m API caps at 1000 rows (~16 1h bars), far below
     # the 72-bar (MS) and 200-bar (VD) minimums. Fetch 1h directly to fix this.
     live_1h = fetch_recent_candles("1h", lookback_bars=250, asset=args.asset)
+    # ── p_up_v3 (honest rebuild, 2026-07-04) — SHADOW ONLY ──────────────────
+    # Market-level, once per cycle (module caches per completed 1h bar).
+    # Logged to the p_up_v3 CSV column; NO decision path reads this value.
+    _p_up_v3_cycle = None
+    if args.asset == "BTC":
+        try:
+            import btc_p_up_v3_model as _v3mod
+            _p_up_v3_cycle = _v3mod.compute_p_up_v3(live_1m=live_1m, df_1h=live_1h)
+        except Exception as _v3_e:
+            print(f"  [p_up_v3] compute failed: {type(_v3_e).__name__}: {_v3_e}")
+            _p_up_v3_cycle = None
+        if _p_up_v3_cycle is not None:
+            print(f"  [p_up_v3] {_p_up_v3_cycle:.3f}  (shadow)")
     vol_src = live_1m if live_1m is not None and len(live_1m) >= vol_bars else df_vol.iloc[-200:]
     vol     = compute_realized_volatility(vol_src, asset=args.asset)
 
@@ -6937,6 +6950,7 @@ def main() -> None:
         "composite_rev":      _comp_rev,
         "composite_p_up":     round(_comp_p_up, 4),
         "p_up_v2":            round(chosen.get("p_up_v2"), 4) if chosen.get("p_up_v2") is not None else "",
+        "p_up_v3":            round(_p_up_v3_cycle, 4) if _p_up_v3_cycle is not None else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

@@ -1,0 +1,81 @@
+TEST 1 — hourly agreement filter | trades=845, v3-join dropped 0.1% (WF preds end 2026-07-04 15:00), n=844
+  ALL trades (baseline)        n= 844  WR=0.658  PnL=$   2,396  per-bet=$   2.84  be_WR=0.519
+  side mix: {'no': 749, 'yes': 95}
+  filter discrimination: 56.6% of NO trades have v3>=0.50 (would drop); 29.5% of YES trades have v3<0.50 (would drop)
+ -- agree@0.50/0.50
+  KEPT                         n= 392  WR=0.653  PnL=$    -313  per-bet=$  -0.80  be_WR=0.497
+  DROPPED                      n= 452  WR=0.662  PnL=$   2,709  per-bet=$   5.99  be_WR=0.540
+    kept NO                    n= 325  WR=0.680  PnL=$    -493  per-bet=$  -1.52  be_WR=0.515
+    dropped NO                 n= 424  WR=0.679  PnL=$   3,666  per-bet=$   8.65  be_WR=0.555
+    kept YES                   n=  67  WR=0.522  PnL=$     180  per-bet=$   2.69  be_WR=0.426
+    dropped YES                n=  28  WR=0.393  PnL=$    -957  per-bet=$ -34.19  be_WR=0.385
+ -- strong zone 0.46/0.54
+  KEPT                         n=  67  WR=0.657  PnL=$     567  per-bet=$   8.47  be_WR=0.436
+  DROPPED                      n= 777  WR=0.658  PnL=$   1,829  per-bet=$   2.35  be_WR=0.528
+    kept NO                    n=  35  WR=0.629  PnL=$    -319  per-bet=$  -9.11  be_WR=0.371
+    dropped NO                 n= 714  WR=0.682  PnL=$   3,492  per-bet=$   4.89  be_WR=0.549
+    kept YES                   n=  32  WR=0.688  PnL=$     886  per-bet=$  27.69  be_WR=0.538
+    dropped YES                n=  63  WR=0.381  PnL=$  -1,663  per-bet=$ -26.40  be_WR=0.370
+ -- asym NO<=0.50 YES>=0.54
+  KEPT                         n= 357  WR=0.681  PnL=$     393  per-bet=$   1.10  be_WR=0.517
+  DROPPED                      n= 487  WR=0.641  PnL=$   2,003  per-bet=$   4.11  be_WR=0.521
+    kept NO                    n= 325  WR=0.680  PnL=$    -493  per-bet=$  -1.52  be_WR=0.515
+    dropped NO                 n= 424  WR=0.679  PnL=$   3,666  per-bet=$   8.65  be_WR=0.555
+    kept YES                   n=  32  WR=0.688  PnL=$     886  per-bet=$  27.69  be_WR=0.538
+    dropped YES                n=  63  WR=0.381  PnL=$  -1,663  per-bet=$ -26.40  be_WR=0.370
+ -- asym NO<=0.46 YES>=0.50
+  KEPT                         n= 102  WR=0.559  PnL=$    -139  per-bet=$  -1.36  be_WR=0.406
+  DROPPED                      n= 742  WR=0.671  PnL=$   2,534  per-bet=$   3.42  be_WR=0.540
+    kept NO                    n=  35  WR=0.629  PnL=$    -319  per-bet=$  -9.11  be_WR=0.371
+    dropped NO                 n= 714  WR=0.682  PnL=$   3,492  per-bet=$   4.89  be_WR=0.549
+    kept YES                   n=  67  WR=0.522  PnL=$     180  per-bet=$   2.69  be_WR=0.426
+    dropped YES                n=  28  WR=0.393  PnL=$    -957  per-bet=$ -34.19  be_WR=0.385
+ -- loose NO<=0.52 YES>=0.48
+  KEPT                         n= 586  WR=0.655  PnL=$     541  per-bet=$   0.92  be_WR=0.504
+  DROPPED                      n= 258  WR=0.663  PnL=$   1,854  per-bet=$   7.19  be_WR=0.557
+    kept NO                    n= 504  WR=0.679  PnL=$     612  per-bet=$   1.21  be_WR=0.516
+    dropped NO                 n= 245  WR=0.682  PnL=$   2,561  per-bet=$  10.45  be_WR=0.585
+    kept YES                   n=  82  WR=0.512  PnL=$     -70  per-bet=$  -0.86  be_WR=0.442
+    dropped YES                n=  13  WR=0.308  PnL=$    -707  per-bet=$ -54.35  be_WR=0.294
+
+  weekly PnL kept(True) vs dropped(False) @0.50:
+                          sum         count      
+keep                    False   True  False True 
+wk                                               
+2026-05-21/2026-05-27   573.0   520.0    54    25
+2026-05-28/2026-06-03  2197.0   501.0    94    50
+2026-06-04/2026-06-10   907.0 -2046.0    42    52
+2026-06-11/2026-06-17  -445.0 -1060.0    61    67
+2026-06-18/2026-06-24  -341.0  1018.0    88    87
+2026-06-25/2026-07-01   196.0   658.0    93    94
+2026-07-02/2026-07-08  -378.0    96.0    20    17
+  weeks favoring kept (per-bet): 4/7
+
+TEST 2 — direction-gate rebuild on scan archive (dedup tau~50)
+  deduped contracts=9548, v3 join missing 0.2%
+  archive day holes: [datetime.date(2026, 6, 18), datetime.date(2026, 6, 19), datetime.date(2026, 6, 20), datetime.date(2026, 6, 21), datetime.date(2026, 6, 22), datetime.date(2026, 6, 23), datetime.date(2026, 6, 24)]
+
+  hypothetical NO book: all                          n=9528  WR=0.505  PnL=$ -25,017  per-bet=$  -2.63  be_WR=0.146
+    block NO v3>=0.52: n=3683  WR=0.494  PnL=$  16,673  per-bet=$   4.53  be_WR=0.143  MCPT(pm-strat) p=0.9925  wks_neg=3/7
+    block NO v3>=0.52 & pm>=0.75: n=1434  WR=0.107  PnL=$  18,740  per-bet=$  13.07  be_WR=0.066  MCPT(pm-strat) p=0.9970  wks_neg=3/7
+    block NO v3>=0.54: n=2027  WR=0.484  PnL=$  -4,210  per-bet=$  -2.08  be_WR=0.151  MCPT(pm-strat) p=0.5360  wks_neg=6/7
+    block NO v3>=0.54 & pm>=0.75: n= 768  WR=0.095  PnL=$    -177  per-bet=$  -0.23  be_WR=0.069  MCPT(pm-strat) p=0.7345  wks_neg=5/7
+    block NO v3>=0.56: n= 280  WR=0.511  PnL=$  -2,426  per-bet=$  -8.66  be_WR=0.134  MCPT(pm-strat) p=0.3605  wks_neg=5/6
+    block NO v3>=0.56 & pm>=0.75: n= 115  WR=0.087  PnL=$  -3,417  per-bet=$ -29.72  be_WR=0.064  MCPT(pm-strat) p=0.2990  wks_neg=5/6
+
+  hypothetical YES book: all                          n=9528  WR=0.495  PnL=$-106,689  per-bet=$ -11.20  be_WR=0.152
+    block YES v3<=0.48: n=1611  WR=0.487  PnL=$ -10,609  per-bet=$  -6.59  be_WR=0.140  MCPT(pm-strat) p=0.8560  wks_neg=4/7
+    block YES v3<=0.48 & pm>=0.75: n= 633  WR=0.076  PnL=$  -7,397  per-bet=$ -11.68  be_WR=0.065  MCPT(pm-strat) p=0.8575  wks_neg=4/7
+    block YES v3<=0.46: n= 414  WR=0.514  PnL=$   3,916  per-bet=$   9.46  be_WR=0.134  MCPT(pm-strat) p=0.9685  wks_neg=3/6
+    block YES v3<=0.46 & pm>=0.75: n= 167  WR=0.096  PnL=$   2,508  per-bet=$  15.02  be_WR=0.063  MCPT(pm-strat) p=0.9340  wks_neg=3/6
+    block YES v3<=0.44: n= 169  WR=0.527  PnL=$   8,751  per-bet=$  51.78  be_WR=0.131  MCPT(pm-strat) p=0.9980  wks_neg=4/6
+    block YES v3<=0.44 & pm>=0.75: n=  70  WR=0.157  PnL=$   8,492  per-bet=$ 121.32  be_WR=0.063  MCPT(pm-strat) p=0.9995  wks_neg=4/6
+
+  EXISTING btc_pup_direction_gate blocked population (deduped):
+  blocked NO                   n=1249  WR=0.467  PnL=$  11,796  per-bet=$   9.44  be_WR=0.193
+  blocked YES                  n=  56  WR=0.518  PnL=$    -391  per-bet=$  -6.98  be_WR=0.398
+
+TEST 3 — matched hours n=655: corr(v3, live composite_p_up) pearson=0.026 spearman=0.034
+  corr(v3, old leaky p_up_v2): pearson=-0.027 spearman=0.004 (n=655)
+
+S10 DONE

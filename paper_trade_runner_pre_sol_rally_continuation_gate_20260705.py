@@ -5201,47 +5201,6 @@ def main() -> None:
                         _log_block("sol_no_oversold_bounce_gate")
                         continue
 
-            # [sol_no_rally_continuation_gate 2026-07-05] Block SOL NO when SOL has rallied
-            # >2% over the trailing 24h AND the strike sits within 0.35% of spot (narrow-OTM) —
-            # a pricing-lag effect: the model doesn't discount enough for a market that's
-            # already run. Rescue when the immediate last hour has PAUSED (chg_1h<0): the
-            # rally-pause case is safe for NO (rescued pop WR=92.9%, edge+26.2pp, +$182 on
-            # 14 taken trades spanning 7 weeks); still-running momentum (chg_1h>=0) is the
-            # dangerous case (WR=13.6%, edge=-56.3pp, -$1,146 on 22 trades, 6 weeks, every
-            # week negative). Permutation p=0.0000 (5,000 reps) for the chg_1h split;
-            # corr(ret_24h, chg_1h)=0.23 in-bucket — not a redundant restatement of ret_24h.
-            # Base gate alone (no rescue) on the same 36-trade bucket: WR=44.4%,
-            # breakeven=68.7%, -$964. Exhaustive rescue search (~68 features/conditions,
-            # incl. a full historical backfill of Kalman/Hurst/autocorr/OU stats) found only
-            # this one survives — see project_sol_hourly_deepdive/rally-continuation memory
-            # for the full accounting, including a caught alignment bug (off-by-one-hour lag
-            # spuriously validated a different rescue on a wrong 32-trade bucket).
-            # Backup: paper_trade_runner_pre_sol_rally_continuation_gate_20260705.py
-            if args.asset == "SOL" and dec_c.side == "no" and offset_c <= 0.0035:
-                _ret_24h_rc = float("nan")
-                _chg_1h_rc = float("nan")
-                try:
-                    _c1h_rc = df_confirm["close"].astype(float)
-                    if len(_c1h_rc) >= 25 and _c1h_rc.iloc[-25] > 0:
-                        _ret_24h_rc = spot / float(_c1h_rc.iloc[-25]) - 1.0
-                    if len(_c1h_rc) >= 2 and _c1h_rc.iloc[-2] > 0:
-                        _chg_1h_rc = spot / float(_c1h_rc.iloc[-2]) - 1.0
-                except Exception:
-                    pass
-                if _ret_24h_rc == _ret_24h_rc and _ret_24h_rc > 0.02:
-                    if _chg_1h_rc == _chg_1h_rc and _chg_1h_rc < 0.0:
-                        print(f"  [sol_no_rally_continuation_gate] RESCUE NO {c['ticker']} — "
-                              f"ret_24h={_ret_24h_rc*100:+.2f}%>2%, offset={offset_c*100:.2f}%<=0.35% "
-                              f"BUT chg_1h={_chg_1h_rc*100:+.2f}%<0 (rally paused, WR=92.9% in this bucket)")
-                        _log_block("sol_no_rally_continuation_gate__rescue")  # rescue outcome logging
-                    else:
-                        print(f"  [sol_no_rally_continuation_gate] BLOCK NO {c['ticker']} — "
-                              f"ret_24h={_ret_24h_rc*100:+.2f}%>2%, offset={offset_c*100:.2f}%<=0.35%, "
-                              f"chg_1h={_chg_1h_rc*100 if _chg_1h_rc==_chg_1h_rc else float('nan'):+.2f}%>=0 "
-                              f"(rally still running, WR=13.6% in this bucket, edge=-56.3pp)")
-                        _log_block("sol_no_rally_continuation_gate")
-                        continue
-
             # [sol_no_vwap_neutral_gate] Hard block SOL NO when vwap_stretch=0 AND (ema_stretch=1 OR stoch_k<40).
             # Analysis (2026-05-23, n=38): WR=52.6%, BE≈75.8%, P&L=-$374.
             # Baseline NO (not blocked): n=193, WR=85.0%, +$1,004 — confirms gate carves out losers.

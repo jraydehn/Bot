@@ -549,7 +549,12 @@ def fetch_p_up_v3(asset: str) -> Optional[float]:
     try:
         df = pd.read_csv(path, usecols=["logged_at", "p_up_v3"], low_memory=False)
         df["p_up_v3"] = pd.to_numeric(df["p_up_v3"], errors="coerce")
-        df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce")
+        # format="mixed" is REQUIRED: the hourly CSV carries two timestamp formats
+        # since ~06-26; without it the newest rows coerce to NaT and this returns
+        # None forever — the same silent bug that disabled fetch_p_up_v2 and
+        # fetch_composite_p_up (discovered 2026-07-05; those remain unfixed
+        # DELIBERATELY pending a decision on restoring their live influence).
+        df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce", format="mixed")
         recent = df.dropna(subset=["p_up_v3", "logged_at"]).sort_values("logged_at")
         if recent.empty:
             return None

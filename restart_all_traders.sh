@@ -35,28 +35,26 @@ fi
 echo "  All clear."
 
 echo ""
-echo "=== Starting 1h watchdog (BTC dual / ETH paper / SOL dual) ==="
-# Config as of 2026-07-02: bankrolls 2500; stop-loss BTC 350 / SOL 250 (shared
-# SOL pool with 15m via live_trades_sol.csv) per stop-level sweep — stops <$300
-# BTC / <$225 SOL were cutting mean-reverting days (-$955 / -$33 historical).
+echo "=== Starting 1h watchdog (BTC dual / ETH paper / SOL paper) ==="
+# 2026-07-05: SOL live/dual STOPPED (user decision — degrading performance).
+# SOL continues in PAPER mode for data collection per feedback_paper_always_on.
+# BTC dual unchanged: bankroll 2500, stop 350 (per-runner series-filtered stops).
 nohup python3 run_all_assets.py \
     --btc-dual --btc-bankroll 2500 --btc-loss-limit 350 \
     --eth-bankroll 2500 --eth-loss-limit 20 \
-    --sol-dual --sol-bankroll 2500 --sol-loss-limit 250 \
+    --sol-bankroll 2500 \
     >> logs/run_all_assets.log 2>&1 &
 echo "  PID=$!"
 
 echo ""
-echo "=== Starting 15m watchdog (BTC live / ETH paper / SOL live) ==="
-# BTC 15m live since 2026-07-03 (user go-live decision): $2,500 bankroll, $250 stop.
-# Stops are PER-RUNNER since 2026-07-03: each runner's daily limit counts only its
-# own contract series (15M vs hourly tickers) even though both write live_trades.csv.
+echo "=== Starting 15m watchdog (BTC live / ETH paper / SOL paper) ==="
+# BTC 15m live since 2026-07-03: $2,500 bankroll, $250 per-runner stop.
+# SOL 15m live STOPPED 2026-07-05 (user decision) — paper mode continues.
 nohup python3 run_all_15m.py \
     --btc-bankroll 2500 \
     --btc-live --btc-loss-limit 250 \
     --eth-bankroll 2500 \
     --sol-bankroll 2500 \
-    --sol-live --sol-loss-limit 250 \
     >> logs/run_all_15m.log 2>&1 &
 echo "  PID=$!"
 

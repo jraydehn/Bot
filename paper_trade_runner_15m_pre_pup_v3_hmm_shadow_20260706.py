@@ -432,12 +432,6 @@ CSV_COLUMNS = [
     # NO decision path reads these — logged for the replay-confirmation audit only.
     "p_up_v3",
     "v3_agree",
-    # 2026-07-06: p_up_v3 regime HMM state ("rising"/"neutral"/"crashing"), fetched
-    # from the hourly CSV same as p_up_v3 above. SHADOW ONLY here — no decision path
-    # reads this in the 15m runner; the two live gates using it are hourly-only.
-    # Logged to start accumulating overlap data for a future test of whether the
-    # regime finding (validated on the hourly book) also applies to 15m trades.
-    "pup_v3_hmm_state",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -570,30 +564,6 @@ def fetch_p_up_v3(asset: str) -> Optional[float]:
             return None
         val = float(recent["p_up_v3"].iloc[-1])
         return val if 0.0 < val < 1.0 else None
-    except Exception:
-        return None
-
-
-def fetch_pup_v3_hmm_state(asset: str) -> Optional[str]:
-    """Read most recent p_up_v3 regime HMM state ("rising"/"neutral"/"crashing")
-    from the hourly paper trade CSV. Same source/staleness pattern as
-    fetch_p_up_v3. SHADOW ONLY — no decision path may consume it in the 15m
-    runner; the two live gates using this state are hourly-only."""
-    path = HOURLY_CSV_MAP.get(asset.upper())
-    if path is None or not path.exists():
-        return None
-    try:
-        df = pd.read_csv(path, usecols=["logged_at", "pup_v3_hmm_state"], low_memory=False)
-        df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce", format="mixed")
-        recent = df.dropna(subset=["pup_v3_hmm_state", "logged_at"]).sort_values("logged_at")
-        recent = recent[recent["pup_v3_hmm_state"] != ""]
-        if recent.empty:
-            return None
-        last_time = recent["logged_at"].iloc[-1].to_pydatetime()
-        age_min = (datetime.now(timezone.utc) - last_time).total_seconds() / 60.0
-        if age_min > 120:
-            return None
-        return str(recent["pup_v3_hmm_state"].iloc[-1])
     except Exception:
         return None
 
@@ -1669,19 +1639,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         if _p_up_v3_btc is not None:
             print(f"  [p_up_v3_btc] {_p_up_v3_btc:.3f}  (shadow)")
     sig["p_up_v3_btc"] = _p_up_v3_btc if _p_up_v3_btc is not None else ""
-
-    # p_up_v3 regime HMM state (2026-07-06) — SHADOW ONLY, same fetch pattern.
-    # Collecting overlap data to test later whether the hourly-validated regime
-    # finding (rising->fade, crashing->bounce) also applies to 15m trades.
-    _pup_v3_hmm_state_btc: Optional[str] = None
-    if asset == "BTC":
-        try:
-            _pup_v3_hmm_state_btc = fetch_pup_v3_hmm_state("BTC")
-        except Exception:
-            _pup_v3_hmm_state_btc = None
-        if _pup_v3_hmm_state_btc is not None:
-            print(f"  [pup_v3_hmm_btc] state={_pup_v3_hmm_state_btc}  (shadow)")
-    sig["pup_v3_hmm_state"] = _pup_v3_hmm_state_btc if _pup_v3_hmm_state_btc is not None else ""
 
     # Rolling 6h z_drift logged for all assets (LGBM feature)
     _z_drift_6h: Optional[float] = None
@@ -2998,7 +2955,6 @@ def _build_row(
         # honest p_up rebuild — SHADOW columns (2026-07-04); never read by decisions
         "p_up_v3":              _f(sig.get("p_up_v3_btc")),
         "v3_agree":             _v3_agree_val(sig.get("p_up_v3_btc"), side),
-        "pup_v3_hmm_state":     sig.get("pup_v3_hmm_state", ""),
     }
 
 

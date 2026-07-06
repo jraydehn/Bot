@@ -47,14 +47,17 @@ nohup python3 run_all_assets.py \
 echo "  PID=$!"
 
 echo ""
-echo "=== Starting 15m watchdog (BTC live / ETH paper / SOL paper) ==="
+echo "=== Starting 15m watchdog (BTC live / ETH paper / SOL live) ==="
 # BTC 15m live since 2026-07-03: $2,500 bankroll, $250 per-runner stop.
-# SOL 15m live STOPPED 2026-07-05 (user decision) — paper mode continues.
+# SOL 15m live restarted 2026-07-06 (user decision): $2,500 bankroll, $150 stop
+# (was stopped 2026-07-05 for degrading performance — no signal-side changes
+# since then, see project_sol_live_stop_20260705.md).
 nohup python3 run_all_15m.py \
     --btc-bankroll 2500 \
     --btc-live --btc-loss-limit 250 \
     --eth-bankroll 2500 \
     --sol-bankroll 2500 \
+    --sol-live --sol-loss-limit 150 \
     >> logs/run_all_15m.log 2>&1 &
 echo "  PID=$!"
 

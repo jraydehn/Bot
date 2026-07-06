@@ -749,32 +749,17 @@ def _vol_hmm_probs_sol(live_1m: "pd.DataFrame") -> "tuple[int,float,int] | None"
 def _ms_hmm_state(live_1h: "pd.DataFrame", asset: str) -> "tuple[int, float] | None":
     """Return (state, state_prob) using the per-asset microstructure HMM.
 
-    [2026-07-05 FIX] The model was trained with hmmlearn's default lengths=[len(X)]
-    (one continuous training sequence), so startprob_ is a hard one-hot vector — the
-    posterior state assignment at t=0 of THAT single training sequence, not a meaningful
-    prior. Decoding a single live observation via .predict() computes
-    argmax_s[log(startprob_[s]) + log(emission(obs|s))]; with startprob_ exactly 0 for
-    every state but one, that term is -inf everywhere else, so the decoded state was
-    MATHEMATICALLY FORCED to always be that one state regardless of the observation —
-    not biased, literally constant (verified: 2,210+ live rows, always state 0 for SOL).
-    Fix: decode a trailing SEQUENCE of the last SEQ_LEN feature vectors and take the
-    LAST state, so the (healthy, ~0.9-0.96 diagonal) transition matrix — not the
-    degenerate training-artifact prior — determines the current state. Validated:
-    stable final-state estimate across seq_len in {40,60,100,150}; non-degenerate
-    (6-7 of 8 states observed) over 300 sampled historical decision points.
-
     Computes 5 features from last 70+ 1h bars: ou_theta (AR(1) OU speed), hurst_exponent
     (multi-scale R/S), autocorr1_30 (lag-1 autocorr, 60-bar), kalman_velocity (constant-vel
     Kalman on last 48 1h log-returns), rvol_24h (24-bar std). Runs scaler+Viterbi decode.
     live_1h must be a 1h-interval DataFrame (use fetch_recent_candles("1h")).
-    Returns None if model unavailable or insufficient history for the trailing sequence.
+    Returns None if model unavailable or fewer than 72 1h bars.
     """
     pkg = _ms_hmm_models.get(asset)
     if pkg is None or live_1h is None:
         return None
     try:
         import numpy as _np_ms
-        _SEQ_LEN = 60  # trailing decode window; validated stable vs 40/100/150
         c1h = live_1h["close"].dropna()
         if len(c1h) < 72:
             return None
@@ -782,72 +767,61 @@ def _ms_hmm_state(live_1h: "pd.DataFrame", asset: str) -> "tuple[int, float] | N
         if len(lr) < 70:
             return None
 
-        def _ms_point_features(lr_avail: "_np_ms.ndarray") -> "tuple[float,float,float,float]":
-            # Identical math to the original single-point implementation, applied to
-            # whatever trailing lr history is available AS OF this point in the sequence.
-            _buf48 = lr_avail[-48:] if len(lr_avail) >= 48 else lr_avail
-            _y = _buf48 - _buf48.mean()
-            _phi = float(_np_ms.dot(_y[:-1], _y[1:]) / (_np_ms.dot(_y[:-1], _y[:-1]) + 1e-12))
-            _phi = float(_np_ms.clip(_phi, -0.9999, 0.9999))
-            _ou_theta_pt = float(_np_ms.clip(-_np_ms.log(abs(_phi)), 0.0, 10.0))
+        # ou_theta: AR(1) mean-reversion speed (48-bar window, same as build script)
+        _buf48 = lr[-48:] if len(lr) >= 48 else lr
+        _y = _buf48 - _buf48.mean()
+        _phi = float(_np_ms.dot(_y[:-1], _y[1:]) / (_np_ms.dot(_y[:-1], _y[:-1]) + 1e-12))
+        _phi = float(_np_ms.clip(_phi, -0.9999, 0.9999))
+        _ou_theta_ms = float(_np_ms.clip(-_np_ms.log(abs(_phi)), 0.0, 10.0))
 
-            _pts = []
-            for _w in [8, 16, 32, 64]:
-                if len(lr_avail) < _w:
-                    continue
-                _seg = lr_avail[-_w:]
-                _dev = _np_ms.cumsum(_seg - _seg.mean())
-                _r = _dev.max() - _dev.min()
-                _s = _seg.std(ddof=1)
-                if _s > 0 and _r > 0:
-                    _pts.append((_np_ms.log(_w), _np_ms.log(_r / _s)))
-            if len(_pts) >= 2:
-                _xs = _np_ms.array([p[0] for p in _pts])
-                _ys = _np_ms.array([p[1] for p in _pts])
-                _hurst_pt = float(_np_ms.clip(_np_ms.polyfit(_xs, _ys, 1)[0], 0.0, 1.0))
-            else:
-                _hurst_pt = 0.5
+        # hurst_exponent: multi-scale R/S polyfit over windows [8,16,32,64]
+        _pts = []
+        for _w in [8, 16, 32, 64]:
+            if len(lr) < _w:
+                continue
+            _seg = lr[-_w:]
+            _dev = _np_ms.cumsum(_seg - _seg.mean())
+            _r = _dev.max() - _dev.min()
+            _s = _seg.std(ddof=1)
+            if _s > 0 and _r > 0:
+                _pts.append((_np_ms.log(_w), _np_ms.log(_r / _s)))
+        if len(_pts) >= 2:
+            _xs = _np_ms.array([p[0] for p in _pts])
+            _ys = _np_ms.array([p[1] for p in _pts])
+            _hurst_ms = float(_np_ms.clip(_np_ms.polyfit(_xs, _ys, 1)[0], 0.0, 1.0))
+        else:
+            _hurst_ms = 0.5
 
-            _buf60 = lr_avail[-60:] if len(lr_avail) >= 60 else lr_avail
-            _x60 = _buf60[:-1] - _buf60[:-1].mean()
-            _y60 = _buf60[1:]  - _buf60[1:].mean()
-            _denom60 = float(_np_ms.sqrt((_x60**2).sum() * (_y60**2).sum()))
-            _autocorr_pt = float(_np_ms.dot(_x60, _y60) / _denom60) if _denom60 > 0 else 0.0
+        # autocorr1_30: lag-1 autocorrelation of last 60 bars
+        _buf60 = lr[-60:] if len(lr) >= 60 else lr
+        _x60 = _buf60[:-1] - _buf60[:-1].mean()
+        _y60 = _buf60[1:]  - _buf60[1:].mean()
+        _denom60 = float(_np_ms.sqrt((_x60**2).sum() * (_y60**2).sum()))
+        _autocorr_ms = float(_np_ms.dot(_x60, _y60) / _denom60) if _denom60 > 0 else 0.0
 
-            _rvol_pt = float(_np_ms.std(lr_avail[-24:] if len(lr_avail) >= 24 else lr_avail, ddof=1))
-            return _ou_theta_pt, _hurst_pt, _autocorr_pt, _rvol_pt
-
-        # kalman_velocity: a genuine ONLINE filter — run it forward continuously through
-        # all available history (not restarted per trailing point) and record velocity
-        # at every step, matching how a real streaming Kalman filter operates.
+        # kalman_velocity: constant-velocity Kalman on last 48 1h log-returns
+        _buf_kf = lr[-48:] if len(lr) >= 48 else lr
         _Q_kf = _np_ms.array([[1e-5, 0.0], [0.0, 1e-5]])
+        _R_kf = float(_np_ms.var(_buf_kf)) + 1e-10
+        _x_kf = _np_ms.array([_buf_kf[0], 0.0])
+        _P_kf = _np_ms.eye(2) * 0.1
         _F_kf = _np_ms.array([[1.0, 1.0], [0.0, 1.0]])
         _H_kf = _np_ms.array([[1.0, 0.0]])
-        _x_kf = _np_ms.array([lr[0], 0.0])
-        _P_kf = _np_ms.eye(2) * 0.1
-        _kalman_vel_hist = _np_ms.zeros(len(lr))
-        for _t in range(len(lr)):
-            _buf_r = lr[max(0, _t - 47):_t + 1]
-            _R_kf = float(_np_ms.var(_buf_r)) + 1e-10 if len(_buf_r) > 1 else 1e-10
-            if _t > 0:
-                _x_kf = _F_kf @ _x_kf
-                _P_kf = _F_kf @ _P_kf @ _F_kf.T + _Q_kf
+        for _obs_kf in _buf_kf:
+            _x_kf = _F_kf @ _x_kf
+            _P_kf = _F_kf @ _P_kf @ _F_kf.T + _Q_kf
             _K_kf = _P_kf @ _H_kf.T / (float(_H_kf @ _P_kf @ _H_kf.T) + _R_kf)
-            _x_kf = _x_kf + _K_kf.flatten() * (lr[_t] - float(_H_kf @ _x_kf))
+            _x_kf = _x_kf + _K_kf.flatten() * (_obs_kf - float(_H_kf @ _x_kf))
             _P_kf = (_np_ms.eye(2) - _np_ms.outer(_K_kf.flatten(), _H_kf)) @ _P_kf
-            _kalman_vel_hist[_t] = _x_kf[1]
+        _kalman_vel_ms = round(float(_x_kf[1]), 6)
 
-        _seq_len_eff = min(_SEQ_LEN, len(lr))
-        _rows = []
-        for _i in range(len(lr) - _seq_len_eff, len(lr)):
-            _ot, _hu, _ac, _rv = _ms_point_features(lr[:_i + 1])
-            _rows.append([_ot, _hu, _ac, round(float(_kalman_vel_hist[_i]), 6), _rv])
-        feat_seq = _np_ms.array(_rows)
-        X_scaled_seq = pkg["scaler"].transform(feat_seq)
-        states_seq = pkg["model"].predict(X_scaled_seq)
-        probs_seq  = pkg["model"].predict_proba(X_scaled_seq)
-        state = int(states_seq[-1])
-        prob  = float(probs_seq[-1, state])
+        # rvol_24h: std of last 24 1h log-returns
+        _rvol_ms = float(_np_ms.std(lr[-24:] if len(lr) >= 24 else lr, ddof=1))
+
+        feat = _np_ms.array([[_ou_theta_ms, _hurst_ms, _autocorr_ms, _kalman_vel_ms, _rvol_ms]])
+        X_scaled = pkg["scaler"].transform(feat)
+        state = int(pkg["model"].predict(X_scaled)[0])
+        prob  = float(pkg["model"].predict_proba(X_scaled)[0, state])
         return (state, round(prob, 4))
     except Exception:
         return None
@@ -855,14 +829,6 @@ def _ms_hmm_state(live_1h: "pd.DataFrame", asset: str) -> "tuple[int, float] | N
 
 def _vd_hmm_state(live_1h: "pd.DataFrame", asset: str) -> "tuple[int, float] | None":
     """Return (state, state_prob) using the per-asset vol+direction HMM.
-
-    [2026-07-05 FIX] Same root cause and fix as _ms_hmm_state: trained with
-    lengths=[len(X)] -> startprob_ is a hard one-hot (training-sequence-start
-    artifact) -> single-observation .predict() was mathematically forced to
-    always return that one state. Now decodes a trailing SEQUENCE and takes the
-    last state, letting the (healthy) transition matrix govern the estimate.
-    Validated: stable final state across seq_len in {30,60,100}; all 8 states
-    observed with a roughly even distribution over 300 sampled historical points.
 
     Features (all from 1h price bars, strictly causal):
       chg_1h    — most recent 1h log return
@@ -878,7 +844,6 @@ def _vd_hmm_state(live_1h: "pd.DataFrame", asset: str) -> "tuple[int, float] | N
         return None
     try:
         import numpy as _np_vd
-        _SEQ_LEN = 60  # trailing decode window; validated stable vs 30/100
         c1h = live_1h["close"].dropna()
         if len(c1h) < 200:
             return None
@@ -896,34 +861,23 @@ def _vd_hmm_state(live_1h: "pd.DataFrame", asset: str) -> "tuple[int, float] | N
             ema8v[_ii]  = alpha8  * cv[_ii] + (1 - alpha8)  * ema8v[_ii - 1]
             ema21v[_ii] = alpha21 * cv[_ii] + (1 - alpha21) * ema21v[_ii - 1]
 
-        def _vd_point_features(i: int):
-            # Identical math to the original single-point implementation, evaluated
-            # "as of" trailing index i (i indexes lr; cv index i+1 is the matching close).
-            _chg_1h = float(lr[i])
-            _chg_3h = float(lr[i-2] + lr[i-1] + lr[i]) if i >= 2 else _chg_1h
-            _win_short = lr[max(0, i-23): i+1]
-            _rvol_1h   = float(_np_vd.std(_win_short, ddof=1)) if len(_win_short) >= 4 else float("nan")
-            _win_long  = lr[max(0, i-167): i+1]
-            _rvol_long = float(_np_vd.std(_win_long, ddof=1)) if len(_win_long) >= 24 else float("nan")
-            _vol_ratio = float(_rvol_1h / _rvol_long) if (_rvol_long and _rvol_long > 0) else float("nan")
-            _ema_trend = float((ema8v[i+1] - ema21v[i+1]) / cv[i+1]) if cv[i+1] > 0 else float("nan")
-            return _chg_1h, _chg_3h, _rvol_1h, _vol_ratio, _ema_trend
+        i = len(lr) - 1
+        chg_1h = float(lr[i])
+        chg_3h = float(lr[i-2] + lr[i-1] + lr[i]) if i >= 2 else chg_1h
+        win_short  = lr[max(0, i-23): i+1]
+        rvol_1h    = float(_np_vd.std(win_short, ddof=1)) if len(win_short) >= 4 else float("nan")
+        win_long   = lr[max(0, i-167): i+1]
+        rvol_long  = float(_np_vd.std(win_long,  ddof=1)) if len(win_long)  >= 24 else float("nan")
+        vol_ratio  = float(rvol_1h / rvol_long) if (rvol_long and rvol_long > 0) else float("nan")
+        ema_trend  = float((ema8v[i+1] - ema21v[i+1]) / cv[i+1]) if cv[i+1] > 0 else float("nan")
 
-        _seq_len_eff = min(_SEQ_LEN, len(lr) - 167)  # need 167 bars of lookback per point
-        if _seq_len_eff < 5:
-            return None
-        _rows = []
-        for _i in range(len(lr) - _seq_len_eff, len(lr)):
-            _rows.append(_vd_point_features(_i))
-        feat_seq = _np_vd.array(_rows)
-        if _np_vd.isnan(feat_seq).any():
+        if any(_np_vd.isnan(v) for v in [chg_1h, chg_3h, rvol_1h, vol_ratio, ema_trend]):
             return None
 
-        X_scaled_seq = pkg["scaler"].transform(feat_seq)
-        states_seq = pkg["model"].predict(X_scaled_seq)
-        probs_seq  = pkg["model"].predict_proba(X_scaled_seq)
-        state = int(states_seq[-1])
-        prob  = float(probs_seq[-1, state])
+        feat     = _np_vd.array([[chg_1h, chg_3h, rvol_1h, vol_ratio, ema_trend]])
+        X_scaled = pkg["scaler"].transform(feat)
+        state    = int(pkg["model"].predict(X_scaled)[0])
+        prob     = float(pkg["model"].predict_proba(X_scaled)[0, state])
         return (state, round(prob, 4))
     except Exception:
         return None
@@ -931,20 +885,7 @@ def _vd_hmm_state(live_1h: "pd.DataFrame", asset: str) -> "tuple[int, float] | N
 
 def _of_hmm_state(confirm, liq_signal, asset: str):
     """Return (state, state_prob) from current order-flow signals using per-asset HMM.
-    Features: ls_long_pct, oi_chg_pct, liq_bias, vpin_score, funding_bias, obi_score.
-
-    [2026-07-05 FIX] Same root cause as _ms_hmm_state/_vd_hmm_state (trained with
-    lengths=[len(X)] -> one-hot startprob_ -> single-observation .predict() was
-    mathematically forced to always return one fixed state; verified constant
-    across 2,200+ logged SOL rows). Unlike ms/vd, this function has no historical
-    price panel to draw a trailing sequence from — its inputs (confirm, liq_signal)
-    are live current-moment snapshots only. Fix: maintain a rolling in-memory buffer
-    of recent feature points (_OF_HMM_HISTORY), warm-started once per process from
-    results/{asset}_scan_archive.csv (which logs all 6 features every scan cycle, so
-    a real trailing history already exists on disk) so the estimate is meaningful
-    even right after a restart, then appended each call thereafter. Decodes the
-    buffered sequence and returns the LAST state, same convention as ms/vd.
-    """
+    Features: ls_long_pct, oi_chg_pct, liq_bias, vpin_score, funding_bias, obi_score."""
     pkg = _of_hmm_models.get(asset)
     if pkg is None or confirm is None:
         return None
@@ -961,41 +902,10 @@ def _of_hmm_state(confirm, liq_signal, asset: str):
         _lbias = float(_np_of.clip(_lbias, -1.0,    1.0))
         if _np_of.isnan(_ls) or _np_of.isnan(_oi) or _np_of.isnan(_lbias):
             return None
-
-        _buf = _OF_HMM_HISTORY.setdefault(asset, deque(maxlen=100))
-        if not _OF_HMM_SEEDED.get(asset, False):
-            _OF_HMM_SEEDED[asset] = True
-            try:
-                _seed_path = f"results/{asset.lower()}_scan_archive.csv"
-                _seed_cols = ["logged_at", "ls_long_pct", "oi_chg_pct", "liq_bias",
-                              "vpin_score", "funding_bias", "obi_score"]
-                _seed_df = pd.read_csv(_seed_path, usecols=_seed_cols, low_memory=False)
-                _seed_df = _seed_df.drop_duplicates(subset="logged_at", keep="last")
-                for _c in _seed_cols[1:]:
-                    _seed_df[_c] = pd.to_numeric(_seed_df[_c], errors="coerce")
-                _seed_df = _seed_df.dropna(subset=_seed_cols[1:]).tail(_buf.maxlen)
-                for _, _srow in _seed_df.iterrows():
-                    _buf.append((
-                        float(_np_of.clip(_srow["ls_long_pct"], 0.0, 100.0)),
-                        float(_srow["oi_chg_pct"]),
-                        float(_np_of.clip(_srow["liq_bias"], -1.0, 1.0)),
-                        float(_srow["vpin_score"]),
-                        float(_srow["funding_bias"]),
-                        float(_srow["obi_score"]),
-                    ))
-            except Exception:
-                pass  # seed is best-effort; buffer just warms up live-only if it fails
-
-        _buf.append((_ls, _oi, _lbias, _vpin, _fund, _obi))
-        if len(_buf) < 10:
-            return None  # insufficient warm-up — better no signal than a degenerate one
-
-        feat_seq = _np_of.array(list(_buf))
-        X_scaled_seq = pkg["scaler"].transform(feat_seq)
-        states_seq = pkg["model"].predict(X_scaled_seq)
-        probs_seq  = pkg["model"].predict_proba(X_scaled_seq)
-        state = int(states_seq[-1])
-        prob  = float(probs_seq[-1, state])
+        feat    = _np_of.array([[_ls, _oi, _lbias, _vpin, _fund, _obi]])
+        X_scaled = pkg["scaler"].transform(feat)
+        state    = int(pkg["model"].predict(X_scaled)[0])
+        prob     = float(pkg["model"].predict_proba(X_scaled)[0, state])
         return (state, round(prob, 4))
     except Exception:
         return None
@@ -1470,13 +1380,6 @@ from collections import deque
 _pm_history: dict = {}  # {ticker: deque(maxlen=6)} — rolling p_market per contract for 5m drift
 _pup_v2_buf: deque = deque(maxlen=4)          # rolling 4h p_up_v2 for BTC NO regime detection
 _pup_v2_regime_state: dict = {"last_bar_ts": None}  # mutable state for in-function update
-
-# [2026-07-05] _of_hmm_state rolling feature history, per asset: {asset: deque of
-# (ls, oi, lbias, vpin, fund, obi) tuples, maxlen=100}. Warm-started from the scan
-# archive CSV on first use each process, then appended each cycle — survives restarts
-# via the disk seed, same pattern as _SESSION_TRADED. See _of_hmm_state docstring for why.
-_OF_HMM_HISTORY: dict = {}
-_OF_HMM_SEEDED: dict = {}  # {asset: bool} — seed the disk history only once per process
 
 
 def _expiry_prefix(ticker: str) -> str:

@@ -1990,24 +1990,6 @@ def main() -> None:
                                if (args.asset == "BTC" and _p_up_v3_cycle is not None) else None)
     if _pup_v3_hmm_state_label is not None:
         print(f"  [pup_v3_hmm] state={_pup_v3_hmm_state_label}")
-
-    # ── eth_p_up_v1 (honest ETH rebuild, 2026-07-06) — SHADOW ONLY ──────────
-    # Asset-specific model (A16 + C13, NOT BTC's A+B+M+Cs shape -- cross-asset
-    # and intra-hour microstructure tested and rejected for ETH). Market-level,
-    # once per cycle (module caches per completed 1h bar). NO decision path
-    # reads this value pending the same real-trade backfill validation BTC's
-    # v3 went through.
-    _eth_p_up_cycle = None
-    if args.asset == "ETH":
-        try:
-            import eth_p_up_v1_model as _ethv1mod
-            _eth_p_up_cycle = _ethv1mod.compute_eth_p_up(df_1h=live_1h)
-        except Exception as _ethv1_e:
-            print(f"  [eth_p_up_v1] compute failed: {type(_ethv1_e).__name__}: {_ethv1_e}")
-            _eth_p_up_cycle = None
-        if _eth_p_up_cycle is not None:
-            print(f"  [eth_p_up_v1] {_eth_p_up_cycle:.3f}  (shadow)")
-
     vol_src = live_1m if live_1m is not None and len(live_1m) >= vol_bars else df_vol.iloc[-200:]
     vol     = compute_realized_volatility(vol_src, asset=args.asset)
 
@@ -7321,7 +7303,6 @@ def main() -> None:
         "p_up_v2":            round(chosen.get("p_up_v2"), 4) if chosen.get("p_up_v2") is not None else "",
         "p_up_v3":            round(_p_up_v3_cycle, 4) if _p_up_v3_cycle is not None else "",
         "pup_v3_hmm_state":   _pup_v3_hmm_state_label if _pup_v3_hmm_state_label is not None else "",
-        "eth_p_up_v1":        round(_eth_p_up_cycle, 4) if _eth_p_up_cycle is not None else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

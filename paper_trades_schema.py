@@ -194,4 +194,8 @@ CSV_COLUMNS = [
     # distinct weeks per state): rising+YES loses (-$2,234), rising+NO wins
     # (+$2,404), crashing+YES wins (+$1,255), crashing+NO loses (-$1,189).
     "pup_v3_hmm_state",  # "rising"/"neutral"/"crashing", BTC only
+    # 2026-07-06: honest ETH p_up rebuild (eth_p_up_v1_model.py) — SHADOW ONLY.
+    # Asset-specific feature set (A16+C13), NOT BTC's shape. NO decision path
+    # reads this pending the same real-trade backfill validation BTC's v3 got.
+    "eth_p_up_v1",
 ]

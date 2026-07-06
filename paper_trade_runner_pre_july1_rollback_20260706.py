@@ -3709,37 +3709,10 @@ def main() -> None:
                             now_utc=now_utc, bankroll=args.bankroll,
                         )
 
-            # [bull_flag_ct2_yes_gate — BTC YES]
-            # Block YES when a bull flag/pennant is active AND composite_trend>=2.
-            # After a bull flag breaks out, the market prices in continuation immediately;
-            # WR=34.7% vs bkev=40.8% (edge=-6.1%) for ct>=2 rows the ct<=1 gate misses.
-            # Additive value: +$575 on top of existing gate stack (p=0.059, n=1,006).
-            # Causal story: flag breakout = short-term exhaustion; post-breakout reversion
-            # likely within the 1h contract window even in a strong bull trend.
-            # [2026-07-06] Restored (reverted the 2026-07-01 removal) per pre-July-1st
-            # BTC hourly rollback — see paper_trade_runner_pre_july1_rollback_20260706.py.
-            if (args.asset == "BTC" and _composite_computed and not _otm_yes_blocked
-                    and _flag_signal == 1 and _active_trend >= 2):
-                _otm_yes_blocked = True; _otm_yes_block_gate = "bull_flag_ct2_yes_gate"
-                print(f"  [bull_flag_ct2_yes_gate] BLOCK YES {c['ticker']} — "
-                      f"bull_flag {_flag_bull_bars_ago}h ago "
-                      f"pole={_flag_bull_pole_pct:.1f}%, c_trend={_active_trend}>=2 "
-                      f"(post-breakout reversion)")
-                gate_audit_logger.log_block(
-                    gate_name="bull_flag_ct2_yes_gate",
-                    ticker=c["ticker"], asset=args.asset, side="yes",
-                    pm=pm, p_model=p_model_comp or float("nan"),
-                    net_edge=max(0.0, (p_model_comp or 0.0) - pm - 0.04),
-                    offset_pct=offset_c, strike=s_k, spot=spot, tau_minutes=tau_c,
-                    count=0, kelly_fraction=0.0, close_ts=c.get("close_time", ""),
-                    signals={
-                        "flag_signal":        _flag_signal,
-                        "flag_bull_bars_ago": _flag_bull_bars_ago,
-                        "flag_bull_pole_pct": round(_flag_bull_pole_pct, 2),
-                        "composite_trend":    _active_trend,
-                    },
-                    now_utc=now_utc, bankroll=args.bankroll,
-                )
+            # [bull_flag_ct2_yes_gate REMOVED 2026-07-01]
+            # Live blocked_trades audit (n=6,225): YES_WR=68.3% — blocking winners.
+            # Gate was incorrectly shorting YES momentum after bull flag breakouts.
+            # Backup: paper_trade_runner_pre_bull_flag_removal_20260701.py
 
             # adx_mid_ct_neg_yes_gate REMOVED 2026-06-11.
             # 06-06 audit: no signal. 48h live data: n=55, WR=95% (blocking winners).
@@ -4434,10 +4407,13 @@ def main() -> None:
             # Decision.py has P_ETH_NO_PM_MIN for ETH, but this belt-and-suspenders runner check
             # catches any edge-case bypass path in the dual-eval routing.
             # VSA flip targets deep ITM YES (pm_bid ≈ 0.89), so this gate never fires for those.
-            # [2026-07-06] Floor reverted 0.15 → 0.10 for BTC (undoes the 2026-07-02 audit
-            # raise) per pre-July-1st BTC hourly rollback.
-            if dec_c.side == "no" and pm < 0.10:
-                print(f"  [no_pm_floor] BLOCK NO {c['ticker']} — pm={pm:.3f}<0.10 "
+            # [2026-07-02 audit] BTC floor raised 0.10 → 0.15: taken NO at pm<0.15 lost $91
+            # (n=26, WR 82.4% vs BE 87.5%, negative all 3 weeks); archive confirms deep-OTM
+            # NO gross edge (2.3-4.3pp, 5/5 wks) is real but below the 2c spread at 85c+
+            # NO prices. ETH/SOL stay at 0.10 (not audited).
+            _no_pm_min = 0.15 if args.asset == "BTC" else 0.10
+            if dec_c.side == "no" and pm < _no_pm_min:
+                print(f"  [no_pm_floor] BLOCK NO {c['ticker']} — pm={pm:.3f}<{_no_pm_min:.2f} "
                       f"(R:R={(1-pm)/max(pm,0.01):.0f}:1 unfavorable)")
                 _log_block("no_pm_floor")
                 continue
@@ -5112,30 +5088,18 @@ def main() -> None:
             # Mechanism: stoch<20 = price has fallen hard; oversold condition creates mean-
             # reversion bounce risk that sends BTC above the NO strike.
             # By pm/offset: pm[0.30,0.40) → WR=37.5%, -$47 (worst); offset>0 (ITM NO) → -$84.
-            # Rescue 1 (2026-05-17): ct<=-3 AND fund=-1 — strong bearish trend + crowded shorts
-            # confirms downtrend continuation even from oversold; WR=88.5% vs 83% implied (n=3222).
-            # Rescue 2 (2026-05-24): vwap_stretch_score==1 — price above VWAP despite stoch dip;
-            # temporary oversold in elevated VWAP context, NO strike stays out of reach; n=11, WR=81.8%.
-            # [2026-07-06] Restored (reverted the 2026-07-01 removal) per pre-July-1st
-            # BTC hourly rollback — see paper_trade_runner_pre_july1_rollback_20260706.py.
+            # Rescues REMOVED 2026-07-01 (audit): both paths were losing live —
+            # combined n=43, WR=62.8% vs BE=72.9%, -$363 over 2 weeks.
+            #   Rescue 1 ct<=-3+fund=-1 (added 05-17) and Rescue 2 vwap_stretch=1 (05-24)
+            #   each negative independently; ct<=-3+fund=-1 also failed in btc_no_z_gate.
+            # Gate is now a pure block. Backup: paper_trade_runner_pre_audit_tranche1_20260701.py
             if (args.asset == "BTC" and dec_c.side == "no"
                     and confirm.stoch_k == confirm.stoch_k  # not NaN
                     and confirm.stoch_k < 20.0):
-                _stoch_no_rescue = (
-                    (_active_trend <= -3 and confirm.funding_bias == -1)
-                    or getattr(confirm, "stretch_score", None) == 1
-                )
-                if _stoch_no_rescue:
-                    _rsrc_stoch = ("ct<=-3+fund=-1" if (_active_trend <= -3 and confirm.funding_bias == -1)
-                                   else "vwap_stretch=1")
-                    print(f"  [btc_stoch_no_gate] RESCUED NO {c['ticker']} — "
-                          f"{_rsrc_stoch} overrides stoch<20")
-                    _log_block("btc_stoch_no_gate__rescue")  # rescue outcome logging (2026-07-01 audit)
-                else:
-                    print(f"  [btc_stoch_no_gate] BLOCK NO {c['ticker']} — "
-                          f"stoch_k={confirm.stoch_k:.1f}<20 (oversold, bounce risk for NO)")
-                    _log_block("btc_stoch_no_gate")
-                    continue
+                print(f"  [btc_stoch_no_gate] BLOCK NO {c['ticker']} — "
+                      f"stoch_k={confirm.stoch_k:.1f}<20 (oversold, bounce risk for NO)")
+                _log_block("btc_stoch_no_gate")
+                continue
 
             # [itm_no_neutral_stoch_gate] Block BTC ITM NO when stoch_k in [40,60] (neutral zone).
             # Archive analysis (2026-06-05, n=122,963 ITM NO resolved, offset<0, pm>0.50):
@@ -5576,19 +5540,12 @@ def main() -> None:
                     and dec_c.decision == "trade" and _composite_computed and sigma_tau_c > 0):
                 _z_no = abs(math.log(s_k / spot) / sigma_tau_c)
                 if _z_no < 0.30:
-                    # Rescue: ct<=-3+fund=-1 provides structural edge the z_score alone misses.
-                    # full_opportunity_analysis: ct<=-3+fund=-1 NO WR=88.5% vs 83.0% implied, n=3222.
-                    # [2026-07-06] Restored (reverted the 2026-07-01 removal) per pre-July-1st
-                    # BTC hourly rollback — see paper_trade_runner_pre_july1_rollback_20260706.py.
-                    _zngate_rescue = (_active_trend <= -3 and confirm.funding_bias == -1)
-                    if _zngate_rescue:
-                        print(f"  [btc_no_z_gate] RESCUED NO {c['ticker']} — "
-                              f"ct={_active_trend}<=-3+fund=-1 (bearish trend+funding > z={_z_no:.3f} signal)")
-                        _log_block("btc_no_z_gate__rescue")  # rescue outcome logging (2026-07-01 audit)
-                    else:
-                        print(f"  [btc_no_z_gate] BLOCK NO {c['ticker']} — |z|={_z_no:.3f} < 0.30 (near-ATM, no structural edge)")
-                        _log_block("btc_no_z_gate")
-                        continue
+                    # Rescue ct<=-3+fund=-1 REMOVED 2026-07-01 (audit): rescued trades
+                    # n=10, WR=30% vs BE=50%, -$197 live. Same combo also failed in
+                    # btc_stoch_no_gate (union n=29, -$423). Pure block now.
+                    print(f"  [btc_no_z_gate] BLOCK NO {c['ticker']} — |z|={_z_no:.3f} < 0.30 (near-ATM, no structural edge)")
+                    _log_block("btc_no_z_gate")
+                    continue
                 # [BTC NO OTM vol gate] Mirror of btc_vol_gate for the downside.
                 # Block OTM NO (offset < 0) when required drop exceeds vol regime reach.
                 if offset_c < 0 and _z_no > 2.0 * _vol_factor:
@@ -5601,30 +5558,9 @@ def main() -> None:
                 # SUPPORTS NO bets — overbought BTC pulls back; gate had logic backwards.
                 # blocked_trades (14d): WR=36.4% vs BE=17.7%, PnL=+$13,845 across ALL pm buckets.
 
-            # [2026-05-08] BTC NO SMC demand zone gate: block when bearish 1h SMC AND demand
-            # zone is close below (<1.2% from spot) — structural support likely prevents further drop.
-            # Rescue: allow if supply zone is close above (<1.0%) — price compressed between zones.
-            # Backtest: demand_pct<1.2%, n=11, WR=45.5%, BE=62.4%, PnL=-$188.05.
-            # Rescue supply_pct<1.0%: n=8, WR=75.0%, BE=56%, PnL=+$118.40.
-            # [2026-07-06] Restored (reverted the 2026-07-01 removal) per pre-July-1st
-            # BTC hourly rollback — see paper_trade_runner_pre_july1_rollback_20260706.py.
-            if (args.asset == "BTC" and dec_c.side == "no"
-                    and dec_c.decision == "trade"
-                    and _smc is not None and _smc.bos_1h == "bearish"
-                    and _smc.nearest_demand_pct is not None
-                    and _smc.nearest_demand_pct < 1.2):
-                _smc_no_rescue = (
-                    _smc.nearest_supply_pct is not None and _smc.nearest_supply_pct < 1.0
-                )
-                if _smc_no_rescue:
-                    print(f"  [btc_no_smc_demand_gate] RESCUED NO {c['ticker']} — "
-                          f"demand_pct={_smc.nearest_demand_pct:.2f}%<1.2% but supply_pct={_smc.nearest_supply_pct:.2f}%<1.0% (compressed)")
-                    _log_block("btc_no_smc_demand_gate__rescue")  # rescue outcome logging (2026-07-01 audit)
-                else:
-                    print(f"  [btc_no_smc_demand_gate] BLOCK NO {c['ticker']} — "
-                          f"bearish SMC 1h + demand_pct={_smc.nearest_demand_pct:.2f}%<1.2% (support too close below, no supply rescue)")
-                    _log_block("btc_no_smc_demand_gate")
-                    continue
+            # [btc_no_smc_demand_gate] REMOVED 2026-07-01 (audit): blocked population was
+            # net profitable — n=133, WR=37.6% vs BE=39.2%, +$494 forgone full-window;
+            # blocked 6/6 winners in the live window. Original backtest was n=11.
 
             # [2026-04-28] BTC spread tightness gate with rescue.
             # Sim: trades with spread >= 0.04 → WR deteriorates, P&L=-$242 (49 trades).
@@ -6267,29 +6203,19 @@ def main() -> None:
             #   a bounce inside a downtrend; n=1,152, edge=+13.2%.
             # Archive validation (n=57,249 conflict arm): blocked edge=-0.4%;
             #   rescued (A OR B): n=3,999, edge=+9.0%; still-blocked: n=53,250, edge=-1.1%.
-            # [2026-07-06] Rescues A/B restored (reverted the 2026-07-01 removal) per
-            # pre-July-1st BTC hourly rollback — see
-            # paper_trade_runner_pre_july1_rollback_20260706.py.
+            # Rescues A (fund=-1+vol=-1) and B (ct=-1+fund=-1) REMOVED 2026-07-01 (audit):
+            # rescued trades n=3, WR below breakeven, -$44 live; fund=-1-based rescue
+            # combos failed across every gate they appeared in. Pure block now.
             if (dec_c.decision == "trade" and args.asset == "BTC"
                     and dec_c.side == "no" and not _vsa_no_flip and pm >= 0.30
                     and _comp_p_up is not None
                     and _comp_p_up >= 0.50):
-                _nopup_fund = getattr(confirm, "funding_bias", None)
-                _nopup_vol  = getattr(confirm, "vol_score",    None)
-                _nopup_ct   = _active_trend
-                _rescue_a = (_nopup_fund == -1 and _nopup_vol == -1)
-                _rescue_b = (_nopup_ct   == -1 and _nopup_fund == -1)
-                if _rescue_a or _rescue_b:
-                    _why = ("fund=-1+vol=-1" if _rescue_a else "") + ("ct=-1+fund=-1" if _rescue_b and not _rescue_a else "")
-                    print(f"  [btc_nopup_gate] RESCUED NO {c['ticker']} — "
-                          f"p_up={_comp_p_up:.3f} pm={pm:.3f} ({_why})")
-                    _log_block("btc_nopup_gate__rescue")  # rescue outcome logging (2026-07-01 audit)
-                else:
-                    print(f"  [btc_nopup_gate] BLOCK NO {c['ticker']} — "
-                          f"p_up={_comp_p_up:.3f}>=0.50 (model conflict) pm={pm:.3f} "
-                          f"fund={_nopup_fund} vol={_nopup_vol} ct={_nopup_ct}")
-                    _log_block("btc_nopup_gate")
-                    continue
+                print(f"  [btc_nopup_gate] BLOCK NO {c['ticker']} — "
+                      f"p_up={_comp_p_up:.3f}>=0.50 (model conflict) pm={pm:.3f} "
+                      f"fund={getattr(confirm, 'funding_bias', None)} "
+                      f"vol={getattr(confirm, 'vol_score', None)} ct={_active_trend}")
+                _log_block("btc_nopup_gate")
+                continue
 
             # [eth_kelly_tier] 1.5× Kelly for high-conviction candle+rev signals.
             # YES tier: RED candle + rev>=3 = oversold bounce entry.
@@ -6344,22 +6270,14 @@ def main() -> None:
 
                 if _sm_tis <= _sm_early_max:
                     # Early R1: spike entry. YES always blocked.
-                    # NO rescue: liq cascade (bearish liquidation = tailwind for NO).
-                    # [2026-07-06] Restored (reverted the 2026-07-01 removal) per
-                    # pre-July-1st BTC hourly rollback.
+                    # NO block REMOVED 2026-07-01 (audit): blocked NO population was
+                    # WR=82.1% vs BE=70.4%, +$250 forgone full-window / +$269 live —
+                    # positive in every sub-window. NO now passes early R1.
                     if dec_c.side == "yes":
                         print(f"  [semi_markov_r1_early] BLOCK YES {c['ticker']} — "
                               f"R1 bar {_sm_tis}/{_sm_early_max} macro={_sm_macro}")
                         _log_block("semi_markov_r1_early_yes")
                         continue
-                    if dec_c.side == "no" and not (_sm_liq_s <= -1 and _sm_liq_b < 0.0):
-                        print(f"  [semi_markov_r1_early] BLOCK NO {c['ticker']} — "
-                              f"R1 bar {_sm_tis}/{_sm_early_max} macro={_sm_macro}, "
-                              f"no liq cascade (liq_score={_sm_liq_s} bias={_sm_liq_b:.2f})")
-                        _log_block("semi_markov_r1_early_no")
-                        continue
-                    print(f"  [semi_markov_r1_early] RESCUE NO {c['ticker']} — "
-                          f"liq cascade (liq_score={_sm_liq_s} bias={_sm_liq_b:.2f})")
 
                 elif _sm_tis <= _sm_mid_max:
                     # Mid R1: settling. Block when funding neutral — no directional anchor.
@@ -6369,24 +6287,10 @@ def main() -> None:
                         _log_block("semi_markov_r1_mid_neutral_funding")
                         continue
 
-                else:
-                    # Deep R1: committed episode, hazard below geometric baseline.
-                    # Rescue when rvol decayed below macro-adjusted ceil (HMM overhang).
-                    # Bear ceil is tighter (0.6) — long episodes can have temporary rvol dips.
-                    # NO-side block removed 2026-06-07: n=39 blocked NO had WR=82.1% vs bkev=62.6%
-                    # (+19.4pp edge, +$587 would_pnl) — deep R1 vol premium already priced in by bar 16+.
-                    # YES-only block retained (0 YES fires observed — unvalidated but theoretically sound).
-                    # [2026-07-06] Restored (reverted the 2026-07-01 removal) per
-                    # pre-July-1st BTC hourly rollback.
-                    if _sm_rvol >= _sm_rvol_ceil and dec_c.side == "yes":
-                        print(f"  [semi_markov_r1_deep] BLOCK YES {c['ticker']} — "
-                              f"R1 bar {_sm_tis} macro={_sm_macro}, "
-                              f"rvol={_sm_rvol:.2f}>={_sm_rvol_ceil:.1f}")
-                        _log_block("semi_markov_r1_deep_highrvol")
-                        continue
-                    print(f"  [semi_markov_r1_deep] RESCUE {dec_c.side.upper()} {c['ticker']} — "
-                          f"R1 bar {_sm_tis} macro={_sm_macro}, "
-                          f"rvol={_sm_rvol:.2f}<{_sm_rvol_ceil:.1f} (regime decaying)")
+                # Deep R1 (bar > mid_max): semi_markov_r1_deep_highrvol REMOVED 2026-07-01
+                # (audit): blocked pop WR=76.7% vs BE=60.9%, +$323 forgone; fired only
+                # Jun 3-7 then dead. NO-side arm had already been removed 2026-06-07 for
+                # the same reason (blocking winners). Deep R1 is now a no-op.
 
             # [hmm_mtf_st3_gate] Block BTC NO when HMM MTF State 3 (moderate bullish momentum).
             # State 3: stoch_k_1h≈64, rsi_1h≈57, bp_1h≈0.86, macd_hist_1h≈42 — uptrend/churn.
@@ -6422,24 +6326,13 @@ def main() -> None:
                     and dec_c.side == "no"):
                 _bp1h = _bp_1h_mtf if not math.isnan(_bp_1h_mtf) else 0.5
                 if _bp1h >= 0.55:
-                    # [2026-07-06] Rescue restored (reverted the 2026-07-01 removal) per
-                    # pre-July-1st BTC hourly rollback.
-                    _swing_high_60h = (float(live_1h["high"].iloc[-61:-1].max())
-                                       if live_1h is not None and len(live_1h) >= 61
-                                       else float("inf"))
-                    _strike_above_60h = s_k > _swing_high_60h
-                    if _strike_above_60h and _rsi_1h_mtf <= 35.0:
-                        print(f"  [bp_1h_no_gate] RESCUE NO {c['ticker']} — "
-                              f"bp_1h={_bp1h:.3f}>=0.55 BUT strike={s_k:.2f}>"
-                              f"{_swing_high_60h:.2f} (above 60h high) "
-                              f"AND rsi_1h={_rsi_1h_mtf:.1f}<=35 (oversold bounce, NO wins)")
-                        _log_block("bp_1h_no_gate__rescue")  # rescue outcome logging (2026-07-01 audit)
-                    else:
-                        print(f"  [bp_1h_no_gate] BLOCK NO {c['ticker']} — "
-                              f"bp_1h={_bp1h:.3f}>=0.55, pm={pm:.3f} "
-                              f"(bullish 1h bar, upward momentum against NO)")
-                        _log_block("bp_1h_no_gate")
-                        continue
+                    # Rescue (strike>60h high + rsi<=35) REMOVED 2026-07-01 (audit):
+                    # rescued trades n=8, -$56 live. Pure block now.
+                    print(f"  [bp_1h_no_gate] BLOCK NO {c['ticker']} — "
+                          f"bp_1h={_bp1h:.3f}>=0.55, pm={pm:.3f} "
+                          f"(bullish 1h bar, upward momentum against NO)")
+                    _log_block("bp_1h_no_gate")
+                    continue
 
             # [no_bp1h_chg1h] Block BTC NO (ema=-1) when no real downward momentum:
             # bp_1h>=0.45 (1h bar closed in upper half of range) OR chg_1h>=-0.002% (flat/rising hour).
@@ -6704,6 +6597,10 @@ def main() -> None:
                           f"(squeeze overbought → stall, WR=47.6%)")
                     _log_block("liq_ratio_no_gate__rescue")  # rescue outcome logging (2026-07-01 audit)
 
+            # [boost_stack_cap 2026-07-02 audit] Capture pre-boost Kelly so the cumulative
+            # boost product can be capped at 1.5x after the NO boost chain (see below).
+            _boost_base_frac = dec_c.bet_fraction
+
             # [donch_low_no_boost 2026-06-19] 1.5x Kelly (ceil 7.5%) for NO when price is LOW in its
             # 1h Donchian channel (donch_1h<0.20 = bottom 20% of 20h range → range-bound, NO safe).
             # Archive OOS (BTC+ETH): NO_WR 87-91%, EV +0.07 to +0.10, all-weeks-positive, MCPT p=0.000.
@@ -6832,9 +6729,49 @@ def main() -> None:
                     dec_c.bet_fraction = _spike_boost_frac
                     dec_c.bet_amount   = round(_spike_boost_frac * args.bankroll, 2)
 
-            # [2026-07-06] boost_stack_cap, hour14_no_damp, btc_no_conviction_floor
-            # (all 2026-07-02 audit additions) removed here per pre-July-1st BTC hourly
-            # rollback — see paper_trade_runner_pre_july1_rollback_20260706.py.
+            # [boost_stack_cap 2026-07-02 audit] Cap the cumulative NO boost product at 1.5x.
+            # Live data: single ~1.5x boosts are the best money in the book (n=43, WR 88.4%
+            # vs BE 72.2%, +$898); stacked products >1.5x show no incremental edge
+            # (n=30, WR 66.7%, -$27). BTC only; individual boost ceilings still apply.
+            if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
+                    and dec_c.bet_fraction > _boost_base_frac * 1.5):
+                _cap_frac = _boost_base_frac * 1.5
+                print(f"  [boost_stack_cap] Kelly capped at 1.5x base {c['ticker']} — "
+                      f"stacked {dec_c.bet_fraction/_boost_base_frac:.2f}x → 1.5x "
+                      f"({dec_c.bet_fraction:.4f}→{_cap_frac:.4f})")
+                dec_c.bet_fraction = _cap_frac
+                dec_c.bet_amount   = round(_cap_frac * args.bankroll, 2)
+
+            # [hour14_no_damp 2026-07-02 audit] ×0.5 Kelly for BTC NO on contracts closing
+            # at 14:00 UTC. Taken hour-14 NO: n=28, WR 64.3% vs BE 79.0%, -$309, negative
+            # all 3 live weeks. Independent mechanism: hour-of-day vol audit shows realized
+            # z-std 1.38 (n=220) at UTC 14 → vol under-estimated → NO edges inflated.
+            # Hours 21/22 also vol-under-estimated but taken-PnL flat — monitor, don't damp.
+            if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"):
+                try:
+                    _close_hr_utc = int(str(c.get("close_time", ""))[11:13])
+                except (ValueError, IndexError):
+                    _close_hr_utc = -1
+                if _close_hr_utc == 14:
+                    _h14_frac = dec_c.bet_fraction * 0.5
+                    print(f"  [hour14_no_damp] ×0.5 Kelly NO {c['ticker']} — close hour 14 UTC "
+                          f"(vol under-est z-std=1.38, live -$309 3/3wks; "
+                          f"{dec_c.bet_fraction:.4f}→{_h14_frac:.4f})")
+                    dec_c.bet_fraction = _h14_frac
+                    dec_c.bet_amount   = round(_h14_frac * args.bankroll, 2)
+
+            # [btc_no_conviction_floor 2026-07-02 audit] Skip BTC NO with final conviction
+            # below 1.5% of bankroll (post-boost, post-damp, pre-counter-tape). Bottom
+            # bet_fraction quintile (<0.016) was pure drag: n=80, WR 58.8% vs dollar-weighted
+            # BE 54.3%, -$58 per 2wk — Kelly already flags these as marginal; the floor
+            # converts that into skipping. NO-side only: YES sizes at k_yes=0.05 and lives
+            # in this range by construction (YES last 28d: n=11, WR 90.9%, +$153 — keep).
+            if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
+                    and dec_c.bet_fraction < 0.015):
+                print(f"  [btc_no_conviction_floor] SKIP NO {c['ticker']} — "
+                      f"bet_fraction={dec_c.bet_fraction:.4f}<0.015 (marginal conviction)")
+                _log_block("btc_no_conviction_floor")
+                continue
 
             # [ichi_bear_yes_damp] ×0.5 Kelly for BTC YES when Ichimoku is bearish.
             # Archive (n=102,311): ichi_bear=1 → YES WR=59.8% vs BE=62.4% (gap=-2.6%, z=-29.27).
@@ -6978,20 +6915,15 @@ def main() -> None:
             # before this gate fires (line ~5338) with `continue`. Without this re-check,
             # the fallback places a NO bet whose Kelly was sized by a bearish p_up_v2 even
             # though composite_p_up says BTC is going up (the gate's whole purpose).
-            # [2026-07-06] Rescues A/B restored here too (mirrors main gate) per
-            # pre-July-1st BTC hourly rollback.
+            # Rescues A/B removed here too 2026-07-01 (audit) — mirrors main gate.
             if (best_any_dec.side == "no" and args.asset == "BTC" and not _vsa_no_flip
                     and _comp_p_up is not None and _comp_p_up >= 0.50
                     and best_any_meta.get("p_market", 0) >= 0.30):
-                _fb_fund     = getattr(confirm, "funding_bias", None)
-                _fb_vol      = getattr(confirm, "vol_score",    None)
-                _fb_rescue_a = (_fb_fund == -1 and _fb_vol == -1)
-                _fb_rescue_b = (_active_trend == -1 and _fb_fund == -1)
-                if not (_fb_rescue_a or _fb_rescue_b):
-                    print(f"  [scan] btc_nopup_gate blocked fallback NO "
-                          f"{best_any_meta.get('contract_ticker','?')} — "
-                          f"p_up={_comp_p_up:.3f}>=0.50 fund={_fb_fund} vol={_fb_vol} ct={_active_trend}")
-                    return
+                print(f"  [scan] btc_nopup_gate blocked fallback NO "
+                      f"{best_any_meta.get('contract_ticker','?')} — "
+                      f"p_up={_comp_p_up:.3f}>=0.50 fund={getattr(confirm, 'funding_bias', None)} "
+                      f"vol={getattr(confirm, 'vol_score', None)} ct={_active_trend}")
+                return
             dec             = best_any_dec
             chosen          = best_any_meta
             p_market_source = "real"

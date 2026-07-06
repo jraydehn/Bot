@@ -4952,46 +4952,6 @@ def main() -> None:
                 _log_block("eth_neutral_pm_yes_gate")
                 continue
 
-            # [eth_pup_v1_agreement_gate] CONTRARIAN filter using eth_p_up_v1.
-            # Backfilled 2026-07-06 on 1,014 real ETH trades (Apr-Jul, 12 weeks):
-            #   AGREE (eth_p_up_v1 confirms trade side): n=514, WR=57.4% vs
-            #     BE=65.0%, -$3,782 -- loses badly.
-            #   DISAGREE: n=500, WR=84.4% vs BE=69.3%, +$4,730 -- wins big.
-            #     Comprehensive search (~1,000 tests: every CSV column, GARCH,
-            #     macro regime, MACD, Donchian, all ms/vd/of HMM states) found
-            #     ZERO subsets worth excluding -- kept in full, no rescue logic.
-            # AGREE rescue (comprehensive search, ~1,100 tests): union of 4
-            # largely-independent conditions rescues ~34% of the bucket back to
-            # positive (n=174, WR=70.7% vs BE=65.9%, +$329); the remainder
-            # (n=340) stays a clear loser (-$4,111) and is blocked.
-            #   composite_rev>=6.4 (n=51, WR=60.8%, edge=+10.3pp, 10wks)
-            #   vol_60m_model<0.00023, i.e. bottom decile (n=52, WR=82.7%, 9wks)
-            #   hmm_ms_state==6 (n=67, WR=70.1%, 6wks)
-            #   hmm_vd_state==6 (n=52, WR=82.7%, 8wks)
-            # See reform_results/eth_pup_rebuild_20260706/s7-s9 for the full search.
-            if (args.asset == "ETH" and dec_c.decision == "trade" and _eth_p_up_cycle is not None):
-                _eth_agree = ((_eth_p_up_cycle >= 0.50) if dec_c.side == "yes"
-                             else (_eth_p_up_cycle < 0.50))
-                if _eth_agree:
-                    _eth_rev_rescue = _comp_rev >= 6.4
-                    _eth_vol_rescue = vol.vol_multi < 0.00023
-                    _eth_ms_rescue = _hmm_ms_result is not None and _hmm_ms_result[0] == 6
-                    _eth_vd_rescue = _hmm_vd_result is not None and _hmm_vd_result[0] == 6
-                    if _eth_rev_rescue or _eth_vol_rescue or _eth_ms_rescue or _eth_vd_rescue:
-                        _eth_why = []
-                        if _eth_rev_rescue: _eth_why.append(f"rev={_comp_rev}>=6.4")
-                        if _eth_vol_rescue: _eth_why.append(f"vol_multi={vol.vol_multi:.6f}<0.00023")
-                        if _eth_ms_rescue: _eth_why.append("ms_state==6")
-                        if _eth_vd_rescue: _eth_why.append("vd_state==6")
-                        print(f"  [eth_pup_v1_agreement_gate] RESCUE {dec_c.side.upper()} {c['ticker']} — "
-                              f"p_eth={_eth_p_up_cycle:.3f} agrees BUT {'+'.join(_eth_why)}")
-                        _log_block("eth_pup_v1_agreement_gate__rescue")
-                    else:
-                        print(f"  [eth_pup_v1_agreement_gate] BLOCK {dec_c.side.upper()} {c['ticker']} — "
-                              f"p_eth={_eth_p_up_cycle:.3f} agrees with side (WR=57% vs BE=65% historically)")
-                        _log_block("eth_pup_v1_agreement_gate")
-                        continue
-
             # [eth_no_vwap_stretch2_gate] Block NO when vwap_stretch==2 AND composite_rev<=-1.
             # Refined 2026-06-04: adding rev<=-1 condition (overbought context).
             # Original gate (stretch==2 all) failed perm p=0.996 (WR≈bkev, no signal).

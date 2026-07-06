@@ -208,116 +208,6 @@ def _compute_macro_regime_probs(df_1h: "pd.DataFrame") -> "dict | None":
         return None
 
 
-# ── p_up_v3 regime HMM (BTC only) ────────────────────────────────────────────
-# [2026-07-06] Built on p_up_v3's OWN level/momentum, not price. Markov-chain
-# validation on wf_preds_FINAL.parquet (48,119 honest OOS hours, 2021-2026):
-# p_up_v3 quintile state strongly and stably predicts realized direction
-# (chi2 p=2.5e-96, S1-S5 spread +14pp every single year) AND shows real
-# persistence (diagonal transition prob ~38-40% vs ~20% if iid) -- not noise.
-# 4-state GaussianHMM on (p, 1h-change, 6h-rolling-mean) finds a small
-# (~10%) "crashing" state driven by MOMENTUM not level (its raw p_up_v3
-# level isn't unusually low -- it's characterized by conviction collapsing
-# fast) and a "rising" state (momentum building). States 0+2 both show
-# ~flat momentum and near-50% outcomes -- merged into a single "neutral"
-# label for reporting/gating (see reform_results/pup_v3_15m_window_sweep_20260706/).
-#
-# Backfilled against 2,995 REAL taken BTC hourly trades (combined archive
-# history, Apr-Jul 2026, 8-13 distinct weeks per cell, no cell >55% single-
-# week-driven) -- CONTRARIAN framing, not confirm:
-#   rising + YES:    n=144  WR=35.4% vs BE=56.4%  -$2,234  (loses badly)
-#   rising + NO:     n=185  WR=84.9% vs BE=67.2%  +$2,404  (wins big)
-#   crashing + YES:  n= 64  WR=79.7% vs BE=54.7%  +$1,255  (wins big)
-#   crashing + NO:   n= 69  WR=42.0% vs BE=65.0%  -$1,189  (loses badly)
-# Fade momentum, don't confirm it -- consistent with BTC hourly's edge being
-# OTM/mean-reversion harvesting (bull_rally_no_gate, bear_trend_yes_gate,
-# candlestick_directional all found the same pattern independently).
-#
-# LIVE DECODE: same sequence-decode discipline as the ms/vd/of HMM fix
-# (2026-07-06) -- a single-observation .predict() would be forced toward
-# whatever state the training sequence happened to be in at t=0
-# (startprob_ is one-hot from lengths=[len(X)] training), so this decodes
-# a trailing window of recent hourly p_up_v3 readings instead, taking the
-# LAST state. Warm-started from results/paper_trades.csv on first use per
-# process (mirrors _OF_HMM_HISTORY's pattern), then appended each new hour.
-_PUP_V3_HMM_PKL_PATH = Path(__file__).parent / "reform_results" / "hmm_pup_v3_regime.pkl"
-_PUP_V3_HMM_PAYLOAD: "dict | None" = None
-_PUP_V3_HMM_HISTORY: "deque | None" = None  # deque of (hour_ts, p_up_v3) tuples, maxlen=200
-_PUP_V3_HMM_SEEDED = False
-
-
-def _load_pup_v3_hmm():
-    global _PUP_V3_HMM_PAYLOAD
-    if _PUP_V3_HMM_PAYLOAD is not None:
-        return
-    try:
-        _PUP_V3_HMM_PAYLOAD = _pickle.load(open(_PUP_V3_HMM_PKL_PATH, "rb"))
-    except Exception as _e:
-        print(f"  [pup_v3_hmm] Failed to load: {_e}")
-        _PUP_V3_HMM_PAYLOAD = None
-
-
-_load_pup_v3_hmm()
-
-_PUP_V3_HMM_4TO3 = {0: "neutral", 1: "rising", 2: "neutral", 3: "crashing"}
-
-
-def _pup_v3_hmm_state(p_up_v3_now: float, now_utc: "pd.Timestamp") -> "str | None":
-    """Decode the p_up_v3 regime HMM state ("rising"/"neutral"/"crashing")
-    from a trailing sequence of recent hourly p_up_v3 readings. Returns
-    None during warm-up (fewer than 10 usable feature rows) rather than a
-    misleading single-point read. BTC only."""
-    global _PUP_V3_HMM_HISTORY, _PUP_V3_HMM_SEEDED
-    if _PUP_V3_HMM_PAYLOAD is None or p_up_v3_now is None:
-        return None
-    try:
-        if _PUP_V3_HMM_HISTORY is None:
-            _PUP_V3_HMM_HISTORY = deque(maxlen=200)
-
-        if not _PUP_V3_HMM_SEEDED:
-            _PUP_V3_HMM_SEEDED = True
-            try:
-                _seed_df = pd.read_csv("results/paper_trades.csv",
-                                       usecols=["logged_at", "p_up_v3"], low_memory=False)
-                _seed_df["p_up_v3"] = pd.to_numeric(_seed_df["p_up_v3"], errors="coerce")
-                _seed_df["logged_at"] = pd.to_datetime(_seed_df["logged_at"], utc=True,
-                                                       errors="coerce", format="mixed")
-                _seed_df = _seed_df.dropna(subset=["p_up_v3", "logged_at"])
-                _seed_df["hour_ts"] = _seed_df["logged_at"].dt.floor("h")
-                # one reading per hour (p_up_v3 is cached per-bar and repeats across
-                # scan cycles within the same hour -- keep the last logged value)
-                _hourly = _seed_df.drop_duplicates(subset="hour_ts", keep="last")
-                _hourly = _hourly.sort_values("hour_ts").tail(_PUP_V3_HMM_HISTORY.maxlen)
-                for _, _srow in _hourly.iterrows():
-                    _PUP_V3_HMM_HISTORY.append((_srow["hour_ts"], float(_srow["p_up_v3"])))
-            except Exception:
-                pass  # seed is best-effort; buffer warms up live-only if it fails
-
-        _hour_now = pd.Timestamp(now_utc).floor("h")
-        if _PUP_V3_HMM_HISTORY and _PUP_V3_HMM_HISTORY[-1][0] == _hour_now:
-            _PUP_V3_HMM_HISTORY[-1] = (_hour_now, p_up_v3_now)  # refresh this hour's value
-        else:
-            _PUP_V3_HMM_HISTORY.append((_hour_now, p_up_v3_now))
-
-        hist = list(_PUP_V3_HMM_HISTORY)
-        if len(hist) < 16:  # need 6 for the rolling mean + 10 usable feature rows
-            return None
-
-        hrs = pd.Series([h[1] for h in hist], index=pd.DatetimeIndex([h[0] for h in hist]))
-        feat = pd.DataFrame({
-            "p":        hrs,
-            "p_chg_1h": hrs.diff(),
-            "p_ma6h":   hrs.rolling(6, min_periods=6).mean(),
-        }).dropna()
-        if len(feat) < 10:
-            return None
-
-        X_scaled_seq = _PUP_V3_HMM_PAYLOAD["scaler"].transform(feat.values)
-        states_seq = _PUP_V3_HMM_PAYLOAD["model"].predict(X_scaled_seq)
-        return _PUP_V3_HMM_4TO3[int(states_seq[-1])]
-    except Exception:
-        return None
-
-
 # ── 7-state BTC daily Markov regime ──────────────────────────────────────────
 # More granular than 3-state: Crash_Bear / Correction / Consolidation / Recovery
 #   / Slow_Bull / Bull / Explosive_Bull.  Uses 4 features (adds ret_20d).
@@ -1986,10 +1876,6 @@ def main() -> None:
             _p_up_v3_cycle = None
         if _p_up_v3_cycle is not None:
             print(f"  [p_up_v3] {_p_up_v3_cycle:.3f}  (shadow)")
-    _pup_v3_hmm_state_label = (_pup_v3_hmm_state(_p_up_v3_cycle, now_utc)
-                               if (args.asset == "BTC" and _p_up_v3_cycle is not None) else None)
-    if _pup_v3_hmm_state_label is not None:
-        print(f"  [pup_v3_hmm] state={_pup_v3_hmm_state_label}")
     vol_src = live_1m if live_1m is not None and len(live_1m) >= vol_bars else df_vol.iloc[-200:]
     vol     = compute_realized_volatility(vol_src, asset=args.asset)
 
@@ -4684,37 +4570,6 @@ def main() -> None:
                 _log_block("sw_bull_trend_no_gate")
                 continue
 
-            # [hmm_pup_v3_rising_yes_gate] Block BTC YES when the p_up_v3 regime HMM
-            # shows "rising" (conviction building). CONTRARIAN, not confirm: rising
-            # momentum + YES loses badly on real trades (mean-reversion, same pattern
-            # as bull_rally_no_gate/candlestick_directional). Real taken trades,
-            # combined archive history (Apr-Jul 2026, 8 distinct weeks):
-            #   n=144, WR=35.4% vs BE=56.4%, edge=-20.9pp, -$2,234.
-            # No rescue tested yet -- pure block. See reform_results/
-            # pup_v3_15m_window_sweep_20260706/ for the full backfill.
-            if (args.asset == "BTC"
-                    and dec_c.side == "yes"
-                    and _pup_v3_hmm_state_label == "rising"):
-                print(f"  [hmm_pup_v3_rising_yes_gate] BLOCK YES {c['ticker']} — "
-                      f"pup_v3_hmm=rising (fade momentum, WR=35% vs BE=56% n=144)")
-                _log_block("hmm_pup_v3_rising_yes_gate")
-                continue
-
-            # [hmm_pup_v3_crashing_no_gate] Block BTC NO when the p_up_v3 regime HMM
-            # shows "crashing" (conviction collapsing fast -- not just a low level,
-            # a momentum crash). CONTRARIAN: crashing + NO loses badly on real trades
-            # (the imminent-bounce mirror of the rising/YES finding above). Real taken
-            # trades, combined archive history (Apr-Jul 2026, 10 distinct weeks):
-            #   n=69, WR=42.0% vs BE=65.0%, edge=-23.0pp, -$1,189.
-            # No rescue tested yet -- pure block.
-            if (args.asset == "BTC"
-                    and dec_c.side == "no"
-                    and _pup_v3_hmm_state_label == "crashing"):
-                print(f"  [hmm_pup_v3_crashing_no_gate] BLOCK NO {c['ticker']} — "
-                      f"pup_v3_hmm=crashing (bounce likely, WR=42% vs BE=65% n=69)")
-                _log_block("hmm_pup_v3_crashing_no_gate")
-                continue
-
             # [btc_zdrift_yes_gate] Block BTC YES in Z-Drift HMM St2 + pm_drift<-0.001 + not R1.
             # St2: low-rvol state (centroid rvol=0.245, drift≈0). Negative 5m pm_drift in this
             # state signals genuine model mispricing: WR=32.3% vs BE=35.5%, edge=−3.2%.
@@ -7302,7 +7157,6 @@ def main() -> None:
         "composite_p_up":     round(_comp_p_up, 4),
         "p_up_v2":            round(chosen.get("p_up_v2"), 4) if chosen.get("p_up_v2") is not None else "",
         "p_up_v3":            round(_p_up_v3_cycle, 4) if _p_up_v3_cycle is not None else "",
-        "pup_v3_hmm_state":   _pup_v3_hmm_state_label if _pup_v3_hmm_state_label is not None else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

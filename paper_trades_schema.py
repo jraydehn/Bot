@@ -189,4 +189,9 @@ CSV_COLUMNS = [
     # Market-level score, one value per cycle, BTC only. NO decision path may
     # read this column until shadow data confirms the replay (approved step).
     "p_up_v3",       # BTC honest v3 hour-level p_up [SHADOW — keep at end for header order]
+    # 2026-07-06: regime HMM built on p_up_v3's own level/momentum/6h-trend.
+    # Backfilled against 2,995 real taken BTC hourly trades (Apr-Jul, 8-13
+    # distinct weeks per state): rising+YES loses (-$2,234), rising+NO wins
+    # (+$2,404), crashing+YES wins (+$1,255), crashing+NO loses (-$1,189).
+    "pup_v3_hmm_state",  # "rising"/"neutral"/"crashing", BTC only
 ]

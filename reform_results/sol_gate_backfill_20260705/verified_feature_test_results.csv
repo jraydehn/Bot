@@ -1,0 +1,23 @@
+feature,group,n,wr,be,edge,pnl
+garch_ratio,A_gt_median(1.0046),18,38.9,67.1,-28.2,-407.4
+garch_ratio,B_complement,18,50.0,70.3,-20.3,-557.0
+garch_persist,A_gt_median(0.880),18,44.4,70.9,-26.5,-633.7
+garch_persist,B_complement,18,44.4,66.4,-22.0,-330.7
+arima_forecast_1h,A_gt_0,13,53.8,66.3,-12.5,-139.2
+arima_forecast_1h,B_complement,23,39.1,70.0,-30.9,-825.2
+arima_forecast_1h,A_gt_median,18,61.1,66.7,-5.6,-112.3
+arima_forecast_1h,B_complement,18,27.8,70.6,-42.9,-852.1
+kc_pct_1h,A_gt_median(0.808),18,27.8,68.7,-40.9,-703.5
+kc_pct_1h,B_complement,18,61.1,68.6,-7.5,-260.8
+kc_pct_1h,A_gt_1.0(above_upper_band),12,33.3,68.6,-35.3,-431.5
+kc_pct_1h,B_complement,24,50.0,68.7,-18.7,-532.9
+kc_bo_1h,A_eq_1(breakout),12,33.3,68.6,-35.3,-431.5
+kc_bo_1h,B_complement,24,50.0,68.7,-18.7,-532.9
+kalman_velocity_ms,"A_gt_0 [BONUS,new]",22,18.2,70.6,-52.4,-1133.5
+kalman_velocity_ms,B_complement,14,85.7,65.7,20.0,169.1
+ema_trend_vd,"A_gt_median [BONUS,new]",18,44.4,66.8,-22.3,-396.8
+ema_trend_vd,B_complement,18,44.4,70.6,-26.1,-567.6
+hmm_ms_state,A_all_state_0(degenerate),36,44.4,68.7,-24.2,-964.4
+hmm_ms_state,B_complement,0,,,,0.0
+hmm_vd_state,A_all_state_6(degenerate),36,44.4,68.7,-24.2,-964.4
+hmm_vd_state,B_complement,0,,,,0.0

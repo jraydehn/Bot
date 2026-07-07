@@ -1,0 +1,16 @@
+usable scanned rows: 143441  (2026-05-21 04:55:36+00:00 -> 2026-07-07 18:52:18+00:00)
+rows with sol_p_up_v1 coverage: 127577/143441
+SOL k_drift (unchanged in both arms): 0.2
+
+=== AGGREGATE: OLD (current lookup_p_up) vs NEW (sol_p_up_v1) ===
+old  : n=24796  WR=0.678  BE=0.639  edge=+0.039  PnL(flat $50/bet)=$ -9155.42  weeks=6  pos_weeks=0.33
+new  : n=24769  WR=0.676  BE=0.640  edge=+0.036  PnL(flat $50/bet)=$-33469.25  weeks=6  pos_weeks=0.33
+
+traded by BOTH: 23172   ONLY old: 1624   ONLY new: 1597
+  only-OLD trades (would be REMOVED by swap): WR=0.425 BE=0.413 PnL=$3014.09
+  only-NEW trades (would be ADDED by swap):    WR=0.388 BE=0.419 PnL=$-21299.74
+  BOTH-trades: same side chosen 100.0% of the time
+old: trade-level edge bootstrap mean=+0.0386 CI=[+0.0355,+0.0418] P(edge<=0)=0.0000
+new: trade-level edge bootstrap mean=+0.0359 CI=[+0.0328,+0.0388] P(edge<=0)=0.0000
+
+saved reform_results/sol_pup_rebuild_20260706/sim_pup_swap_full.csv

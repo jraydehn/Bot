@@ -5047,36 +5047,6 @@ def main() -> None:
                         _log_block("sol_pup_v1_agreement_gate")
                         continue
 
-            # [sol_contrarian_ls_gate] Block SOL trades where the chosen side disagrees
-            # with the market's own lean (contrarian: YES when pm<0.5, or NO when pm>0.5)
-            # UNLESS crowd long/short positioning corroborates (ls_long_pct>=71.65).
-            # Backtested 2026-07-07 on 24,796 real scanned+simulated SOL trades (6.5wks):
-            #   AGREE (kept always): n=16,553, WR=95.3% BE=88.3% edge=+6.9pp +$65,828 -- P(edge<=0)=0.0000
-            #   CONTRARIAN + ls_long_pct>=71.65 (rescued): n=4,113, WR=17.3% BE=15.3%
-            #     edge=+2.0pp +$47,695 -- P(edge<=0)=0.0010, 4/6 weeks positive
-            #   CONTRARIAN + ls_long_pct<71.65 (blocked): n=4,104, WR=8.0% BE=14.6%
-            #     edge=-6.5pp -$121,792 -- P(edge<=0)=1.0000, 0/4 weeks positive (holds even
-            #     during the 06-27->07-03 collapse week: rescued -$3,826 vs blocked -$98,890
-            #     in the SAME week/market conditions -- not a calendar artifact).
-            # Net: gate = +$113,523 vs -$9,155 (no gate) vs +$65,828 (pure contrarian block) --
-            # beats even a full block. Vol-regime conditioning was tested and did NOT separate
-            # winners from losers within the contrarian bucket; ls_long_pct does.
-            # See reform_results/sol_pup_rebuild_20260706/s11-s12 for the full investigation.
-            if args.asset == "SOL" and dec_c.decision == "trade":
-                _sol_contrarian = ((dec_c.side == "yes" and dec_c.p_market < 0.5)
-                                   or (dec_c.side == "no" and dec_c.p_market > 0.5))
-                if _sol_contrarian:
-                    _sol_ls = _liq_signal.ls_long_pct if _liq_signal is not None else float("nan")
-                    _sol_ls_ok = (not math.isnan(_sol_ls)) and _sol_ls >= 71.65
-                    if not _sol_ls_ok:
-                        print(f"  [sol_contrarian_ls_gate] BLOCK {dec_c.side.upper()} {c['ticker']} — "
-                              f"contrarian (pm={dec_c.p_market:.3f}) + ls_long_pct={_sol_ls:.1f}<71.65")
-                        _log_block("sol_contrarian_ls_gate")
-                        continue
-                    else:
-                        print(f"  [sol_contrarian_ls_gate] PASS {dec_c.side.upper()} {c['ticker']} — "
-                              f"contrarian (pm={dec_c.p_market:.3f}) BUT ls_long_pct={_sol_ls:.1f}>=71.65")
-
             # [eth_no_vwap_stretch2_gate] Block NO when vwap_stretch==2 AND composite_rev<=-1.
             # Refined 2026-06-04: adding rev<=-1 condition (overbought context).
             # Original gate (stretch==2 all) failed perm p=0.996 (WR≈bkev, no signal).

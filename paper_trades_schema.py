@@ -198,4 +198,8 @@ CSV_COLUMNS = [
     # Asset-specific feature set (A16+C13), NOT BTC's shape. NO decision path
     # reads this pending the same real-trade backfill validation BTC's v3 got.
     "eth_p_up_v1",
+    # 2026-07-06: honest SOL p_up rebuild (sol_p_up_v1_model.py). Asset-specific
+    # feature set (A16 ONLY -- neither BTC's nor ETH's shape). Backfilled +
+    # gated same day (sol_pup_v1_agreement_gate).
+    "sol_p_up_v1",
 ]

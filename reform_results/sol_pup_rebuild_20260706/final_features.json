@@ -1,0 +1,18 @@
+[
+ "stoch_k_4h",
+ "ema50_dist",
+ "rsi_4h",
+ "rsi_14",
+ "macd_hist_1h",
+ "stoch_k",
+ "vwap_distance_pct",
+ "chg_4h_atr",
+ "bb_pct",
+ "composite_trend",
+ "composite_rev",
+ "composite_p_up",
+ "ema_stack_bias",
+ "ema_stretch_score",
+ "vwap_stretch_score",
+ "rvol_1h"
+]

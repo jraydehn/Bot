@@ -2008,22 +2008,6 @@ def main() -> None:
         if _eth_p_up_cycle is not None:
             print(f"  [eth_p_up_v1] {_eth_p_up_cycle:.3f}  (shadow)")
 
-    # ── sol_p_up_v1 (honest SOL rebuild, 2026-07-06) — SHADOW ONLY ──────────
-    # Asset-specific model: ONLY group A (16 core SOL technicals) -- unlike
-    # BOTH BTC's A+B+M+Cs and ETH's A+C, none of cross-asset/alt-coin/regime/
-    # microstructure cleared significance for SOL. No cross-asset fetch
-    # needed at all. Backfilled + gated same day (see gate below).
-    _sol_p_up_cycle = None
-    if args.asset == "SOL":
-        try:
-            import sol_p_up_v1_model as _solv1mod
-            _sol_p_up_cycle = _solv1mod.compute_sol_p_up(df_1h=live_1h)
-        except Exception as _solv1_e:
-            print(f"  [sol_p_up_v1] compute failed: {type(_solv1_e).__name__}: {_solv1_e}")
-            _sol_p_up_cycle = None
-        if _sol_p_up_cycle is not None:
-            print(f"  [sol_p_up_v1] {_sol_p_up_cycle:.3f}  (shadow)")
-
     vol_src = live_1m if live_1m is not None and len(live_1m) >= vol_bars else df_vol.iloc[-200:]
     vol     = compute_realized_volatility(vol_src, asset=args.asset)
 
@@ -5008,45 +4992,6 @@ def main() -> None:
                         _log_block("eth_pup_v1_agreement_gate")
                         continue
 
-            # [sol_pup_v1_agreement_gate] CONTRARIAN filter using sol_p_up_v1.
-            # Backfilled 2026-07-06 on 762 real SOL trades (Apr-Jul, 13 weeks):
-            #   AGREE (sol_p_up_v1 confirms trade side): n=362, WR=65.7% vs
-            #     BE=69.3%, edge=-3.5pp, +$668.60 -- weak/fragile base signal
-            #     (trade-level P(edge<=0)=0.93, only 38% of weeks positive),
-            #     unlike BTC/ETH's much more robust version of this pattern.
-            #   DISAGREE: n=400, WR=83.8% vs BE=63.1%, +$7,206.37 -- robust
-            #     winner (P(edge<=0)=0.0000, 92% weeks positive). Comprehensive
-            #     search (~1,130 tests across every CSV column + reconstructed
-            #     GARCH/macro/MACD/Donchian/Keltner/Kalman/ARIMA/ms-vd-of-HMM)
-            #     found only 1/1,023 negative split (thin n=15, noise) --
-            #     kept in full, no rescue logic.
-            # AGREE rescue (comprehensive search, ~1,122 tests): unlike ETH's
-            # marginal rescue, this one is genuinely ROBUST -- a single clean
-            # split, not a union of weak conditions.
-            #   kalman_residual_recon<0 (n=178, WR=78.1%, edge=+8.3pp,
-            #     PnL=+$2,750, trade-level P(edge<=0)=0.0034, week-level
-            #     P(pnl<=0)=0.0002, 77% weeks positive, CI [+0.026,+0.138])
-            #   remainder stays blocked (n=184, WR=53.8%, edge=-15.0pp,
-            #     PnL=-$2,081, P(edge<=0)=1.0000, only 23% weeks positive).
-            # kalman_residual is the SAME variable already computed generically
-            # per-asset in the "Stochastic shadow signals" block above (_kalman_resid) --
-            # no new live computation needed. See reform_results/sol_pup_rebuild_20260706/
-            # s7-s9 for the full search.
-            if (args.asset == "SOL" and dec_c.decision == "trade" and _sol_p_up_cycle is not None):
-                _sol_agree = ((_sol_p_up_cycle >= 0.50) if dec_c.side == "yes"
-                             else (_sol_p_up_cycle < 0.50))
-                if _sol_agree:
-                    _sol_kalman_rescue = (not math.isnan(_kalman_resid)) and _kalman_resid < 0
-                    if _sol_kalman_rescue:
-                        print(f"  [sol_pup_v1_agreement_gate] RESCUE {dec_c.side.upper()} {c['ticker']} — "
-                              f"p_sol={_sol_p_up_cycle:.3f} agrees BUT kalman_resid={_kalman_resid:+.5f}<0")
-                        _log_block("sol_pup_v1_agreement_gate__rescue")
-                    else:
-                        print(f"  [sol_pup_v1_agreement_gate] BLOCK {dec_c.side.upper()} {c['ticker']} — "
-                              f"p_sol={_sol_p_up_cycle:.3f} agrees with side (WR=66% vs BE=69% historically)")
-                        _log_block("sol_pup_v1_agreement_gate")
-                        continue
-
             # [eth_no_vwap_stretch2_gate] Block NO when vwap_stretch==2 AND composite_rev<=-1.
             # Refined 2026-06-04: adding rev<=-1 condition (overbought context).
             # Original gate (stretch==2 all) failed perm p=0.996 (WR≈bkev, no signal).
@@ -7417,7 +7362,6 @@ def main() -> None:
         "p_up_v3":            round(_p_up_v3_cycle, 4) if _p_up_v3_cycle is not None else "",
         "pup_v3_hmm_state":   _pup_v3_hmm_state_label if _pup_v3_hmm_state_label is not None else "",
         "eth_p_up_v1":        round(_eth_p_up_cycle, 4) if _eth_p_up_cycle is not None else "",
-        "sol_p_up_v1":        round(_sol_p_up_cycle, 4) if _sol_p_up_cycle is not None else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

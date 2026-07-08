@@ -58,6 +58,21 @@ is what triggered the creation of this skill. Never let "N total columns
 swept" imply "N total columns meaningfully tested."
 
 ### Phase 3 — Reconstruct anything missing or thin, don't skip it
+
+**ZERO-LOOKAHEAD RULE (added 2026-07-08 after it invalidated three deployed
+gates in one day):** any reconstructed signal or regime-state join MUST use
+only bars whose CLOSE time is <= the trade's decision timestamp. The lazy
+pattern `idx = index.searchsorted(ts, "right") - 1` selects the bar
+CONTAINING ts — complete in a historical parquet (includes up to a full bar
+of future data) but partial in live reality. For a 15m contract, a signal
+computed on the completed containing bar essentially IS the outcome (a
+"rescue" found this way showed 100% WR / P=0.000 and collapsed to -26pp
+when computed honestly). Correct pattern:
+`cutoff = ts - bar_duration; idx = index.searchsorted(cutoff, "right") - 1`.
+Same rule for regime-state series indexed by bar OPEN time: the state is
+only knowable at open + bar_duration; join on that effective time, never on
+the open. A 100%-WR or P=0.000 rescue on a small n is a lookahead alarm,
+not a discovery — re-derive it zero-lookahead before believing it.
 Two known root causes for thin/missing coverage in this project, both fixable:
 1. **The signal was never logged as a CSV column at all** (GARCH, macro
    regime Bull/Sideways/Bear, MACD, Donchian have all hit this). Fix: recompute

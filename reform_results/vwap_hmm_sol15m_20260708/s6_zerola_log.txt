@@ -1,0 +1,12 @@
+rows with zero-lookahead state: 9061
+
+── ZERO-LOOKAHEAD state cells (deployed gate states) ──
+State1 YES (deployed block): n=280 WR=0.207 BE=0.219 edge=-0.012 P(<=0)=0.712 wks+=2/8
+State5 NO (deployed block): n=295 WR=0.210 BE=0.246 edge=-0.035 P(<=0)=0.937 wks+=3/7
+
+computing clean kalman for the two buckets...
+State1 YES RESCUED (kv clean >=0.00016): n=137 WR=0.248 BE=0.237 edge=+0.011 P(<=0)=0.384 wks+=4/8
+State1 YES BLOCKED after rescue: n=143 WR=0.168 BE=0.203 edge=-0.035 P(<=0)=0.878 wks+=2/8
+State5 NO RESCUED (kv clean <-0.001): n=106 WR=0.170 BE=0.267 edge=-0.097 P(<=0)=0.998 wks+=2/7
+State5 NO BLOCKED after rescue: n=189 WR=0.233 BE=0.234 edge=-0.001 P(<=0)=0.525 wks+=4/7
+DONE

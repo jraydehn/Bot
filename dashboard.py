@@ -25,10 +25,13 @@ DISPLAY_FROM    = "2026-05-16 06:56:42"   # hide trades before this UTC time (da
 ASSET_DISPLAY_FROM = {
     "BTC": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 300)
     "ETH": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 240)
-    "SOL": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 240)
+    "SOL": "2026-07-07 20:13:00",  # cleared 2026-07-07 — sol_contrarian_ls_gate live, restart
 }
 ASSET_DISPLAY_FROM_15M = {
     "BTC": "2026-06-29 23:31:53",  # cleared 2026-06-29 — 5m stoch zone gates live
+    "SOL": "2026-06-18 06:18:28",  # unaffected by the 07-07 hourly-only clear — restores prior cutoff
+                                    # (15m falls back to ASSET_DISPLAY_FROM when absent here, which
+                                    # would otherwise incorrectly inherit the hourly-only 07-07 clear)
 }
 
 # Supplement paper_trades with live_trades for gap periods when paper logging was broken.

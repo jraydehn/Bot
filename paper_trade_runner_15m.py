@@ -2465,31 +2465,19 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # Deployed live per explicit user decision overriding the standing
         # paper-first rule, given backtest strength -- flagged in memory.
         # Backup: paper_trade_runner_15m_pre_sol_vwap_hmm_20260708.py
-        if asset.upper() == "SOL" and _vwap_state is not None:
+        # [2026-07-08 SAME-DAY DEMOTION TO SHADOW] The validation behind these gates had
+        # a containing-bar lookahead in BOTH the state join (trades matched to the 15m
+        # bar containing them) AND the kalman_velocity_15m rescue (computed with the
+        # completed containing bar; live sees a partial bar). Zero-lookahead re-join:
+        # State1 YES edge -1.2pp P=0.712 (n.s., was "-5.5pp"); State5 NO edge -3.5pp
+        # P=0.937 (was "-5.3pp"); and the State5 rescue is INVERTED honest — kv<-0.001
+        # selects -9.7pp/P=0.998 losers while the blocked remainder is -0.1pp neutral.
+        # Gates now SHADOW-ONLY: log would-block/would-rescue, never skip.
+        if asset.upper() == "SOL" and _vwap_state is not None and _vwap_state in (1, 5):
             _sol_kv15 = sig.get("kalman_velocity_15m")
-            _sol_kv15_ok = isinstance(_sol_kv15, (int, float)) and _sol_kv15 == _sol_kv15
-            if best_side == "yes" and _vwap_state == 1:
-                if _sol_kv15_ok and _sol_kv15 >= 0.00016:
-                    print(f"    [sol_15m_vwap_hmm_gate] RESCUE YES {ticker} — "
-                          f"vwap_hmm_state=1 but kalman_velocity_15m={_sol_kv15:+.5f}>=0.00016")
-                else:
-                    print(f"    [sol_15m_vwap_hmm_gate] BLOCK YES {ticker} — "
-                          f"vwap_hmm_state=1 (WR=13.2% vs BE=18.7%), "
-                          f"kalman_velocity_15m={_sol_kv15}"
-                          + ("<0.00016" if _sol_kv15_ok else " (n/a)"))
-                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                    continue
-            elif best_side == "no" and _vwap_state == 5:
-                if _sol_kv15_ok and _sol_kv15 < -0.001:
-                    print(f"    [sol_15m_vwap_hmm_gate] RESCUE NO {ticker} — "
-                          f"vwap_hmm_state=5 but kalman_velocity_15m={_sol_kv15:+.5f}<-0.001")
-                else:
-                    print(f"    [sol_15m_vwap_hmm_gate] BLOCK NO {ticker} — "
-                          f"vwap_hmm_state=5 (WR=16.9% vs BE=22.1%), "
-                          f"kalman_velocity_15m={_sol_kv15}"
-                          + (">=-0.001" if _sol_kv15_ok else " (n/a)"))
-                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                    continue
+            if (best_side == "yes" and _vwap_state == 1) or (best_side == "no" and _vwap_state == 5):
+                print(f"    [sol_15m_vwap_hmm_gate] SHADOW would-block {best_side.upper()} {ticker} — "
+                      f"vwap_hmm_state={_vwap_state} kalman_velocity_15m={_sol_kv15}")
 
         # [eth_no_consec_gate — 15m ETH NO]
         # Block NO when in a sustained bearish streak AND stochastic is already oversold.

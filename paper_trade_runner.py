@@ -6813,21 +6813,20 @@ def main() -> None:
             # live cg_futures_ratio gate — additive, not redundant. Caveats: 3-week window,
             # one era; CG API has a rolling ~6mo window. Fail-open: no state -> no gate.
             # Deployed live-dual per explicit user decision; reevaluate ~2 wks (see memory).
+            # [2026-07-08 SAME-DAY DEMOTION TO SHADOW] The validation behind this gate had a
+            # containing-bar lookahead: trades were joined to the CG bar CONTAINING them
+            # (whose flow extends past the trade time) while the live decoder only sees
+            # completed bars. Zero-lookahead re-join: buy-flow NO flips to +4.1pp/+$196
+            # (was "-20.5pp"), gate bucket -$310 (was "-$2,490"). Only neutral(1) survives
+            # honestly (-14.3pp, P=0.992, 0/4 wks) but n=61 — needs a clean re-validation
+            # before any enforcement. Gate now SHADOW-ONLY: logs would-block, never skips.
             if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
                     and _cg_flow_state is not None and _cg_flow_state in (1, 2, 5)):
                 _cgf_names = {1: "neutral", 2: "buy-flow", 5: "short-squeeze"}
-                if _kc_pct_1h_done == _kc_pct_1h_done and _kc_pct_1h_done < 0.426:
-                    print(f"  [btc_cg_flow_no_gate] RESCUE NO {c['ticker']} — "
-                          f"cg_state={_cgf_names[_cg_flow_state]} BUT kc_done={_kc_pct_1h_done:.3f}<0.426 "
-                          f"(price pinned low despite buy flow; WR=89.1% historically)")
-                    _log_block("btc_cg_flow_no_gate__rescue")
-                else:
-                    print(f"  [btc_cg_flow_no_gate] BLOCK NO {c['ticker']} — "
-                          f"cg_state={_cgf_names[_cg_flow_state]} kc_done="
-                          f"{_kc_pct_1h_done if _kc_pct_1h_done == _kc_pct_1h_done else 'n/a'} "
-                          f"(buy-side flow regime, NO WR=33.6% vs BE=73.3%)")
-                    _log_block("btc_cg_flow_no_gate")
-                    continue
+                print(f"  [btc_cg_flow_no_gate] SHADOW would-block NO {c['ticker']} — "
+                      f"cg_state={_cgf_names[_cg_flow_state]} kc_done="
+                      f"{_kc_pct_1h_done if _kc_pct_1h_done == _kc_pct_1h_done else 'n/a'}")
+                _log_block("btc_cg_flow_no_gate__shadow")
 
             # [eth_kelly_tier] 1.5× Kelly for high-conviction candle+rev signals.
             # YES tier: RED candle + rev>=3 = oversold bounce entry.

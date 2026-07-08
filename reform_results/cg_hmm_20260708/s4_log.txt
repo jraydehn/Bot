@@ -1,0 +1,37 @@
+bucket: n=153  WR=0.503  BE=0.738  PnL=$-2489.50
+reconstructing missing signals for the bucket...
+  garch_ratio_recon: 153/153
+  macro_bull_recon: 153/153
+  macro_sideways_recon: 153/153
+  macro_bear_recon: 153/153
+  donch_1h_recon: 153/153
+  kc_pct_1h_recon: 153/153
+  kalman_velocity_recon: 153/153
+  kalman_residual_recon: 153/153
+  hmm_ms_state_recon: 153/153
+  hmm_vd_state_recon: 153/153
+
+159 candidate cols; 24 skipped <15 non-null; 1753 splits tested
+skipped: ['cmf_raw', 'ema_alignment', 'smc_4h', 'smc_1h', 'stoch_flipped', 'markov_regime_daily', 'markov_regime_7state', 'hs_pattern_type', 'hs_bars_since_break', 'hs_r2', 'hs_neck_slope', 'hs_head_height', 'hs_head_width', 'flag_signal', 'flag_bull_bars_ago', 'flag_bear_bars_ago', 'flag_bull_tip_y', 'flag_bear_tip_y', 'flag_bull_pole_pct', 'flag_bear_pole_pct', 'hawk_vol_regime', 'hmm_zdrift_state', 'eth_p_up_v1', 'sol_p_up_v1']
+
+positive-edge splits (n>=15): 9
+              feature             split  n    wr    be  edge    pnl
+kalman_residual_recon <-0.0008392(q0.2) 26 0.962 0.759 0.203 369.68
+kalman_residual_recon <-0.0008392(q0.3) 26 0.962 0.759 0.203 369.68
+kalman_residual_recon  <-0.001222(q0.1) 16 0.938 0.766 0.171 200.26
+      kc_pct_1h_recon     <0.4259(q0.3) 46 0.891 0.748 0.143 541.44
+      kc_pct_1h_recon     <0.3303(q0.2) 31 0.871 0.740 0.131 337.47
+      kc_pct_1h_recon     <0.2685(q0.1) 15 0.800 0.709 0.091 101.80
+      kc_pct_1h_recon     <0.5348(q0.4) 59 0.814 0.744 0.070 435.94
+      ob_ask_wall_pct   <0.001442(q0.1) 16 0.812 0.764 0.048 123.98
+       donch_1h_recon     <0.3527(q0.3) 46 0.739 0.734 0.005 101.16
+
+bootstrap on top candidates:
+  kalman_residual_recon <-0.0008392(q0.2): n=56 edge=-0.0691 CI=[-0.1877,+0.0389] P(<=0)=0.8830
+  kalman_residual_recon <-0.0008392(q0.3): n=56 edge=-0.0700 CI=[-0.1866,+0.0411] P(<=0)=0.8848
+  kalman_residual_recon <-0.001222(q0.1): n=16 edge=+0.1697 CI=[+0.0219,+0.2650] P(<=0)=0.0180
+  kc_pct_1h_recon <0.4259(q0.3): n=46 edge=+0.1417 CI=[+0.0580,+0.2122] P(<=0)=0.0005
+  kc_pct_1h_recon <0.3303(q0.2): n=31 edge=+0.1321 CI=[+0.0310,+0.2187] P(<=0)=0.0063
+  kc_pct_1h_recon <0.2685(q0.1): n=18 edge=+0.1045 CI=[-0.0550,+0.2350] P(<=0)=0.0875
+
+saved bucket_reconstructed.csv

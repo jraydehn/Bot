@@ -1378,100 +1378,6 @@ def _get_garch_cond_ve(df_1h: pd.DataFrame) -> float:
     return float(cve) if cve is not None else float("nan")
 
 
-# ── CoinGlass flow-regime HMM (BTC hourly) — built + validated 2026-07-08 ──
-# 7-state GaussianHMM over CG derivatives-flow features the model can't see
-# (futures/spot taker ratios, 12h CVD, OI change, liquidation imbalance/z).
-# Orthogonality vs the existing 13 HMMs verified (RF from existing signals
-# predicts this state at chance). Drives btc_cg_flow_no_gate below.
-# Model: models/hmm_cg_flow_btc_1h.pkl  Research: reform_results/cg_hmm_20260708/
-_CG_FLOW_HMM_PKL = Path(__file__).parent / "models" / "hmm_cg_flow_btc_1h.pkl"
-_CG_FLOW_PKG: "dict | None | str" = "unloaded"
-_CG_FLOW_CACHE: dict = {"hour": None, "state": None}
-_CG_API_KEY = "8f0a30c29a5e424ba2641f649051786b"
-_CG_BASE = "https://open-api-v4.coinglass.com/api"
-
-
-def _cg_fetch_1h(path: str, params: dict, rename: dict, start_ms: int) -> "pd.DataFrame | None":
-    """One-shot CoinGlass v4 history fetch (<=2000 bars). Drops partial last bar."""
-    import requests as _rq
-    try:
-        p = dict(params, start_time=start_ms, end_time=int(time.time() * 1000), limit=2000)
-        r = _rq.get(f"{_CG_BASE}/{path}", headers={"CG-API-KEY": _CG_API_KEY}, params=p, timeout=15)
-        j = r.json()
-        if j.get("code") != "0" or not j.get("data"):
-            return None
-        df = pd.DataFrame(j["data"])
-        df.index = pd.to_datetime(df.pop("time"), unit="ms", utc=True)
-        df = df[~df.index.duplicated(keep="first")].sort_index()
-        df = df.rename(columns=rename)[list(rename.values())].astype(float)
-        return df.iloc[:-1]
-    except Exception:
-        return None
-
-
-def _get_cg_flow_state(now_utc) -> "int | None":
-    """Decode current CG flow-regime state (0-6). Hourly-cached; None on any failure
-    (fail-open — gate simply doesn't fire). Fetches ~262h of history per refresh so
-    liq_tot_z_10d (240h window) is computable; sequence-decodes and takes last state."""
-    global _CG_FLOW_PKG
-    _hr = now_utc.replace(minute=0, second=0, microsecond=0)
-    if _CG_FLOW_CACHE["hour"] == _hr:
-        return _CG_FLOW_CACHE["state"]
-    if _CG_FLOW_PKG == "unloaded":
-        try:
-            with open(_CG_FLOW_HMM_PKL, "rb") as _f:
-                _CG_FLOW_PKG = _pickle.load(_f)
-            print(f"  [cg_flow_hmm] Loaded {_CG_FLOW_HMM_PKL.name} ({_CG_FLOW_PKG['n_states']} states)")
-        except Exception as _e:
-            print(f"  [cg_flow_hmm] load failed: {_e}")
-            _CG_FLOW_PKG = None
-    if _CG_FLOW_PKG is None:
-        return None
-    try:
-        start_ms = int(time.time() * 1000) - 262 * 3_600_000
-        fut = _cg_fetch_1h("futures/aggregated-taker-buy-sell-volume/history",
-                           {"symbol": "BTC", "interval": "1h", "exchange_list": "Binance,OKX,Bybit"},
-                           {"aggregated_buy_volume_usd": "fut_buy_usd",
-                            "aggregated_sell_volume_usd": "fut_sell_usd"}, start_ms)
-        spot_df = _cg_fetch_1h("spot/aggregated-taker-buy-sell-volume/history",
-                               {"symbol": "BTC", "interval": "1h", "exchange_list": "Binance,OKX,Coinbase"},
-                               {"aggregated_buy_volume_usd": "spot_buy_usd",
-                                "aggregated_sell_volume_usd": "spot_sell_usd"}, start_ms)
-        oi_df = _cg_fetch_1h("futures/open-interest/aggregated-history",
-                             {"symbol": "BTC", "interval": "1h"}, {"close": "oi_close"}, start_ms)
-        liq = _cg_fetch_1h("futures/liquidation/aggregated-history",
-                           {"symbol": "BTC", "interval": "1h", "exchange_list": "Binance,OKX,Bybit"},
-                           {"aggregated_long_liquidation_usd": "liq_long_usd",
-                            "aggregated_short_liquidation_usd": "liq_short_usd"}, start_ms)
-        if any(x is None or len(x) < 245 for x in (fut, spot_df, oi_df, liq)):
-            _CG_FLOW_CACHE.update(hour=_hr, state=None)
-            return None
-        cg = pd.concat([fut, spot_df, oi_df, liq], axis=1).sort_index().dropna()
-        fb, fs = cg["fut_buy_usd"], cg["fut_sell_usd"]
-        sb, ss = cg["spot_buy_usd"], cg["spot_sell_usd"]
-        feat = pd.DataFrame(index=cg.index)
-        feat["fut_ratio_1h"]  = fb / (fb + fs).replace(0, float("nan"))
-        feat["fut_cvd_12h"]   = (fb - fs).rolling(12).sum() / (fb + fs).rolling(12).sum().replace(0, float("nan"))
-        feat["spot_ratio_1h"] = sb / (sb + ss).replace(0, float("nan"))
-        feat["oi_chg_4h"]     = cg["oi_close"].pct_change(4, fill_method=None)
-        _ll, _ls = cg["liq_long_usd"], cg["liq_short_usd"]
-        feat["liq_imb_4h"]    = (_ls.rolling(4).sum() - _ll.rolling(4).sum()) / (_ls.rolling(4).sum() + _ll.rolling(4).sum() + 1.0)
-        _lt = _ll + _ls
-        feat["liq_tot_z_10d"] = (_lt - _lt.rolling(240).mean()) / _lt.rolling(240).std().replace(0, float("nan"))
-        feat = feat.dropna()
-        if len(feat) < 5:
-            _CG_FLOW_CACHE.update(hour=_hr, state=None)
-            return None
-        X = _CG_FLOW_PKG["scaler"].transform(feat[_CG_FLOW_PKG["feat_cols"]].values)
-        state = int(_CG_FLOW_PKG["model"].predict(X)[-1])
-        _CG_FLOW_CACHE.update(hour=_hr, state=state)
-        return state
-    except Exception as _e:
-        print(f"  [cg_flow_hmm] decode failed: {_e}")
-        _CG_FLOW_CACHE.update(hour=_hr, state=None)
-        return None
-
-
 def _load_btc_iso() -> "dict | None":
     global _BTC_ISO_CAL
     if _BTC_ISO_CAL != "unloaded":
@@ -3271,41 +3177,6 @@ def main() -> None:
             except Exception:
                 pass
 
-        # Completed-bar Keltner for btc_cg_flow_no_gate's rescue (2026-07-08).
-        # The _kc_pct_1h above includes the in-progress bar (real-time price inside a
-        # tight band -> swings constantly; corr with the completed-bar version was
-        # -0.13 on the validation bucket). The gate was VALIDATED on completed bars,
-        # so it must use this variant: same formula, last (partial) bar dropped.
-        _kc_pct_1h_done = float("nan")
-        if live_1h is not None and len(live_1h) >= 16:
-            try:
-                _kcd = live_1h.iloc[:-1]
-                _kcd_c = _kcd["close"].astype(float)
-                _kcd_h = _kcd["high"].astype(float)
-                _kcd_l = _kcd["low"].astype(float)
-                _kcd_ema10 = _kcd_c.ewm(span=10, adjust=False).mean()
-                _kcd_tr = pd.concat([_kcd_h - _kcd_l,
-                                     (_kcd_h - _kcd_c.shift(1)).abs(),
-                                     (_kcd_l - _kcd_c.shift(1)).abs()], axis=1).max(axis=1)
-                _kcd_atr14 = _kcd_tr.ewm(span=14, adjust=False).mean()
-                _kcd_up = _kcd_ema10 + 1.5 * _kcd_atr14
-                _kcd_lo = _kcd_ema10 - 1.5 * _kcd_atr14
-                _kcd_w = float((_kcd_up - _kcd_lo).iloc[-1])
-                if _kcd_w > 0:
-                    _kc_pct_1h_done = round(float(
-                        (_kcd_c.iloc[-1] - float(_kcd_lo.iloc[-1])) / _kcd_w), 4)
-            except Exception:
-                pass
-
-        # CoinGlass flow-regime state — once per scan cycle (hourly-cached inside).
-        _cg_flow_state = _get_cg_flow_state(now_utc) if args.asset == "BTC" else None
-        if _cg_flow_state is not None:
-            _cgf_lbl = {0: "shortliq-quiet", 1: "neutral", 2: "buy-flow", 3: "sell-flow",
-                        4: "long-cascade", 5: "short-squeeze", 6: "longliq-quiet"}
-            print(f"  [cg_flow_hmm] state={_cg_flow_state} ({_cgf_lbl.get(_cg_flow_state, '?')})  "
-                  f"kc_done={_kc_pct_1h_done:.3f}" if _kc_pct_1h_done == _kc_pct_1h_done
-                  else f"  [cg_flow_hmm] state={_cg_flow_state} ({_cgf_lbl.get(_cg_flow_state, '?')})")
-
         # _markov_regime already fetched above (before garch_markov_vol_adjust block).
 
         # Semi-Markov vol-regime signal — computed once per scan cycle, used by gate + CSV.
@@ -3754,11 +3625,6 @@ def main() -> None:
             # silently killed the live hourly runners (no watchdog) → missed live trades vs paper.
             _macro_regime_probs = None
             _p_no_eth = None
-            # [unbound_fix 2026-07-08] Same class, same fix: _p_up_v2 was only assigned
-            # inside the composite block, but btc_pup_direction_gate and btc_no_ms6_gate
-            # read it unconditionally — crashed the live BTC dual runner 07-07 with
-            # UnboundLocalError (watchdog auto-recovered). Consumers all null-check.
-            _p_up_v2 = None
             if _composite_computed:
                 # April-15 model: vol_factor scales sigma for both YES and NO.
                 sigma_tau_c   = vol_adj_c * math.sqrt(tau_c)
@@ -5329,25 +5195,6 @@ def main() -> None:
                     _rsrc_eth = "ema=-1" if _ema_eth == -1 else "vwap_stretch=-2"
                     print(f"  [eth_no_adx_gate] RESCUE NO {c['ticker']} — "
                           f"adx_1h={_adx_eth:.1f}>60 but {_rsrc_eth}")
-                    # [2026-07-08] Was print-only, no CSV audit trail for the rescue path —
-                    # found during a shadow-log revisit audit (couldn't measure rescue fire
-                    # rate/WR without this). Added now, does not change gate behavior.
-                    _log_block("eth_no_adx_gate__rescue")
-
-            # [eth_ema_neutral_gate] Block ETH trades when ema_alignment=="neutral" — no
-            # established trend = no directional basis for a binary bet either side.
-            # Sim (pending_changes_eth.md, "Gate A"): n=106 pool, blocks 29 (27%), 14 wins/
-            # 15 losses blocked, net delta +$475. Held up on live re-test 2026-07-08
-            # (post-05-31 data, n=24): WR=58.3% vs BE=68.0%, edge=-9.7pp, -$140.90 — confirms
-            # the sim's direction. Gate B (stoch_bias=1+ema_stack_bias=-1) from the same
-            # proposal did NOT hold up live (edge flipped to +4pp) — deliberately not added.
-            # Backup: paper_trade_runner_pre_eth_ema_neutral_gate_20260708.py
-            if (args.asset == "ETH" and dec_c.decision == "trade"
-                    and confirm.ema_alignment == "neutral"):
-                print(f"  [eth_ema_neutral_gate] BLOCK {dec_c.side.upper()} {c['ticker']} — "
-                      f"ema_alignment=neutral (no established trend; live WR=58.3% vs BE=68.0%)")
-                _log_block("eth_ema_neutral_gate")
-                continue
 
             if dec_c.side == "no" and args.asset == "SOL" and offset_c < 0.002:
                 print(f"  [scan] Skipping {c['ticker']} — SOL NO offset={offset_c*100:+.3f}% < 0.20% minimum")
@@ -6800,35 +6647,6 @@ def main() -> None:
                     _log_block("btc_nopup_gate")
                     continue
 
-            # [btc_cg_flow_no_gate] Block BTC NO when the CoinGlass flow-regime HMM is in
-            # {neutral(1), buy-flow(2), short-squeeze(5)} — the market is actively being
-            # bought (derivatives taker flow the model can't see) and the NO-heavy book
-            # gets run over. Rescue: completed-bar kc_pct_1h < 0.426 — price already pinned
-            # near the lower Keltner band while flow buys = absorption, not momentum; NO wins.
-            # Built + validated 2026-07-08 (reform_results/cg_hmm_20260708/): 529 resolved
-            # taken trades, orthogonality to the 13 existing HMMs verified (RF≈chance);
-            # blocked bucket n=107 WR=33.6% vs BE=73.3% (-$3,031, cluster-P=1.0000, neg all
-            # 4 wks); rescued n=46 WR=89.1% vs BE=74.8% (+$541, cluster-P=0.018 over 24
-            # expiries, pos all 3 wks it fired). Only 3/76 buy-flow trades overlapped the
-            # live cg_futures_ratio gate — additive, not redundant. Caveats: 3-week window,
-            # one era; CG API has a rolling ~6mo window. Fail-open: no state -> no gate.
-            # Deployed live-dual per explicit user decision; reevaluate ~2 wks (see memory).
-            if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
-                    and _cg_flow_state is not None and _cg_flow_state in (1, 2, 5)):
-                _cgf_names = {1: "neutral", 2: "buy-flow", 5: "short-squeeze"}
-                if _kc_pct_1h_done == _kc_pct_1h_done and _kc_pct_1h_done < 0.426:
-                    print(f"  [btc_cg_flow_no_gate] RESCUE NO {c['ticker']} — "
-                          f"cg_state={_cgf_names[_cg_flow_state]} BUT kc_done={_kc_pct_1h_done:.3f}<0.426 "
-                          f"(price pinned low despite buy flow; WR=89.1% historically)")
-                    _log_block("btc_cg_flow_no_gate__rescue")
-                else:
-                    print(f"  [btc_cg_flow_no_gate] BLOCK NO {c['ticker']} — "
-                          f"cg_state={_cgf_names[_cg_flow_state]} kc_done="
-                          f"{_kc_pct_1h_done if _kc_pct_1h_done == _kc_pct_1h_done else 'n/a'} "
-                          f"(buy-side flow regime, NO WR=33.6% vs BE=73.3%)")
-                    _log_block("btc_cg_flow_no_gate")
-                    continue
-
             # [eth_kelly_tier] 1.5× Kelly for high-conviction candle+rev signals.
             # YES tier: RED candle + rev>=3 = oversold bounce entry.
             #   Live data n=50: WR=68.0%, BE=57.8%, WR-BE=+10.2pp, $/t=+$0.102 (vs +$0.047 base).
@@ -7723,7 +7541,6 @@ def main() -> None:
         "pup_v3_hmm_state":   _pup_v3_hmm_state_label if _pup_v3_hmm_state_label is not None else "",
         "eth_p_up_v1":        round(_eth_p_up_cycle, 4) if _eth_p_up_cycle is not None else "",
         "sol_p_up_v1":        round(_sol_p_up_cycle, 4) if _sol_p_up_cycle is not None else "",
-        "cg_flow_state":      _cg_flow_state if _cg_flow_state is not None else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

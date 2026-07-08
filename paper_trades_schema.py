@@ -202,4 +202,7 @@ CSV_COLUMNS = [
     # feature set (A16 ONLY -- neither BTC's nor ETH's shape). Backfilled +
     # gated same day (sol_pup_v1_agreement_gate).
     "sol_p_up_v1",
+    # 2026-07-08: CoinGlass flow-regime HMM state (BTC hourly, 0-6). Drives
+    # btc_cg_flow_no_gate (block NO in states 1/2/5 unless kc rescue).
+    "cg_flow_state",
 ]

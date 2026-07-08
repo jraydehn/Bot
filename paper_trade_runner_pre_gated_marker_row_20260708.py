@@ -1148,74 +1148,6 @@ def _hmm_smc_predict(smc_result) -> int:
         return -1
 
 
-_MARKOV_ETH_SOL_CACHE: dict = {"hour": None, "regimes": {}}
-
-
-def _get_markov_regimes_yf(asset: str) -> dict:
-    """Return Markov regime dict for ETH or SOL, cached per UTC hour.
-    Ported from paper_trade_runner_15m.py (2026-07-08 — was referenced by
-    _get_daily_markov_regime below but never defined in this file, so every
-    call silently failed with NameError, caught by the try/except and logged
-    as "[markov_daily] SOL fetch failed" every cycle).
-
-    ETH: {"1d": regime_str}
-    SOL: {"6h": ..., "4h": ..., "1h": ...}
-
-    Thresholds (validated against paper-trade backtest):
-      ETH daily  20-bar ±3.0%
-      SOL 6h     20-bar ±3.0%
-      SOL 4h     20-bar ±2.5%
-      SOL 1h     20-bar ±1.5%
-    """
-    global _MARKOV_ETH_SOL_CACHE
-    now_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    if (_MARKOV_ETH_SOL_CACHE["hour"] == now_hour
-            and asset in _MARKOV_ETH_SOL_CACHE["regimes"]):
-        return _MARKOV_ETH_SOL_CACHE["regimes"][asset]
-    try:
-        import yfinance as _yf
-        _ticker = "ETH-USD" if asset == "ETH" else "SOL-USD"
-        _end    = pd.Timestamp.now("UTC")
-        _start  = _end - pd.DateOffset(days=120)
-        _raw = _yf.download(
-            _ticker,
-            start=_start.strftime("%Y-%m-%d"),
-            end=(_end + pd.DateOffset(days=1)).strftime("%Y-%m-%d"),
-            interval="1h", progress=False, auto_adjust=True,
-        )
-        if isinstance(_raw.columns, pd.MultiIndex):
-            _raw.columns = _raw.columns.get_level_values(0)
-        _raw.index = pd.to_datetime(_raw.index, utc=True)
-        _c1h = _raw["Close"].dropna()
-
-        def _regime(close, window, thr):
-            rr = close.pct_change(window)
-            if len(rr.dropna()) == 0 or pd.isna(rr.iloc[-1]):
-                return None
-            v = float(rr.iloc[-1])
-            return "Bull" if v > thr else "Bear" if v < -thr else "Sideways"
-
-        result: dict = {}
-        if asset == "ETH":
-            _c1d = _c1h.resample("1d").last().dropna()
-            result["1d"] = _regime(_c1d, 20, 0.030)
-        else:  # SOL
-            _c6h = _c1h.resample("6h").last().dropna()
-            _c4h = _c1h.resample("4h").last().dropna()
-            result["6h"] = _regime(_c6h, 20, 0.030)
-            result["4h"] = _regime(_c4h, 20, 0.025)
-            result["1h"] = _regime(_c1h, 20, 0.015)
-
-        if _MARKOV_ETH_SOL_CACHE["hour"] != now_hour:
-            _MARKOV_ETH_SOL_CACHE["hour"]    = now_hour
-            _MARKOV_ETH_SOL_CACHE["regimes"] = {}
-        _MARKOV_ETH_SOL_CACHE["regimes"][asset] = result
-        return result
-    except Exception as _e:
-        print(f"  [markov_{asset.lower()}] fetch error: {_e}")
-        return {}
-
-
 def _get_daily_markov_regime(asset: str) -> "str | None":
     """Return today's daily Markov regime for BTC, ETH, or SOL.
 
@@ -7354,31 +7286,6 @@ def main() -> None:
             print(f"  [scan] No trade passes gates. Best seen: {chosen['contract_ticker']}  "
                   f"net_edge={dec.net_edge:+.4f}")
         else:
-            # [2026-07-08] Log a lightweight marker row even when every candidate this cycle
-            # got gated out before reaching best_any_dec/meta (the common case despite the
-            # misleading "auth failed or empty ladder" label below -- verified by direct
-            # observation: full per-contract gate evaluation runs, prints many BLOCK lines,
-            # then falls through here with nothing tracked as a fallback). Previously this
-            # branch returned with NO csv row at all, leaving silent gaps in the scan record
-            # that undercount how often the model considered trading vs. found nothing.
-            try:
-                _marker_row = {
-                    "logged_at":     now_utc.strftime("%Y-%m-%d %H:%M:%S"),
-                    "decision_time": ts.strftime("%Y-%m-%d %H:%M"),
-                    "contract_ticker": "",
-                    "spot":          round(spot, 2),
-                    "decision":      "no_trade",
-                    "side":          "",
-                    "gate_blocked":  "all_candidates_gated_before_fallback",
-                    "bankroll":      round(args.bankroll, 2),
-                }
-                # Matches the csv_path used by the real row-write below for both dual/live
-                # and pure-paper modes -- both call get_csv_path(args.asset, shadow=False).
-                _marker_csv_path = get_csv_path(args.asset, shadow=False)
-                ensure_csv_exists(_marker_csv_path)
-                append_row(_marker_row, _marker_csv_path)
-            except Exception as _marker_exc:
-                print(f"  [scan] marker-row logging failed (non-fatal): {_marker_exc}")
             print("  [scan] No real contracts available (auth failed or empty ladder) — skipping.")
             # Still run position monitor even when no new contracts are available.
             if auth is not None:

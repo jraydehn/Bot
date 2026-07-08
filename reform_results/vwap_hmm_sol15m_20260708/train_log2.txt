@@ -1,0 +1,393 @@
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+Model is not converging.  Current: -273137.9223329492 is not greater than -273137.917075335. Delta is -0.005257614189758897
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+Model is not converging.  Current: -229105.09594586378 is not greater than -229105.09576446886. Delta is -0.00018139492021873593
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+Model is not converging.  Current: -213550.41341669316 is not greater than -213550.41201951995. Delta is -0.0013971732114441693
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+Loading 1m parquet: binanceus_SOLUSDT_1m_2024-01-01_2026-07-08.parquet …
+  1,323,698 1m bars  (2024-01-01 -> 2026-07-08)
+Building feature matrix …
+  87,775 15m bars with complete features
+  83 sequences, 87771 observations (avg len 1057)
+
+BIC model selection:
+  n=2: BIC=    695471.3  LL=-347599.0388
+  n=3: BIC=    598489.6  LL=-299022.8631
+  n=4: BIC=    546913.3  LL=-273137.9323
+  n=5: BIC=    505615.9  LL=-252381.1234
+  n=6: BIC=    459302.9  LL=-229105.0965
+  n=7: BIC=    428455.4  LL=-213550.4190
+  n=8: BIC=    406531.4  LL=-202446.1390
+
+Selected: 8 states (BIC=406531.4)
+
+=== State profiles (feature means) ===
+
+State 0  n=18,740 (21.4%)
+  vwap_dist_1m        : -0.0066
+  vwap_dist_5m        : -0.1414
+  vwap_dist_15m       : -0.4374
+  vwap_vel_1m         : +0.0000
+  vwap_spread         : +0.4308
+
+State 1  n=7,187 (8.2%)
+  vwap_dist_1m        : -0.0697
+  vwap_dist_5m        : -0.6242
+  vwap_dist_15m       : -1.5345
+  vwap_vel_1m         : +0.0028
+  vwap_spread         : +1.4648
+
+State 2  n=11,019 (12.6%)
+  vwap_dist_1m        : -0.0137
+  vwap_dist_5m        : -0.2160
+  vwap_dist_15m       : -0.5408
+  vwap_vel_1m         : +0.0044
+  vwap_spread         : +0.5271
+
+State 3  n=3,546 (4.0%)
+  vwap_dist_1m        : +0.0675
+  vwap_dist_5m        : +0.1600
+  vwap_dist_15m       : +0.0326
+  vwap_vel_1m         : -0.0035
+  vwap_spread         : +0.0349
+
+State 4  n=19,948 (22.7%)
+  vwap_dist_1m        : +0.0127
+  vwap_dist_5m        : +0.1558
+  vwap_dist_15m       : +0.4377
+  vwap_vel_1m         : -0.0000
+  vwap_spread         : -0.4250
+
+State 5  n=6,486 (7.4%)
+  vwap_dist_1m        : +0.0728
+  vwap_dist_5m        : +0.6314
+  vwap_dist_15m       : +1.6554
+  vwap_vel_1m         : -0.0029
+  vwap_spread         : -1.5827
+
+State 6  n=10,174 (11.6%)
+  vwap_dist_1m        : +0.0340
+  vwap_dist_5m        : +0.2791
+  vwap_dist_15m       : +0.6919
+  vwap_vel_1m         : -0.0035
+  vwap_spread         : -0.6578
+
+State 7  n=10,671 (12.2%)
+  vwap_dist_1m        : +0.0055
+  vwap_dist_5m        : +0.0413
+  vwap_dist_15m       : +0.0784
+  vwap_vel_1m         : +0.0011
+  vwap_spread         : -0.0729
+
+Saved model -> /Users/justindehn/Documents/ClaudeCode/kalshi_btc/models/hmm_vwap_mtf_sol_15m.pkl
+
+Loading scan archive: /Users/justindehn/Documents/ClaudeCode/kalshi_btc/results/sol_scan_archive_15m.csv
+  9,060 rows  valid_ts=9,060  (2026-05-21 21:42:31+00:00 -> 2026-07-08 05:36:09+00:00)
+  States assigned: 9,060  null: 0
+  Sidecar -> /Users/justindehn/Documents/ClaudeCode/kalshi_btc/results/sol_vwap_hmm_states_15m.csv
+vwap_hmm_state
+0    2031
+1     603
+2    1399
+3     176
+4    1867
+5     666
+6     985
+7    1333
+Name: count, dtype: int64
+
+============================================================
+EFFICACY ANALYSIS — resolved rows only
+============================================================
+usable resolved+state rows: 9,086
+
+Baseline  YES: WR=0.227 BE=0.235 n=4638  |  NO: WR=0.233 BE=0.236 n=4448
+
+State   Side       n     WR  BEven    edge     ΔWR  Verdict
+--------------------------------------------------------------
+  0     YES     1117  0.198  0.234  -0.036  -0.029  neutral
+  0     NO       924  0.274  0.260  +0.014  +0.041  neutral
+  1     YES      365  0.132  0.187  -0.055  -0.096  BLOCK cand.
+  1     NO       238  0.315  0.246  +0.069  +0.082  BOOST cand.
+  2     YES      770  0.188  0.210  -0.022  -0.039  neutral
+  2     NO       629  0.323  0.249  +0.074  +0.090  BOOST cand.
+  3     YES       89  0.247  0.154  +0.093  +0.020  neutral
+  3     NO        87  0.092  0.170  -0.078  -0.141  BLOCK cand.
+  4     YES      890  0.253  0.260  -0.007  +0.026  neutral
+  4     NO       989  0.178  0.226  -0.048  -0.055  neutral
+  5     YES      316  0.345  0.261  +0.084  +0.118  BOOST cand.
+  5     NO       350  0.169  0.221  -0.053  -0.064  BLOCK cand.
+  6     YES      422  0.315  0.256  +0.059  +0.088  BOOST cand.
+  6     NO       563  0.187  0.223  -0.037  -0.046  neutral
+  7     YES      669  0.224  0.242  -0.018  -0.003  neutral
+  7     NO       668  0.235  0.230  +0.005  +0.002  neutral
+
+=== Gate candidates (|edge| > 0.05, n >= 15) ===
+  State 3 NO : WR=0.092 BE=0.170 edge=-0.078 ΔWR=-0.141 n=87 -> BLOCK
+  State 1 YES: WR=0.132 BE=0.187 edge=-0.055 ΔWR=-0.096 n=365 -> BLOCK
+  State 5 NO : WR=0.169 BE=0.221 edge=-0.053 ΔWR=-0.064 n=350 -> BLOCK
+  State 6 YES: WR=0.315 BE=0.256 edge=+0.059 ΔWR=+0.088 n=422 -> BOOST
+  State 1 NO : WR=0.315 BE=0.246 edge=+0.069 ΔWR=+0.082 n=238 -> BOOST
+  State 2 NO : WR=0.323 BE=0.249 edge=+0.074 ΔWR=+0.090 n=629 -> BOOST
+  State 5 YES: WR=0.345 BE=0.261 edge=+0.084 ΔWR=+0.118 n=316 -> BOOST
+  State 3 YES: WR=0.247 BE=0.154 edge=+0.093 ΔWR=+0.020 n=89 -> BOOST
+
+=== Bootstrap significance (trade-level, n_boot=4000) ===
+  State 3 NO: edge_mean=-0.0779 CI=[-0.1329,-0.0167] P(wrong-direction)=0.9925
+  State 1 YES: edge_mean=-0.0553 CI=[-0.0863,-0.0230] P(wrong-direction)=0.9998
+  State 5 NO: edge_mean=-0.0521 CI=[-0.0874,-0.0148] P(wrong-direction)=0.9968
+  State 6 YES: edge_mean=+0.0590 CI=[+0.0182,+0.1008] P(wrong-direction)=0.9980
+  State 1 NO: edge_mean=+0.0692 CI=[+0.0166,+0.1210] P(wrong-direction)=0.9970
+  State 2 NO: edge_mean=+0.0738 CI=[+0.0403,+0.1083] P(wrong-direction)=1.0000
+  State 5 YES: edge_mean=+0.0845 CI=[+0.0372,+0.1314] P(wrong-direction)=1.0000
+  State 3 YES: edge_mean=+0.0927 CI=[+0.0085,+0.1849] P(wrong-direction)=0.9868
+
+============================================================
+WEEK-BY-WEEK CONSISTENCY
+============================================================
+
+State 1 YES (overall edge=-0.055, n=365):
+    2026-W21: n=18  WR=0.056  BE=0.148  edge=-0.092  OK
+    2026-W22: n=33  WR=0.212  BE=0.214  edge=-0.002  OK
+    2026-W23: n=112  WR=0.098  BE=0.160  edge=-0.062  OK
+    2026-W24: n=48  WR=0.188  BE=0.219  edge=-0.031  OK
+    2026-W25: n=45  WR=0.222  BE=0.202  edge=+0.020  x
+    2026-W26: n=71  WR=0.099  BE=0.194  edge=-0.095  OK
+    2026-W27: n=27  WR=0.111  BE=0.170  edge=-0.059  OK
+    2026-W28: n=11  WR=0.000  BE=0.225  edge=-0.225  OK
+  Directionally consistent: 7/8 weeks
+
+State 1 NO (overall edge=+0.069, n=238):
+    2026-W21: n=14  WR=0.286  BE=0.236  edge=+0.050  OK
+    2026-W22: n=28  WR=0.179  BE=0.206  edge=-0.027  x
+    2026-W23: n=61  WR=0.377  BE=0.253  edge=+0.124  OK
+    2026-W24: n=16  WR=0.438  BE=0.276  edge=+0.161  OK
+    2026-W25: n=45  WR=0.267  BE=0.259  edge=+0.008  OK
+    2026-W26: n=45  WR=0.333  BE=0.245  edge=+0.089  OK
+    2026-W27: n=19  WR=0.211  BE=0.207  edge=+0.004  OK
+    2026-W28: n=10  WR=0.500  BE=0.302  edge=+0.198  OK
+  Directionally consistent: 7/8 weeks
+
+State 2 NO (overall edge=+0.074, n=629):
+    2026-W21: n=44  WR=0.318  BE=0.256  edge=+0.062  OK
+    2026-W22: n=67  WR=0.239  BE=0.247  edge=-0.008  x
+    2026-W23: n=89  WR=0.393  BE=0.245  edge=+0.148  OK
+    2026-W24: n=70  WR=0.300  BE=0.260  edge=+0.040  OK
+    2026-W25: n=110  WR=0.382  BE=0.268  edge=+0.114  OK
+    2026-W26: n=120  WR=0.317  BE=0.238  edge=+0.079  OK
+    2026-W27: n=91  WR=0.275  BE=0.243  edge=+0.032  OK
+    2026-W28: n=38  WR=0.316  BE=0.231  edge=+0.084  OK
+  Directionally consistent: 7/8 weeks
+
+State 3 YES (overall edge=+0.093, n=89):
+    2026-W22: n=6  WR=0.667  BE=0.081  edge=+0.585  OK
+    2026-W23: n=39  WR=0.205  BE=0.147  edge=+0.058  OK
+    2026-W25: n=7  WR=0.143  BE=0.201  edge=-0.058  x
+    2026-W26: n=21  WR=0.143  BE=0.154  edge=-0.011  x
+    2026-W27: n=14  WR=0.286  BE=0.181  edge=+0.104  OK
+  Directionally consistent: 3/5 weeks
+
+State 3 NO (overall edge=-0.078, n=87):
+    2026-W23: n=42  WR=0.048  BE=0.152  edge=-0.104  OK
+    2026-W24: n=7  WR=0.286  BE=0.233  edge=+0.053  x
+    2026-W26: n=19  WR=0.105  BE=0.188  edge=-0.083  OK
+    2026-W27: n=13  WR=0.154  BE=0.201  edge=-0.047  OK
+  Directionally consistent: 3/4 weeks
+
+State 5 YES (overall edge=+0.084, n=316):
+    2026-W23: n=137  WR=0.314  BE=0.266  edge=+0.048  OK
+    2026-W24: n=38  WR=0.421  BE=0.292  edge=+0.129  OK
+    2026-W25: n=38  WR=0.342  BE=0.238  edge=+0.105  OK
+    2026-W26: n=40  WR=0.475  BE=0.283  edge=+0.192  OK
+    2026-W27: n=49  WR=0.265  BE=0.222  edge=+0.043  OK
+    2026-W28: n=11  WR=0.364  BE=0.265  edge=+0.099  OK
+  Directionally consistent: 6/6 weeks
+
+State 5 NO (overall edge=-0.053, n=350):
+    2026-W21: n=5  WR=0.000  BE=0.126  edge=-0.126  OK
+    2026-W22: n=8  WR=0.250  BE=0.251  edge=-0.001  OK
+    2026-W23: n=115  WR=0.183  BE=0.223  edge=-0.041  OK
+    2026-W24: n=32  WR=0.281  BE=0.233  edge=+0.048  x
+    2026-W25: n=42  WR=0.167  BE=0.205  edge=-0.038  OK
+    2026-W26: n=73  WR=0.055  BE=0.206  edge=-0.151  OK
+    2026-W27: n=61  WR=0.246  BE=0.233  edge=+0.013  x
+    2026-W28: n=14  WR=0.071  BE=0.274  edge=-0.203  OK
+  Directionally consistent: 6/8 weeks
+
+State 6 YES (overall edge=+0.059, n=422):
+    2026-W21: n=20  WR=0.100  BE=0.252  edge=-0.152  x
+    2026-W22: n=35  WR=0.229  BE=0.256  edge=-0.028  x
+    2026-W23: n=34  WR=0.324  BE=0.281  edge=+0.042  OK
+    2026-W24: n=50  WR=0.360  BE=0.295  edge=+0.065  OK
+    2026-W25: n=70  WR=0.371  BE=0.258  edge=+0.113  OK
+    2026-W26: n=77  WR=0.312  BE=0.240  edge=+0.072  OK
+    2026-W27: n=104  WR=0.346  BE=0.250  edge=+0.096  OK
+    2026-W28: n=32  WR=0.250  BE=0.224  edge=+0.026  OK
+  Directionally consistent: 6/8 weeks
+
+Done.

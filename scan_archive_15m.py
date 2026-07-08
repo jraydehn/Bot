@@ -109,8 +109,16 @@ COLUMNS = [
     "p_up_v2_btc", "z_drift_6h",
     # HMM vol-regime state (BTC only; 0=low-vol, 1=med-vol, 2=high-vol)
     "hmm_vol_state",
-    # VWAP MTF HMM state (BTC only; 8-state model on 1m/5m/15m VWAP distances)
+    # VWAP MTF HMM state (BTC + SOL, each asset's own model; 8-state on 1m/5m/15m VWAP distances)
     "vwap_hmm_state",
+    # 2026-07-08: SOL short-timeframe (5m/15m) VWAP HMM rescue signals -- didn't
+    # exist anywhere else in this codebase at 5m/15m before this build.
+    "kc_pct_5m", "kc_bo_5m", "kc_pct_15m", "kc_bo_15m",
+    "donch_breakout_5m", "donch_pos_5m", "donch_breakout_15m", "donch_pos_15m",
+    "stoch_cross_5m", "stoch_cross_15m",
+    "kalman_velocity_5m", "kalman_residual_5m", "hurst_exponent_5m", "ou_theta_5m",
+    "kalman_velocity_15m", "kalman_residual_15m", "hurst_exponent_15m", "ou_theta_15m",
+    "arima_forecast_15m",
 ]
 
 _META_COLS = {

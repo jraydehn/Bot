@@ -1,0 +1,272 @@
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+Model is not converging.  Current: -273138.37675064773 is not greater than -273138.37254003977. Delta is -0.004210607963614166
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+Model is not converging.  Current: -229105.3458028457 is not greater than -229105.34552063802. Delta is -0.0002822076785378158
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+Model is not converging.  Current: -225848.75450261316 is not greater than -225848.75413870747. Delta is -0.00036390568129718304
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: divide by zero encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: overflow encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/utils/extmath.py:203: RuntimeWarning: invalid value encountered in matmul
+  ret = a @ b
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: divide by zero encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: overflow encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/sklearn/cluster/_kmeans.py:237: RuntimeWarning: invalid value encountered in matmul
+  current_pot = closest_dist_sq @ sample_weight
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: overflow encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:153: RuntimeWarning: invalid value encountered in matmul
+  stats['obs'] += posteriors.T @ X
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: divide by zero encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: overflow encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/hmmlearn/_emissions.py:157: RuntimeWarning: invalid value encountered in matmul
+  stats['obs**2'] += posteriors.T @ X**2
+Loading 1m parquet: binanceus_SOLUSDT_1m_2024-01-01_2026-07-08.parquet …
+  1,323,695 1m bars  (2024-01-01 -> 2026-07-08)
+Building feature matrix …
+  87,775 15m bars with complete features
+  83 sequences, 87771 observations (avg len 1057)
+
+BIC model selection:
+  n=2: BIC=    695472.3  LL=-347599.5445
+  n=3: BIC=    598490.6  LL=-299023.3295
+  n=4: BIC=    546914.2  LL=-273138.3862
+  n=5: BIC=    505616.9  LL=-252381.5985
+  n=6: BIC=    459303.4  LL=-229105.3464
+  n=7: BIC=    453052.0  LL=-225848.7568
+  n=8: BIC=    439866.9  LL=-219113.9297
+
+Selected: 8 states (BIC=439866.9)
+
+=== State profiles (feature means) ===
+
+State 0  n=3,328 (3.8%)
+  vwap_dist_1m        : +0.0706
+  vwap_dist_5m        : +0.1152
+  vwap_dist_15m       : -0.0775
+  vwap_vel_1m         : -0.0029
+  vwap_spread         : +0.1480
+
+State 1  n=37,516 (42.7%)
+  vwap_dist_1m        : +0.0029
+  vwap_dist_5m        : +0.0069
+  vwap_dist_15m       : +0.0038
+  vwap_vel_1m         : -0.0000
+  vwap_spread         : -0.0009
+
+State 2  n=9,942 (11.3%)
+  vwap_dist_1m        : +0.0041
+  vwap_dist_5m        : -0.0362
+  vwap_dist_15m       : -0.1102
+  vwap_vel_1m         : +0.0030
+  vwap_spread         : +0.1143
+
+State 3  n=9,068 (10.3%)
+  vwap_dist_1m        : -0.0292
+  vwap_dist_5m        : -0.2961
+  vwap_dist_15m       : -0.6988
+  vwap_vel_1m         : +0.0059
+  vwap_spread         : +0.6695
+
+State 4  n=6,254 (7.1%)
+  vwap_dist_1m        : -0.0733
+  vwap_dist_5m        : -0.6534
+  vwap_dist_15m       : -1.6230
+  vwap_vel_1m         : +0.0019
+  vwap_spread         : +1.5498
+
+State 5  n=4,297 (4.9%)
+  vwap_dist_1m        : +0.0774
+  vwap_dist_5m        : +0.7114
+  vwap_dist_15m       : +1.9247
+  vwap_vel_1m         : -0.0021
+  vwap_spread         : -1.8473
+
+State 6  n=7,447 (8.5%)
+  vwap_dist_1m        : +0.0532
+  vwap_dist_5m        : +0.4369
+  vwap_dist_15m       : +1.0289
+  vwap_vel_1m         : -0.0042
+  vwap_spread         : -0.9756
+
+State 7  n=9,919 (11.3%)
+  vwap_dist_1m        : +0.0204
+  vwap_dist_5m        : +0.1726
+  vwap_dist_15m       : +0.4074
+  vwap_vel_1m         : -0.0032
+  vwap_spread         : -0.3869
+
+Saved model -> /Users/justindehn/Documents/ClaudeCode/kalshi_btc/models/hmm_vwap_mtf_sol_15m.pkl
+
+Loading scan archive: /Users/justindehn/Documents/ClaudeCode/kalshi_btc/results/sol_scan_archive_15m.csv
+  9,060 rows  valid_ts=9,060  (2026-05-21 21:42:31+00:00 -> 2026-07-08 05:36:09+00:00)
+  States assigned: 9,060  null: 0
+  Sidecar -> /Users/justindehn/Documents/ClaudeCode/kalshi_btc/results/sol_vwap_hmm_states_15m.csv
+vwap_hmm_state
+0     169
+1    3815
+2    1300
+3    1003
+4     513
+5     514
+6     616
+7    1130
+Name: count, dtype: int64
+
+============================================================
+EFFICACY ANALYSIS — resolved rows only
+============================================================
+Traceback (most recent call last):
+  File "/Users/justindehn/Documents/ClaudeCode/kalshi_btc/train_backfill_vwap_hmm_sol15m.py", line 186, in <module>
+    arch_res = arch_res.dropna(subset=["resolved_yes", "p_market", "p_model_yes", "p_model_no", "vwap_hmm_state"])
+  File "/Users/justindehn/Library/Python/3.9/lib/python/site-packages/pandas/core/frame.py", line 6692, in dropna
+    raise KeyError(np.array(subset)[check].tolist())
+KeyError: ['vwap_hmm_state']

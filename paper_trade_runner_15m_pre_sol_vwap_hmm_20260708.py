@@ -95,44 +95,34 @@ except Exception as _ve:
     print(f"  [vol_hmm] WARNING: could not load vol-regime HMM: {_ve}")
 
 
-# VWAP Multi-Timeframe HMM: 8-state model on 1m/5m/15m VWAP distances.
-# BTC (hmm_vwap_mtf_btc_15m.pkl):
-#   St4: price 1.14% above ALL VWAPs, rising → NO block (WR=10%, p=0.000, saves $990).
-#   St2: above VWAPs falling, low vol → NO block (WR=14.8%, p=0.006, saves $819).
-#   St5: neutral VWAP, not 1h-overbought → NO block (WR=29%, p=0.012, saves $1,233).
-#   St7: mildly bull, not 15m-falling → NO block (WR=28.1%, p=0.020, saves $984).
-#   St0: below 15m VWAP recovering → NO ×1.25 Kelly boost (WR=58.3%, p=0.000).
-# SOL (hmm_vwap_mtf_sol_15m.pkl, trained + validated 2026-07-08 -- independent
-# model, NOT a template of BTC's state numbering/effects):
-#   St1 YES block (WR=13.2% vs BE=18.7%, edge=-5.5pp) unless
-#     kalman_velocity_15m>=0.00016 rescues (n=110, edge=+11.9pp, p=0.0020, 6/8wks).
-#   St5 NO block (WR=16.9% vs BE=22.1%, edge=-5.3pp) unless
-#     kalman_velocity_15m<-0.001 rescues (n=70, edge=+18.1pp, p=0.0005, 7/7wks).
-#   See reform_results/vwap_hmm_sol15m_20260708/ for the full search.
-_VWAP_HMM_PKL = {
-    "BTC": Path(__file__).parent / "models" / "hmm_vwap_mtf_btc_15m.pkl",
-    "SOL": Path(__file__).parent / "models" / "hmm_vwap_mtf_sol_15m.pkl",
-}
-_vwap_hmm_pkgs: dict = {}
-for _vwap_asset, _vwap_path in _VWAP_HMM_PKL.items():
-    try:
-        with open(_vwap_path, "rb") as _vf:
-            _vwap_hmm_pkgs[_vwap_asset] = pickle.load(_vf)
-        print(f"  [vwap_hmm_{_vwap_asset.lower()}] Loaded {_vwap_path.name}  "
-              f"({_vwap_hmm_pkgs[_vwap_asset]['n_states']} states, "
-              f"{len(_vwap_hmm_pkgs[_vwap_asset]['feat_cols'])} features)")
-    except Exception as _vwap_e:
-        print(f"  [vwap_hmm_{_vwap_asset.lower()}] WARNING: could not load {_vwap_path.name}: {_vwap_e}")
+# VWAP Multi-Timeframe HMM (BTC 15m): 8-state model on 1m/5m/15m VWAP distances.
+# St4: price 1.14% above ALL VWAPs, rising → NO block (WR=10%, p=0.000, saves $990).
+# St2: above VWAPs falling, low vol → NO block (WR=14.8%, p=0.006, saves $819).
+# St5: neutral VWAP, not 1h-overbought → NO block (WR=29%, p=0.012, saves $1,233).
+# St7: mildly bull, not 15m-falling → NO block (WR=28.1%, p=0.020, saves $984).
+# St0: below 15m VWAP recovering → NO ×1.25 Kelly boost (WR=58.3%, p=0.000).
+_VWAP_HMM_PKL  = Path(__file__).parent / "models" / "hmm_vwap_mtf_btc_15m.pkl"
+_vwap_hmm_model  = None
+_vwap_hmm_scaler = None
+_vwap_hmm_feats: "list | None" = None
+
+try:
+    with open(_VWAP_HMM_PKL, "rb") as _vf:
+        _vwap_hmm_pkg   = pickle.load(_vf)
+    _vwap_hmm_model  = _vwap_hmm_pkg["model"]
+    _vwap_hmm_scaler = _vwap_hmm_pkg["scaler"]
+    _vwap_hmm_feats  = _vwap_hmm_pkg["feat_cols"]
+    print(f"  [vwap_hmm] Loaded {_VWAP_HMM_PKL.name}  "
+          f"({_vwap_hmm_pkg['n_states']} states, {len(_vwap_hmm_feats)} features)")
+except Exception as _vwap_e:
+    print(f"  [vwap_hmm] WARNING: could not load {_VWAP_HMM_PKL.name}: {_vwap_e}")
 
 
-def _vwap_hmm_state_predict(live_1m: "pd.DataFrame", asset: str = "BTC") -> "int | None":
-    """Predict current VWAP MTF HMM state from live 1m OHLCV data, for the
-    given asset's own trained model. Returns None if model unavailable or
-    insufficient data (<3 complete 15m bars)."""
-    pkg = _vwap_hmm_pkgs.get(asset.upper())
-    if pkg is None:
+def _vwap_hmm_state_predict(live_1m: "pd.DataFrame") -> "int | None":
+    """Predict current VWAP MTF HMM state (0-7) from live 1m OHLCV data.
+    Returns None if model unavailable or insufficient data (<3 complete 15m bars)."""
+    if _vwap_hmm_model is None or _vwap_hmm_scaler is None or _vwap_hmm_feats is None:
         return None
-    _vwap_hmm_model, _vwap_hmm_scaler, _vwap_hmm_feats = pkg["model"], pkg["scaler"], pkg["feat_cols"]
     try:
         _AGG = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
         df1m  = live_1m.copy()
@@ -167,112 +157,6 @@ def _vwap_hmm_state_predict(live_1m: "pd.DataFrame", asset: str = "BTC") -> "int
         return int(states[-1])
     except Exception:
         return None
-
-
-# ── Short-timeframe (5m/15m) signal set — built + validated 2026-07-08 for the
-# SOL VWAP HMM rescue search (reform_results/vwap_hmm_sol15m_20260708/).
-# These do NOT exist anywhere else in this codebase at 5m/15m (only 1h
-# versions existed before); genuinely new signals, not reconstructions of an
-# existing live formula. Same math as the 1h versions, applied to df5/df15.
-def _keltner_at(df: "pd.DataFrame") -> "tuple[float, int]":
-    if len(df) < 20:
-        return float("nan"), float("nan")
-    c, h, l = df["close"], df["high"], df["low"]
-    ema10 = c.ewm(span=10, adjust=False).mean()
-    tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
-    atr14 = tr.ewm(span=14, adjust=False).mean()
-    upper, lower = ema10 + 1.5 * atr14, ema10 - 1.5 * atr14
-    width = float((upper - lower).iloc[-1])
-    if width <= 0:
-        return float("nan"), float("nan")
-    last = float(c.iloc[-1])
-    kc_pct = (last - float(lower.iloc[-1])) / width
-    kc_bo = 1 if last > float(upper.iloc[-1]) else (-1 if last < float(lower.iloc[-1]) else 0)
-    return kc_pct, kc_bo
-
-
-def _donchian_at(df: "pd.DataFrame") -> "tuple[int, float]":
-    if len(df) < 20:
-        return float("nan"), float("nan")
-    h, l, c = df["high"], df["low"], df["close"]
-    dc_hi, dc_lo = h.rolling(20).max().iloc[-1], l.rolling(20).min().iloc[-1]
-    last = float(c.iloc[-1])
-    brk = 1 if last >= dc_hi else (-1 if last <= dc_lo else 0)
-    pos = (last - dc_lo) / (dc_hi - dc_lo) if dc_hi > dc_lo else float("nan")
-    return brk, pos
-
-
-def _stoch_cross_at(df: "pd.DataFrame") -> "float | int":
-    if len(df) < 17:
-        return float("nan")
-    h, l, c = df["high"], df["low"], df["close"]
-    lo14, hi14 = l.rolling(14).min(), h.rolling(14).max()
-    rng14 = hi14 - lo14
-    sk = ((c - lo14) / rng14.replace(0, float("nan"))) * 100.0
-    sd = sk.rolling(3).mean()
-    if len(sk) < 2 or pd.isna(sk.iloc[-1]) or pd.isna(sd.iloc[-1]) or pd.isna(sd.iloc[-2]):
-        return float("nan")
-    sk_last, sd_last = float(sk.iloc[-1]), float(sd.iloc[-1])
-    sk_prev, sd_prev = float(sk.iloc[-2]), float(sd.iloc[-2])
-    if sk_last > sd_last and sk_prev <= sd_prev:
-        return 1
-    if sk_last < sd_last and sk_prev >= sd_prev:
-        return -1
-    return 0
-
-
-def _kalman_hurst_ou_at(df: "pd.DataFrame") -> dict:
-    out = {"kalman_velocity": float("nan"), "kalman_residual": float("nan"),
-           "hurst_exponent": float("nan"), "ou_theta": float("nan")}
-    if len(df) < 31:
-        return out
-    c = df["close"].values.astype(float)
-    lr = np.diff(np.log(c))
-    if len(lr) < 10:
-        return out
-    h_lr = lr[-64:] if len(lr) >= 64 else lr
-    rs_pts = []
-    for w in [8, 16, 32, 64]:
-        if len(h_lr) < w:
-            continue
-        seg = h_lr[-w:]
-        dev = np.cumsum(seg - seg.mean())
-        r = dev.max() - dev.min(); s = seg.std(ddof=1)
-        if s > 0:
-            rs_pts.append((np.log(w), np.log(r / s)))
-    if len(rs_pts) >= 2:
-        xs = np.array([p[0] for p in rs_pts]); ys = np.array([p[1] for p in rs_pts])
-        out["hurst_exponent"] = float(np.clip(np.polyfit(xs, ys, 1)[0], 0.0, 1.0))
-    ou_lr = lr[-48:] if len(lr) >= 48 else lr
-    if len(ou_lr) >= 10:
-        mu = ou_lr.mean(); yc = ou_lr - mu
-        phi = float(np.clip(np.dot(yc[:-1], yc[1:]) / (np.dot(yc[:-1], yc[:-1]) + 1e-12), -0.9999, 0.9999))
-        out["ou_theta"] = float(np.clip(-np.log(abs(phi)), 0.0, 10.0))
-    kl = lr[-48:] if len(lr) >= 48 else lr
-    if len(kl) >= 5:
-        Q = np.array([[1e-5, 0.0], [0.0, 1e-5]]); R = float(np.var(kl)) + 1e-10
-        x = np.array([kl[0], 0.0]); P = np.eye(2) * 0.1
-        F = np.array([[1.0, 1.0], [0.0, 1.0]]); H = np.array([[1.0, 0.0]])
-        for obs in kl:
-            x = F @ x; P = F @ P @ F.T + Q
-            K = P @ H.T / (float(H @ P @ H.T) + R)
-            x = x + K.flatten() * (obs - float(H @ x))
-            P = (np.eye(2) - np.outer(K.flatten(), H)) @ P
-        out["kalman_velocity"] = float(x[1])
-        out["kalman_residual"] = float(kl[-1] - float(H @ x))
-    return out
-
-
-def _arima_15m_at(df: "pd.DataFrame") -> float:
-    if len(df) < 20:
-        return float("nan")
-    c = df["close"]
-    lr = np.log(c / c.shift(1)).dropna()
-    try:
-        from statsmodels.tsa.arima.model import ARIMA
-        return float(ARIMA(lr, order=(2, 0, 1)).fit().forecast(steps=1).iloc[0])
-    except Exception:
-        return float("nan")
 
 
 def _vol_hmm_state(live_1m: "pd.DataFrame") -> "int | None":
@@ -554,16 +438,6 @@ CSV_COLUMNS = [
     # Logged to start accumulating overlap data for a future test of whether the
     # regime finding (validated on the hourly book) also applies to 15m trades.
     "pup_v3_hmm_state",
-    # 2026-07-08: SOL short-timeframe (5m/15m) VWAP HMM rescue signals -- these
-    # genuinely don't exist anywhere else in this codebase at 5m/15m (only 1h
-    # versions existed). kalman_velocity_15m is the live sol_15m_vwap_hmm_gates
-    # rescue condition; the rest are shadow-logged for future re-validation.
-    "kc_pct_5m", "kc_bo_5m", "kc_pct_15m", "kc_bo_15m",
-    "donch_breakout_5m", "donch_pos_5m", "donch_breakout_15m", "donch_pos_15m",
-    "stoch_cross_5m", "stoch_cross_15m",
-    "kalman_velocity_5m", "kalman_residual_5m", "hurst_exponent_5m", "ou_theta_5m",
-    "kalman_velocity_15m", "kalman_residual_15m", "hurst_exponent_15m", "ou_theta_15m",
-    "arima_forecast_15m",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -1836,59 +1710,20 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         _rank_labels = {0: "low-vol-bear", 1: "low-vol-bull", 2: "high-vol"}
         print(f"  [vol_hmm] rank={_vol_state}  ({_rank_labels.get(_vol_state, '?')})")
 
-    # VWAP MTF HMM state (BTC + SOL — each asset's own model; gates applied in contract loop)
+    # VWAP MTF HMM state (BTC only — gates + St0 boost applied in contract loop)
     _vwap_state: "int | None" = None
-    if asset in ("BTC", "SOL") and live_1m is not None:
-        _vwap_state = _vwap_hmm_state_predict(live_1m, asset=asset)
+    if asset == "BTC" and live_1m is not None:
+        _vwap_state = _vwap_hmm_state_predict(live_1m)
     sig["vwap_hmm_state"] = _vwap_state if _vwap_state is not None else ""
     if _vwap_state is not None:
-        _vwap_labels_btc = {
+        _vwap_labels = {
             0: "below-15m-VWAP-rising (NO-boost×1.25)",
             2: "above-VWAPs-falling (NO-block if vol<0.216)",
             4: "BULL-EXTENSION (NO-pure-block)",
             5: "neutral-flat (NO-block if sk1h<85)",
             7: "mildly-bull-rising (NO-block if chg15m>=-0.112)",
         }
-        _vwap_labels_sol = {
-            1: "St1 (YES-block unless kalman_velocity_15m>=0.00016)",
-            5: "St5 (NO-block unless kalman_velocity_15m<-0.001)",
-        }
-        _vwap_labels = _vwap_labels_btc if asset == "BTC" else _vwap_labels_sol
-        print(f"  [vwap_hmm_{asset.lower()}] state={_vwap_state}  ({_vwap_labels.get(_vwap_state, str(_vwap_state))})")
-
-    # Short-timeframe (5m/15m) signal set for SOL's VWAP HMM rescue conditions
-    # (2026-07-08). Shadow-logged regardless of state so the full distribution
-    # accumulates for future re-validation, not just the two gated states.
-    # df5/df15 are local to compute_signals(), not in scope here -- resample
-    # live_1m directly, same self-contained pattern _vwap_hmm_state_predict uses.
-    if asset == "SOL" and live_1m is not None:
-        _sf_agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-        df5 = live_1m.resample("5min").agg(_sf_agg).dropna()
-        df15 = live_1m.resample("15min").agg(_sf_agg).dropna()
-        _kc5 = _keltner_at(df5); sig["kc_pct_5m"] = _kc5[0]; sig["kc_bo_5m"] = _kc5[1]
-        _kc15 = _keltner_at(df15); sig["kc_pct_15m"] = _kc15[0]; sig["kc_bo_15m"] = _kc15[1]
-        _dc5 = _donchian_at(df5); sig["donch_breakout_5m"] = _dc5[0]; sig["donch_pos_5m"] = _dc5[1]
-        _dc15 = _donchian_at(df15); sig["donch_breakout_15m"] = _dc15[0]; sig["donch_pos_15m"] = _dc15[1]
-        sig["stoch_cross_5m"] = _stoch_cross_at(df5)
-        sig["stoch_cross_15m"] = _stoch_cross_at(df15)
-        _kho5 = _kalman_hurst_ou_at(df5)
-        sig["kalman_velocity_5m"] = _kho5["kalman_velocity"]
-        sig["kalman_residual_5m"] = _kho5["kalman_residual"]
-        sig["hurst_exponent_5m"] = _kho5["hurst_exponent"]
-        sig["ou_theta_5m"] = _kho5["ou_theta"]
-        _kho15 = _kalman_hurst_ou_at(df15)
-        sig["kalman_velocity_15m"] = _kho15["kalman_velocity"]
-        sig["kalman_residual_15m"] = _kho15["kalman_residual"]
-        sig["hurst_exponent_15m"] = _kho15["hurst_exponent"]
-        sig["ou_theta_15m"] = _kho15["ou_theta"]
-        sig["arima_forecast_15m"] = _arima_15m_at(df15)
-        _kv15_p = sig.get("kalman_velocity_15m")
-        _kc15_p = sig.get("kc_pct_15m")
-        print(f"  [sol_shortframe] kc_pct_15m={_kc15_p:.3f} kalman_velocity_15m={_kv15_p:+.5f} "
-              f"stoch_cross_15m={sig.get('stoch_cross_15m', 'n/a')}"
-              if isinstance(_kv15_p, (int, float)) and _kv15_p == _kv15_p
-              and isinstance(_kc15_p, (int, float)) and _kc15_p == _kc15_p
-              else "  [sol_shortframe] insufficient data this cycle")
+        print(f"  [vwap_hmm] state={_vwap_state}  ({_vwap_labels.get(_vwap_state, str(_vwap_state))})")
 
     def _fmt(v, fmt=".3f"):
         return format(v, fmt) if isinstance(v, (int, float)) and v == v else "n/a"
@@ -2448,48 +2283,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     print(f"    [btc_15m_vwap_hmm_no_gate] RESCUE NO {ticker} — "
                           f"vwap_hmm_state=7 but chg_15m={_vhc15m:+.3f}%<-0.112 "
                           f"(15m reversal confirms downward; WR=75%)")
-
-        # [sol_15m_vwap_hmm_gates] SOL YES/NO gates from SOL's own VWAP MTF HMM
-        # (8-state, trained + validated 2026-07-08 -- independent model, not a
-        # template of BTC's state numbering). Comprehensive rescue search on
-        # 9,086 resolved 15m contracts (reform_results/vwap_hmm_sol15m_20260708/),
-        # including 5m/15m short-timeframe signals that don't exist anywhere
-        # else in this codebase (only 1h versions existed before this build).
-        #   St1 YES block: WR=13.2% vs BE=18.7% (edge=-5.5pp) unless
-        #     kalman_velocity_15m>=0.00016 rescues (n=110, edge=+11.9pp,
-        #     bootstrap p=0.0020, 6/8 weeks -- NOTE: softened in the most
-        #     recent 2 weeks, watch live performance closely).
-        #   St5 NO block: WR=16.9% vs BE=22.1% (edge=-5.3pp) unless
-        #     kalman_velocity_15m<-0.001 rescues (n=70, edge=+18.1pp,
-        #     bootstrap p=0.0005, 7/7 weeks -- robust across the full window).
-        # Deployed live per explicit user decision overriding the standing
-        # paper-first rule, given backtest strength -- flagged in memory.
-        # Backup: paper_trade_runner_15m_pre_sol_vwap_hmm_20260708.py
-        if asset.upper() == "SOL" and _vwap_state is not None:
-            _sol_kv15 = sig.get("kalman_velocity_15m")
-            _sol_kv15_ok = isinstance(_sol_kv15, (int, float)) and _sol_kv15 == _sol_kv15
-            if best_side == "yes" and _vwap_state == 1:
-                if _sol_kv15_ok and _sol_kv15 >= 0.00016:
-                    print(f"    [sol_15m_vwap_hmm_gate] RESCUE YES {ticker} — "
-                          f"vwap_hmm_state=1 but kalman_velocity_15m={_sol_kv15:+.5f}>=0.00016")
-                else:
-                    print(f"    [sol_15m_vwap_hmm_gate] BLOCK YES {ticker} — "
-                          f"vwap_hmm_state=1 (WR=13.2% vs BE=18.7%), "
-                          f"kalman_velocity_15m={_sol_kv15}"
-                          + ("<0.00016" if _sol_kv15_ok else " (n/a)"))
-                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                    continue
-            elif best_side == "no" and _vwap_state == 5:
-                if _sol_kv15_ok and _sol_kv15 < -0.001:
-                    print(f"    [sol_15m_vwap_hmm_gate] RESCUE NO {ticker} — "
-                          f"vwap_hmm_state=5 but kalman_velocity_15m={_sol_kv15:+.5f}<-0.001")
-                else:
-                    print(f"    [sol_15m_vwap_hmm_gate] BLOCK NO {ticker} — "
-                          f"vwap_hmm_state=5 (WR=16.9% vs BE=22.1%), "
-                          f"kalman_velocity_15m={_sol_kv15}"
-                          + (">=-0.001" if _sol_kv15_ok else " (n/a)"))
-                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                    continue
 
         # [eth_no_consec_gate — 15m ETH NO]
         # Block NO when in a sustained bearish streak AND stochastic is already oversold.
@@ -3206,26 +2999,6 @@ def _build_row(
         "p_up_v3":              _f(sig.get("p_up_v3_btc")),
         "v3_agree":             _v3_agree_val(sig.get("p_up_v3_btc"), side),
         "pup_v3_hmm_state":     sig.get("pup_v3_hmm_state", ""),
-        # 2026-07-08: SOL short-timeframe VWAP HMM rescue signals (blank for BTC/ETH)
-        "kc_pct_5m":            _f(sig.get("kc_pct_5m")),
-        "kc_bo_5m":             sig.get("kc_bo_5m", ""),
-        "kc_pct_15m":           _f(sig.get("kc_pct_15m")),
-        "kc_bo_15m":            sig.get("kc_bo_15m", ""),
-        "donch_breakout_5m":    sig.get("donch_breakout_5m", ""),
-        "donch_pos_5m":         _f(sig.get("donch_pos_5m")),
-        "donch_breakout_15m":   sig.get("donch_breakout_15m", ""),
-        "donch_pos_15m":        _f(sig.get("donch_pos_15m")),
-        "stoch_cross_5m":       sig.get("stoch_cross_5m", ""),
-        "stoch_cross_15m":      sig.get("stoch_cross_15m", ""),
-        "kalman_velocity_5m":   _f(sig.get("kalman_velocity_5m")),
-        "kalman_residual_5m":   _f(sig.get("kalman_residual_5m")),
-        "hurst_exponent_5m":    _f(sig.get("hurst_exponent_5m")),
-        "ou_theta_5m":          _f(sig.get("ou_theta_5m")),
-        "kalman_velocity_15m":  _f(sig.get("kalman_velocity_15m")),
-        "kalman_residual_15m":  _f(sig.get("kalman_residual_15m")),
-        "hurst_exponent_15m":   _f(sig.get("hurst_exponent_15m")),
-        "ou_theta_15m":         _f(sig.get("ou_theta_15m")),
-        "arima_forecast_15m":   _f(sig.get("arima_forecast_15m")),
     }
 
 

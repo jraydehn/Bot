@@ -3117,15 +3117,20 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # St0: price below 15m VWAP with 1m velocity turning up = bearish structural context.
     # Short-term recovery doesn't reach high strikes → NO wins at 58.3% vs 40.5% base.
     # Paper trades: n=115, MCPT p=0.000 z=+4.35, 4/5 wks positive, pnl=+$2,021.
-    # [2026-07-08 STAYS SHADOWED] Original backtest had the containing-bar lookahead bug
-    # (same as the block conditions above). Re-checked against real live-logged post-deploy
-    # data (07-01->07-08, no reconstruction): n=27, WR=33.3% vs BE=30.3%, edge=+3.0pp,
-    # P(<=0)=0.385 -- directionally consistent with the original boost but genuinely
-    # inconclusive at this sample size (unlike the block conditions, which had a much
-    # starker real-data signal: WR=1.9% vs 21.0%). Boost stays disabled pending more data.
+    # [2026-07-09 RE-ENABLED] Was shadowed 07-08 (original backtest had the containing-bar
+    # lookahead; live post-deploy sample was inconclusive at n=27). Re-enabled after the
+    # FRESH zero-lookahead rebuild (reform_results/btc_vwap_fresh_20260709/) independently
+    # validated the St0 region: fresh state N0 (old-St0 correspondence 85% in causal space)
+    # on the real TAKEN book = +11.2pp ticker-clustered edge, P=0.007, positive 6/6 weeks
+    # spanning both model eras, +$1,057. Convention note: this condition uses the live
+    # partial-bar decoder's state; the fresh validation used completed-bar states -- the
+    # region is robust across both mappings (85% agreement), accepted gap.
     if asset == "BTC" and side == "no" and _vwap_state == 0:
-        print(f"    [vwap_hmm_st0_no_boost] SHADOW (disabled, inconclusive on live data) — "
-              f"vwap_state=0, would-be ×1.25")
+        _boosted_v0 = round(min(kelly.bet_amount * 1.25, MAX_BET_FRAC * bankroll), 2)
+        if _boosted_v0 > kelly.bet_amount:
+            print(f"    [vwap_hmm_st0_no_boost] vwap_state=0 (below-VWAP recovery) → ×1.25 "
+                  f"(${kelly.bet_amount:.2f} → ${_boosted_v0:.2f}, fresh-validated +11.2pp P=0.007)")
+            kelly.bet_amount = _boosted_v0
 
     # [donch_low_no_boost 2026-06-22] 1.5x Kelly (ceil 7.5%) for NO when price is LOW in its
     # 1h Donchian channel (<0.20 = bottom 20% of 20h range → range-bound, NO safe). Validated on

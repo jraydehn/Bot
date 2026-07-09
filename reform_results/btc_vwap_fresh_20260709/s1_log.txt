@@ -1,0 +1,78 @@
+Model is not converging.  Current: -279019.16103946615 is not greater than -279019.1010794507. Delta is -0.059960015467368066
+Model is not converging.  Current: -270968.4152776287 is not greater than -270968.3908736251. Delta is -0.024404003575909883
+1m source ends 2026-07-09 20:57:00+00:00;  15m bars: 88132
+feature matrix: 88080 x 5
+
+BIC selection (4-10):
+  n=4: BIC=858136.5
+  n=5: BIC=658723.0
+  n=6: BIC=623144.8
+  n=7: BIC=586872.4
+  n=8: BIC=559678.1
+  n=9: BIC=543884.0
+  n=10: BIC=520766.3
+selected 10 states
+
+causal decode over 4882 recent bars (new + old models)...
+new-state distribution: {0: 635, 1: 691, 2: 446, 3: 243, 4: 703, 5: 622, 6: 379, 7: 728, 8: 202, 9: 233}
+
+new-state centroids:
+  N0 (n=635): vwap_dist_15m=-0.615  vwap_dist_5m=-0.215  vwap_dist_1m=-0.022  vwap_vel_1m=+0.003  vwap_spread=+0.593
+  N1 (n=691): vwap_dist_15m=+0.204  vwap_dist_5m=+0.069  vwap_dist_1m=+0.003  vwap_vel_1m=-0.000  vwap_spread=-0.201
+  N2 (n=446): vwap_dist_15m=+0.294  vwap_dist_5m=+0.136  vwap_dist_1m=+0.009  vwap_vel_1m=+0.000  vwap_spread=-0.285
+  N3 (n=243): vwap_dist_15m=+0.001  vwap_dist_5m=+0.038  vwap_dist_1m=+0.015  vwap_vel_1m=+0.014  vwap_spread=+0.014
+  N4 (n=703): vwap_dist_15m=-0.197  vwap_dist_5m=-0.082  vwap_dist_1m=-0.009  vwap_vel_1m=+0.003  vwap_spread=+0.187
+  N5 (n=622): vwap_dist_15m=+0.056  vwap_dist_5m=+0.025  vwap_dist_1m=-0.000  vwap_vel_1m=-0.000  vwap_spread=-0.056
+  N6 (n=379): vwap_dist_15m=+0.688  vwap_dist_5m=+0.239  vwap_dist_1m=+0.026  vwap_vel_1m=-0.001  vwap_spread=-0.662
+  N7 (n=728): vwap_dist_15m=-0.198  vwap_dist_5m=-0.071  vwap_dist_1m=+0.001  vwap_vel_1m=-0.000  vwap_spread=+0.200
+  N8 (n=202): vwap_dist_15m=+1.386  vwap_dist_5m=+0.488  vwap_dist_1m=+0.063  vwap_vel_1m=-0.010  vwap_spread=-1.323
+  N9 (n=233): vwap_dist_15m=-1.234  vwap_dist_5m=-0.470  vwap_dist_1m=-0.052  vwap_vel_1m=+0.005  vwap_spread=+1.182
+
+old->new state cross-map (row=old causal, col=new causal, %):
+new     0     1     2     3     4     5     6     7     8    9
+old                                                           
+0    0.85  0.00  0.00  0.01  0.07  0.00  0.00  0.07  0.00  0.0
+1    0.00  0.83  0.01  0.01  0.00  0.00  0.15  0.00  0.00  0.0
+2    0.00  0.00  0.53  0.09  0.00  0.00  0.38  0.00  0.00  0.0
+3    0.00  0.00  0.00  0.13  0.76  0.10  0.00  0.01  0.00  0.0
+4    0.00  0.00  0.00  0.03  0.00  0.00  0.35  0.00  0.62  0.0
+5    0.00  0.34  0.00  0.00  0.00  0.00  0.00  0.66  0.00  0.0
+6    0.17  0.00  0.00  0.14  0.00  0.00  0.00  0.00  0.00  0.7
+7    0.00  0.01  0.21  0.03  0.00  0.75  0.00  0.00  0.00  0.0
+
+=== scan-archive resolved population with fresh state: 3087 rows, 1320 tickers ===
+stateside   rows tickers     WR     BE  tk_edge  P(<=0)   wk+
+N0   YES     240     124  0.421  0.413  +0.0225  0.2632   3/5
+N0   NO      191     106  0.377  0.366  +0.0286  0.2357   2/5
+N1   YES     321     159  0.483  0.446  +0.0554  0.0275   4/5
+N1   NO      175     103  0.326  0.321  +0.0116  0.3560   2/5
+N2   YES     184      95  0.304  0.330  +0.0008  0.4930   1/5
+N2   NO       85      47  0.412  0.394  +0.0487  0.1832   1/5
+N3   YES      82      45  0.378  0.398  +0.0355  0.2777   1/5
+N4   YES     273     136  0.421  0.437  +0.0043  0.4570   2/5
+N4   NO      135      80  0.319  0.314  +0.0318  0.1950   1/5
+N5   YES     310     150  0.384  0.402  +0.0042  0.4420   2/5
+N5   NO      143      87  0.322  0.331  +0.0412  0.1480   3/5
+N6   YES     148      70  0.514  0.423  +0.0885  0.0328   3/4
+N7   YES     387     198  0.408  0.414  +0.0098  0.3635   3/5
+N7   NO      171     107  0.480  0.356  +0.1240  0.0000   4/5
+N8   YES      80      40  0.425  0.435  +0.0112  0.4263   1/3
+N9   NO       63      33  0.270  0.315  -0.0435  0.7642   1/5
+
+=== TAKEN book with fresh state: 900 trades ===
+N0 NO : n=106 tickers=105 edge=+0.1072 tk_edge=+0.1119 P(<=0)=0.0070 wk+=6/6 $=+1056.66
+N1 YES: n=49 tickers=49 edge=-0.0200 tk_edge=-0.0180 P(<=0)=0.6052 wk+=3/5 $=-177.47
+N1 NO : n=83 tickers=75 edge=-0.0848 tk_edge=-0.0784 P(<=0)=0.9390 wk+=3/5 $=-1067.29
+N2 YES: n=31 tickers=31 edge=-0.0032 tk_edge=-0.0008 P(<=0)=0.5000 wk+=2/4 $=+31.89
+N2 NO : n=37 tickers=34 edge=+0.1405 tk_edge=+0.1726 P(<=0)=0.0175 wk+=4/5 $=+760.70
+N3 NO : n=34 tickers=31 edge=-0.0241 tk_edge=-0.0369 P(<=0)=0.6645 wk+=2/5 $=+272.57
+N4 YES: n=34 tickers=34 edge=+0.0049 tk_edge=+0.0058 P(<=0)=0.4617 wk+=1/5 $=-143.08
+N4 NO : n=97 tickers=91 edge=-0.0312 tk_edge=-0.0472 P(<=0)=0.8297 wk+=2/5 $=+19.48
+N5 YES: n=46 tickers=46 edge=+0.0264 tk_edge=+0.0249 P(<=0)=0.3315 wk+=2/5 $=+189.96
+N5 NO : n=65 tickers=58 edge=+0.0195 tk_edge=+0.0383 P(<=0)=0.2705 wk+=3/5 $=+278.74
+N6 YES: n=51 tickers=51 edge=+0.0579 tk_edge=+0.0576 P(<=0)=0.1583 wk+=3/4 $=+239.43
+N6 NO : n=34 tickers=34 edge=-0.0400 tk_edge=-0.0406 P(<=0)=0.7060 wk+=2/6 $=-246.50
+N7 YES: n=40 tickers=40 edge=+0.0518 tk_edge=+0.0507 P(<=0)=0.2193 wk+=4/5 $=+158.91
+N7 NO : n=83 tickers=81 edge=+0.0654 tk_edge=+0.0718 P(<=0)=0.0927 wk+=4/6 $=+340.34
+N9 NO : n=54 tickers=54 edge=-0.0403 tk_edge=-0.0424 P(<=0)=0.7847 wk+=2/6 $=-675.13
+DONE_S1

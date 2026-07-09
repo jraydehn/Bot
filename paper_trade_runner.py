@@ -4405,10 +4405,45 @@ def main() -> None:
                                    else "bp_5m<0.30")
                         print(f"  [hmm_smc_s2_no_gate] RESCUE NO {c['ticker']} — "
                               f"State2(ChoCH) pm={pm:.3f}>0.80 BUT {_s2_why} (genuine breakdown)")
+                        # [2026-07-09] Was print-only, zero CSV audit trail -- found while trying
+                        # to PnL-check this gate and discovering it's invisible to blocked_trades.csv.
+                        # Added now, does not change gate behavior. Calls gate_audit_logger directly,
+                        # matching the established pattern of other pre-dec_c gates in this region
+                        # (e.g. rsi_oversold_yes_gate above) -- NOT the _log_block closure defined
+                        # later at ~line 4729, which depends on dec_c (the combined trade decision,
+                        # not computed yet at this point in the scan).
+                        _s2_signals = {
+                            "smc_state": float(_hmm_smc_state),
+                            "ema_stack_bias": float(confirm.ema_stack_bias) if confirm.ema_stack_bias is not None else float("nan"),
+                            "rvol_inv": float(_rvol_inv_btc) if _rvol_inv_btc is not None else float("nan"),
+                            "bp_5m": float(_bp5m_s2),
+                        }
+                        gate_audit_logger.log_block(
+                            gate_name="hmm_smc_s2_no_gate__rescue",
+                            ticker=c["ticker"], asset=args.asset, side="no",
+                            pm=pm, p_model=p_model_comp or float("nan"), net_edge=0.0,
+                            offset_pct=offset_c, strike=s_k, spot=spot, tau_minutes=tau_c,
+                            count=0, kelly_fraction=0.0, close_ts=c.get("close_time", ""),
+                            signals=_s2_signals, now_utc=now_utc, bankroll=args.bankroll,
+                        )
                     else:
                         _btc_oi_no_blocked = True
                         print(f"  [hmm_smc_s2_no_gate] BLOCK NO {c['ticker']} — "
                               f"State2(ChoCH), pm={pm:.3f}>0.80 (WR=8% historically, structure flip too slow)")
+                        _s2_signals = {
+                            "smc_state": float(_hmm_smc_state),
+                            "ema_stack_bias": float(confirm.ema_stack_bias) if confirm.ema_stack_bias is not None else float("nan"),
+                            "rvol_inv": float(_rvol_inv_btc) if _rvol_inv_btc is not None else float("nan"),
+                            "bp_5m": float(_bp5m_s2),
+                        }
+                        gate_audit_logger.log_block(
+                            gate_name="hmm_smc_s2_no_gate",
+                            ticker=c["ticker"], asset=args.asset, side="no",
+                            pm=pm, p_model=p_model_comp or float("nan"), net_edge=0.0,
+                            offset_pct=offset_c, strike=s_k, spot=spot, tau_minutes=tau_c,
+                            count=0, kelly_fraction=0.0, close_ts=c.get("close_time", ""),
+                            signals=_s2_signals, now_utc=now_utc, bankroll=args.bankroll,
+                        )
                 _p_no_eval = _p_bounce if _stoch_bounce_no else (1.0 - _p_no_btc)
                 _dec_no = None if _btc_oi_no_blocked else evaluate_trade(
                     struct.structure_bias, confirm.confirmation_bias,

@@ -208,4 +208,7 @@ CSV_COLUMNS = [
     # 2026-07-08: 5m Bollinger bandwidth (BTC hourly). Drives
     # hmm_pup_v3_crashing_no_gate's rescue (bb_width_5m>=0.0077 lets NO trade).
     "bb_width_5m",
+    # 2026-07-09: SOL hourly VWAP MTF HMM state (0-7; blank for BTC/ETH).
+    # Drives sol_1h_vwap_s2_no_gate (block) + sol_1h_vwap_s3_no_boost (x1.25).
+    "vwap_1h_state",
 ]

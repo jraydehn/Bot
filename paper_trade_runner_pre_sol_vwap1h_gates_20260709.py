@@ -1472,80 +1472,6 @@ def _get_cg_flow_state(now_utc) -> "int | None":
         return None
 
 
-# ── SOL hourly VWAP MTF HMM (2026-07-09) ───────────────────────────────────
-# 8-state on rolling-20 VWAP distances at 1h/4h/1d + velocity + spread.
-# Validated on the pre-reset hourly archive (558 taken trades, 04-15→07-07,
-# reform_results/sol_hmms_20260709/): S2 (deep below all VWAPs) NO =
-# -13.4pp p≈0.043 0/4wks (block); S3 NO = +15.6pp P=0.0000 +$2,642 (boost).
-# Rescue search on the S2-NO bucket: 342 splits, 0 survivors (disclosed
-# under-powered at n=49). Feature construction below replicates the training
-# script exactly (completed bars only at every frame).
-_VWAP1H_SOL_PKL = Path(__file__).parent / "models" / "hmm_vwap_mtf_sol_1h.pkl"
-_VWAP1H_SOL_PKG: "dict | None | str" = "unloaded"
-_VWAP1H_SOL_CACHE: dict = {"hour": None, "state": None}
-
-
-def _get_vwap1h_state_sol(now_utc) -> "int | None":
-    """Decode current SOL hourly VWAP MTF state (0-7). Hourly-cached; fail-open."""
-    global _VWAP1H_SOL_PKG
-    _hr = now_utc.replace(minute=0, second=0, microsecond=0)
-    if _VWAP1H_SOL_CACHE["hour"] == _hr:
-        return _VWAP1H_SOL_CACHE["state"]
-    if _VWAP1H_SOL_PKG == "unloaded":
-        try:
-            with open(_VWAP1H_SOL_PKL, "rb") as _f:
-                _VWAP1H_SOL_PKG = _pickle.load(_f)
-            print(f"  [vwap1h_hmm_sol] Loaded {_VWAP1H_SOL_PKL.name} "
-                  f"({_VWAP1H_SOL_PKG['n_states']} states)")
-        except Exception as _e:
-            print(f"  [vwap1h_hmm_sol] load failed: {_e}")
-            _VWAP1H_SOL_PKG = None
-    if _VWAP1H_SOL_PKG is None:
-        return None
-    try:
-        d1h = fetch_recent_candles("1h", lookback_bars=900, asset="SOL")
-        if d1h is None or len(d1h) < 560:
-            _VWAP1H_SOL_CACHE.update(hour=_hr, state=None)
-            return None
-        d1h = d1h.iloc[:-1]                      # completed 1h bars only
-        _AGG = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-        d4h = d1h.resample("4h").agg(_AGG).dropna()
-        d1d = d1h.resample("1D").agg(_AGG).dropna()
-        # drop partial trailing coarse bars (only fully-closed 4h/1d bars usable)
-        _now_floor = d1h.index[-1] + pd.Timedelta("1h")
-        d4h = d4h[d4h.index + pd.Timedelta("4h") <= _now_floor]
-        d1d = d1d[d1d.index + pd.Timedelta("1D") <= _now_floor]
-
-        def _rv(df, n=20):
-            tp = (df["high"] + df["low"] + df["close"]) / 3
-            ctv = (tp * df["volume"]).rolling(n, min_periods=n).sum()
-            cv = df["volume"].rolling(n, min_periods=n).sum()
-            vw = ctv / cv.replace(0, float("nan"))
-            return (df["close"] - vw) / vw.replace(0, float("nan")) * 100
-
-        dist_1h, dist_4h, dist_1d = _rv(d1h), _rv(d4h), _rv(d1d)
-        feat = pd.DataFrame(index=d1h.index)
-        feat["vwap_dist_1h"] = dist_1h
-        _c4 = dist_4h.copy(); _c4.index = _c4.index + pd.Timedelta("4h")
-        feat["vwap_dist_4h"] = _c4.reindex(feat.index + pd.Timedelta("1h"), method="ffill").values
-        _cd = dist_1d.copy(); _cd.index = _cd.index + pd.Timedelta("1D")
-        feat["vwap_dist_1d"] = _cd.reindex(feat.index + pd.Timedelta("1h"), method="ffill").values
-        feat["vwap_vel_1h"] = feat["vwap_dist_1h"].diff()
-        feat["vwap_spread"] = feat["vwap_dist_1h"] - feat["vwap_dist_1d"]
-        feat = feat.dropna()
-        if len(feat) < 10:
-            _VWAP1H_SOL_CACHE.update(hour=_hr, state=None)
-            return None
-        X = _VWAP1H_SOL_PKG["scaler"].transform(feat[_VWAP1H_SOL_PKG["feat_cols"]].values[-64:])
-        state = int(_VWAP1H_SOL_PKG["model"].predict(X)[-1])
-        _VWAP1H_SOL_CACHE.update(hour=_hr, state=state)
-        return state
-    except Exception as _e:
-        print(f"  [vwap1h_hmm_sol] decode failed: {_e}")
-        _VWAP1H_SOL_CACHE.update(hour=_hr, state=None)
-        return None
-
-
 def _load_btc_iso() -> "dict | None":
     global _BTC_ISO_CAL
     if _BTC_ISO_CAL != "unloaded":
@@ -3402,13 +3328,6 @@ def main() -> None:
 
         # CoinGlass flow-regime state — once per scan cycle (hourly-cached inside).
         _cg_flow_state = _get_cg_flow_state(now_utc) if args.asset == "BTC" else None
-
-        # SOL hourly VWAP MTF state — once per scan cycle (hourly-cached inside).
-        _vwap1h_state_sol = _get_vwap1h_state_sol(now_utc) if args.asset == "SOL" else None
-        if _vwap1h_state_sol is not None:
-            _v1h_lbl = {2: "deep-below-VWAPs (NO-block)", 3: "S3 (NO-boost)"}.get(
-                _vwap1h_state_sol, str(_vwap1h_state_sol))
-            print(f"  [vwap1h_hmm_sol] state={_vwap1h_state_sol}  ({_v1h_lbl})")
         if _cg_flow_state is not None:
             _cgf_lbl = {0: "shortliq-quiet", 1: "neutral", 2: "buy-flow", 3: "sell-flow",
                         4: "long-cascade", 5: "short-squeeze", 6: "longliq-quiet"}
@@ -6065,22 +5984,6 @@ def main() -> None:
                 _log_block("sol_no_vwap_neutral_gate")
                 continue
 
-            # [sol_1h_vwap_s2_no_gate] Block SOL NO when the hourly VWAP MTF HMM is in
-            # State 2 (price deep below ALL VWAPs: 1h -0.75 / 4h -3.2 / 1d -5.5) — SOL
-            # mean-reverts upward out of deep-oversold conditions and NO gets bounced.
-            # Validated 2026-07-09 on the pre-reset hourly archive (558 taken trades):
-            # S2-NO n=49/28eps, ep_edge=-13.4pp, p≈0.043, 0/4 wks positive, -$768.
-            # Rescue search: 342 splits, 0 survivors (disclosed under-powered at n=49).
-            # Pure block, fail-open. Paper-only book (SOL hourly). Multi-era archive
-            # caveat noted in project_sol_hmms_20260709 — revisit with post-reset data.
-            # Backup: paper_trade_runner_pre_sol_vwap1h_gates_20260709.py
-            if (args.asset == "SOL" and dec_c.side == "no"
-                    and _vwap1h_state_sol is not None and _vwap1h_state_sol == 2):
-                print(f"  [sol_1h_vwap_s2_no_gate] BLOCK NO {c['ticker']} — "
-                      f"vwap1h_state=2 (deep below all VWAPs, ep_edge=-13.4pp, 0/4 wks)")
-                _log_block("sol_1h_vwap_s2_no_gate")
-                continue
-
             # [sol_no_structure_neg_gate] Hard block SOL NO when structure_bias=-1 AND pm>=0.30.
             # Analysis (2026-05-23, n=17): WR=41.2%, BE≈64.0%, P&L=-$227.
             # structure_bias=-1 AND pm<0.30 (excluded): n=37, WR=86.5% — correctly not blocked.
@@ -7450,21 +7353,6 @@ def main() -> None:
                 dec_c.bet_fraction = _ce_boost_frac
                 dec_c.bet_amount   = round(_ce_boost_frac * args.bankroll, 2)
 
-            # [sol_1h_vwap_s3_no_boost] 1.25x Kelly for SOL NO when the hourly VWAP MTF
-            # HMM is in State 3. Validated 2026-07-09 on the pre-reset hourly archive:
-            # S3-NO n=74/33eps, ep_edge=+15.6pp vs book baseline +6.5pp, P=0.0000,
-            # +$2,642, 4/6 wks. Applied after all blocks (same convention as the
-            # cal_err boost above). Paper-only book. Cap 0.10 bet_fraction.
-            if (args.asset == "SOL" and dec_c.decision == "trade"
-                    and dec_c.side == "no"
-                    and _vwap1h_state_sol is not None and _vwap1h_state_sol == 3):
-                _v3_boost_frac = min(dec_c.bet_fraction * 1.25, 0.10)
-                print(f"  [sol_1h_vwap_s3_no_boost] 1.25x Kelly NO {c['ticker']} — "
-                      f"vwap1h_state=3 (ep_edge=+15.6pp P=0.0000, "
-                      f"{dec_c.bet_fraction:.4f}→{_v3_boost_frac:.4f})")
-                dec_c.bet_fraction = _v3_boost_frac
-                dec_c.bet_amount   = round(_v3_boost_frac * args.bankroll, 2)
-
             # [btc_vpin_no_boost] Conviction Kelly boost for BTC NO when vpin (informed
             # selling order flow) confirms an OTM NO at pm<0.30. Archive deduped, pm[0.10,0.30):
             #   vpin=1:         n=275, NO_WR=89% vs BE=83%, EV/ct=+0.057, all 5 wks +, MCPT p=0.000
@@ -7912,7 +7800,6 @@ def main() -> None:
         "sol_p_up_v1":        round(_sol_p_up_cycle, 4) if _sol_p_up_cycle is not None else "",
         "cg_flow_state":      _cg_flow_state if _cg_flow_state is not None else "",
         "bb_width_5m":        round(_bb_width_5m, 6) if _bb_width_5m == _bb_width_5m else "",
-        "vwap_1h_state":      _vwap1h_state_sol if _vwap1h_state_sol is not None else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

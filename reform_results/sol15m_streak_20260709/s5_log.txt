@@ -1,0 +1,16 @@
+bucket: n=559 edge=-0.0467
+reconstructing EMA/ADX/MACD/VWAP at 4 TFs (zero-lookahead)...
+  5m done (559/559)
+  15m done (559/559)
+  1h done (559/559)
+  4h done (559/559)
+
+TOTAL tests this pass: 748
+positive-edge subsets: 25
+
+SURVIVORS: 0
+
+near-misses (P<=0.15), top 12:
+        feature      split   n  eps   edge  ep_edge  P_neg  wk_pos  streak_leak    pnl
+m_macdslope_15m >= 0.07964 112   60 0.0389   0.0628 0.1222  0.5714            2 -107.3
+DONE_S5

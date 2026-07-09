@@ -1,0 +1,41 @@
+bucket: n=559  edge=-0.0467  $=-2502.06
+
+=== 1. z_drift dynamics ===
+scan-archive z_drift series: 8418 points 2026-05-24 18:42:03+00:00 -> 2026-07-09 06:25:01+00:00
+coverage: z_delta_1h 559/559, mins_below 558/559
+  z rising (delta>0): n=283 eps=122 edge=-0.0653 ep_edge=-0.0745 P(<=0)=0.9872 P(>=0)=0.0127 wk+=3/7 streak=4/4 $=-1326.37
+  z falling (delta<=0): n=276 eps=141 edge=-0.0275 ep_edge=-0.0500 P(<=0)=0.9360 P(>=0)=0.0640 wk+=2/7 streak=0/4 $=-1175.69
+  fresh low-drift (<60min below): n=63 eps=47 edge=-0.1527 ep_edge=-0.1760 P(<=0)=0.9975 P(>=0)=0.0025 wk+=1/7 streak=0/4 $=-588.07
+  stale low-drift (>=240min below): n=362 eps=131 edge=-0.0528 ep_edge=-0.0517 P(<=0)=0.9563 P(>=0)=0.0437 wk+=2/7 streak=0/4 $=-1804.77
+  mid low-drift (60-240min): n=133 eps=56 edge=+0.0167 ep_edge=+0.0203 P(<=0)=0.3422 P(>=0)=0.6577 wk+=3/7 streak=4/4 $=-125.31
+
+=== 2. multi-TF momentum conjunctions ===
+  chg_5m<=0 AND chg_15m<=0 (no live momentum): n=234 eps=143 edge=-0.0422 ep_edge=-0.0495 P(<=0)=0.9177 P(>=0)=0.0823 wk+=3/7 streak=2/4 $=-571.10
+  chg_5m>0 AND chg_15m>0 (danger: live up-momentum): n=123 eps=76 edge=-0.0076 ep_edge=-0.0248 P(<=0)=0.7115 P(>=0)=0.2885 wk+=3/7 streak=0/4 $=-212.27
+  chg_15m<=0 alone: n=294 eps=158 edge=-0.0528 ep_edge=-0.0458 P(<=0)=0.9263 P(>=0)=0.0737 wk+=3/7 streak=2/4 $=-1181.04
+  chg_5m<=0 AND chg_15m<=0 AND chg_1h<=0 (3-TF absent): n=110 eps=78 edge=-0.0853 ep_edge=-0.0950 P(<=0)=0.9722 P(>=0)=0.0278 wk+=1/7 streak=0/4 $=-550.20
+
+=== 3. cross-asset BTC momentum at SOL trade time ===
+BTC 1m: ends 2026-07-09 06:32:00+00:00
+coverage: 559/559
+  BTC 15m chg<=0 (BTC not rising): n=288 eps=150 edge=-0.0434 ep_edge=-0.0561 P(<=0)=0.9667 P(>=0)=0.0333 wk+=3/7 streak=1/4 $=-1020.90
+  BTC 15m chg>0 (BTC rising too): n=271 eps=147 edge=-0.0502 ep_edge=-0.0624 P(<=0)=0.9617 P(>=0)=0.0382 wk+=2/7 streak=3/4 $=-1481.16
+  BTC stoch15<50: n=296 eps=130 edge=-0.0462 ep_edge=-0.0642 P(<=0)=0.9805 P(>=0)=0.0195 wk+=3/7 streak=1/4 $=-977.25
+  BTC 1h chg<=0: n=269 eps=132 edge=-0.0672 ep_edge=-0.0913 P(<=0)=0.9975 P(>=0)=0.0025 wk+=2/7 streak=0/4 $=-1171.91
+  BTC 15m AND SOL 15m both non-rising: n=195 eps=122 edge=-0.0354 ep_edge=-0.0300 P(<=0)=0.8040 P(>=0)=0.1960 wk+=4/7 streak=1/4 $=-570.78
+
+=== 4. ATR-normalized strike distance ===
+coverage: 559/559
+  offset_atr >= 0.08 (far strike, q0.3): n=391 eps=172 edge=-0.0568 ep_edge=-0.0718 P(<=0)=0.9948 P(>=0)=0.0053 wk+=4/7 streak=3/4 $=-1411.25
+  offset_atr < 0.08 (near strike, q0.3): n=168 eps=110 edge=-0.0230 ep_edge=-0.0486 P(<=0)=0.8700 P(>=0)=0.1300 wk+=2/7 streak=1/4 $=-1090.81
+  offset_atr >= 0.16 (far strike, q0.5): n=280 eps=142 edge=-0.0626 ep_edge=-0.0824 P(<=0)=0.9968 P(>=0)=0.0032 wk+=3/7 streak=3/4 $=-1131.65
+  offset_atr < 0.16 (near strike, q0.5): n=279 eps=145 edge=-0.0307 ep_edge=-0.0473 P(<=0)=0.9120 P(>=0)=0.0880 wk+=2/7 streak=1/4 $=-1370.41
+  offset_atr >= 0.26 (far strike, q0.7): n=168 eps=109 edge=-0.0615 ep_edge=-0.0765 P(<=0)=0.9820 P(>=0)=0.0180 wk+=3/7 streak=3/4 $=-660.30
+  offset_atr < 0.26 (near strike, q0.7): n=391 eps=175 edge=-0.0403 ep_edge=-0.0484 P(<=0)=0.9415 P(>=0)=0.0585 wk+=2/7 streak=1/4 $=-1841.76
+
+=== 5. episode position ===
+  1st trade of episode: n=209 eps=209 edge=-0.0694 ep_edge=-0.0686 P(<=0)=0.9840 P(>=0)=0.0160 wk+=1/7 streak=1/4 $=-1423.56
+  2nd+ trade of episode: n=350 eps=123 edge=-0.0331 ep_edge=-0.0623 P(<=0)=0.9765 P(>=0)=0.0235 wk+=3/7 streak=3/4 $=-1078.50
+  3rd+ trade of episode: n=227 eps=79 edge=-0.0108 ep_edge=-0.0521 P(<=0)=0.8795 P(>=0)=0.1205 wk+=5/7 streak=2/4 $=-305.36
+
+DONE_S3

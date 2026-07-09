@@ -2851,31 +2851,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     evaluated.append((best_edge, best_side, c, p_model, offset_pct))
                     continue
 
-        # [sol_15m_no_zdrift_gate] Block SOL NO when z_drift_6h < 0.55 (2026-07-09).
-        # z_drift_6h = rolling 6h mean of realized settlement z-scores. Low = the vol
-        # model's drift expectation is stale; SOL mean-reverts UPWARD out of low-drift
-        # regimes and NO gets run over (the 07-09 4-loss streak: all four at z=0.4357).
-        # Validation (reform_results/sol15m_streak_20260709/, 1,557 taken NO trades,
-        # 498 episodes): blocked bucket n=559, ep-clustered edge=-6.9pp P=0.004,
-        # -$2,502 ($-1,524 in the current gate era alone); complement WR=61.9% vs
-        # BE=56.3%, +$3,576. Threshold plateau 0.45-0.65 all significant; 6h window
-        # validated as optimal vs 1h/2h/3h/9h/12h/24h reconstructions (hump-shaped
-        # signal, 1-2h pure noise). NO RESCUE: ~4,600 conditioned subsets across six
-        # passes (all indicator families x 1m-1d TFs, 4 SOL HMM regimes, GARCH, ARIMA,
-        # BTC cross-asset, CoinGlass, MAs/ADX/MACD/VWAP, z-dynamics, episode structure)
-        # -- every corner negative. Pure block, fail-open when z_drift unavailable.
-        # Placed LAST among side gates: flips run both directions in this loop
-        # (yes_ou_theta flips YES->NO), so a final-position check cannot be bypassed
-        # by a flip-chain. Catches the full streak 4/4.
-        # Backup: paper_trade_runner_15m_pre_sol_zdrift_gate_20260709.py
-        if (asset.upper() == "SOL" and best_side == "no"
-                and _z_drift_6h is not None and _z_drift_6h < 0.55):
-            print(f"    [sol_15m_no_zdrift_gate] BLOCK NO {ticker} — "
-                  f"z_drift_6h={_z_drift_6h:+.4f}<0.55 (stale-drift regime, "
-                  f"ep_edge=-6.9pp P=0.004, complement +5.7pp)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
         # P_MARKET VOLATILITY GATE: skip deep-OTM contracts on either side.
         # Sim (347 resolved trades): 0W/26L blocked at 0.12/0.88 → +$538 PnL delta.
         if p_market < P_MARKET_VOL_MIN or p_market > P_MARKET_VOL_MAX:

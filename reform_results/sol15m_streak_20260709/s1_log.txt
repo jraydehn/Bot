@@ -1,0 +1,44 @@
+NO book: 1557 trades  2026-05-11 05:48:44.203057+00:00 -> 2026-07-09 05:34:18.317039+00:00
+NO book baseline: WR=0.559 BE=0.545 edge=+0.0144  $=+1845.03
+episodes: 498; streak trades span episode(s): [497]
+1m source: binanceus_SOLUSDT_1m_2024-01-01_2026-07-09.parquet ends 2026-07-09 06:10:00+00:00
+reconstructing 7 families x 5 TFs for all NO trades (zero-lookahead)...
+  5m done (1557/1557 coverage)
+  15m done (1557/1557 coverage)
+  1h done (1557/1557 coverage)
+  4h done (1557/1557 coverage)
+  1d done (1557/1557 coverage)
+
+sweep candidates: 96 numeric, 17 categorical
+1774 splits tested; 298 negative-edge buckets found
+
+SURVIVORS (P(edge>=0)<=0.05, streak_hits>=3, >=50% negative weeks): 4
+      feature     split   n  episodes    edge  ep_edge  P_pos  wk_neg_frac  n_weeks  streak_hits      pnl
+   z_drift_6h  < 0.5476 558       209 -0.0456  -0.0679 0.0030       0.5714        7            4 -2480.81
+   z_drift_6h  < 0.4268 446       162 -0.0401  -0.0497 0.0390       0.7143        7            3 -1833.11
+   z_drift_6h  < 0.6514 670       251 -0.0315  -0.0497 0.0180       0.5714        7            4 -1952.99
+r_bb_width_1d >= 0.2516 474       161 -0.0393  -0.0472 0.0417       0.5000        4            4 -1023.16
+
+all strongly significant negative buckets (P<=0.02), top 20 by edge:
+            feature       split   n  episodes    edge  ep_edge  P_pos  wk_neg_frac  n_weeks  streak_hits      pnl
+        r_stoch_15m     < 11.11 156       100 -0.0919  -0.1267 0.0003       0.6667        9            0  -584.86
+        stoch_k_15m     < 10.93 156       106 -0.1104  -0.1165 0.0033       0.6667        9            0  -395.04
+      r_kc_pctb_15m   < 0.06038 156        90 -0.0725  -0.1098 0.0017       0.6667        9            0  -747.80
+          r_rsi_15m     < 30.96 156        84 -0.0708  -0.1086 0.0020       0.5556        9            0  -541.12
+       r_bb_pctb_5m    < 0.1156 156       114 -0.0573  -0.1002 0.0063       0.4444        9            0   -86.02
+          vwap_dist   < -0.4875 156       104 -0.0718  -0.0971 0.0083       0.6667        9            0  -368.23
+        stoch_k_15m     < 20.69 312       168 -0.0864  -0.0945 0.0010       0.7778        9            0  -998.55
+      r_kc_pctb_15m    < 0.2048 312       159 -0.0577  -0.0873 0.0010       0.7778        9            0  -804.90
+      r_bb_width_1d   >= 0.3467 337       106 -0.0629  -0.0870 0.0033       1.0000        2            0 -1203.84
+           r_rsi_5m     < 29.93 156       109 -0.0614  -0.0826 0.0187       0.6667        9            0   -15.48
+    kalman_velocity < -0.001414 240       104 -0.0423  -0.0813 0.0073       0.6250        8            0  -280.26
+         r_donch_5m     < 0.298 467       239 -0.0516  -0.0803 0.0013       0.6667        9            0  -765.68
+         r_donch_5m    < 0.1972 312       182 -0.0539  -0.0786 0.0037       0.7778        9            0  -185.97
+        r_donch_15m    < 0.2165 312       155 -0.0535  -0.0781 0.0073       0.5556        9            0  -695.76
+        r_donch_15m    < 0.3033 467       202 -0.0397  -0.0751 0.0013       0.5556        9            1  -937.49
+        r_stoch_15m     < 20.96 312       162 -0.0634  -0.0700 0.0087       0.7778        9            0  -777.63
+         z_drift_6h    < 0.5476 558       209 -0.0456  -0.0679 0.0030       0.5714        7            4 -2480.81
+        r_stoch_15m     < 30.09 467       208 -0.0427  -0.0670 0.0057       0.7778        9            1  -727.23
+      r_bb_pctb_15m    < 0.3078 467       200 -0.0422  -0.0650 0.0060       0.6667        9            0  -736.41
+cg_futures_ratio_4h    >= 1.084 315       103 -0.0326  -0.0646 0.0183       0.6667        9            0  -713.59
+DONE_S1

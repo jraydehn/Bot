@@ -125,100 +125,6 @@ for _vwap_asset, _vwap_path in _VWAP_HMM_PKL.items():
         print(f"  [vwap_hmm_{_vwap_asset.lower()}] WARNING: could not load {_vwap_path.name}: {_vwap_e}")
 
 
-# ── SOL CoinGlass flow-regime HMM (2026-07-09) ──────────────────────────────
-# 8-state GaussianHMM on SOL derivatives-flow features (fut/spot taker ratios,
-# 12h CVD, OI change, liquidation imbalance/z). Built + validated in
-# reform_results/sol_hmms_20260709/ with zero-lookahead joins from the start.
-# Drives sol_15m_cg_liq_yes_gate (State 4 = long-liquidation regime).
-# Mirrors the BTC hourly decoder (_get_cg_flow_state in paper_trade_runner.py).
-_CG_FLOW_SOL_PKL = Path(__file__).parent / "models" / "hmm_cg_flow_sol_1h.pkl"
-_CG_FLOW_SOL_PKG: "dict | None | str" = "unloaded"
-_CG_FLOW_SOL_CACHE: dict = {"hour": None, "state": None}
-_CG_API_KEY_15M = "8f0a30c29a5e424ba2641f649051786b"
-_CG_BASE_15M = "https://open-api-v4.coinglass.com/api"
-
-
-def _cg_fetch_1h_sol(path: str, params: dict, rename: dict, start_ms: int) -> "pd.DataFrame | None":
-    """One-shot CoinGlass v4 history fetch (<=2000 bars). Drops partial last bar."""
-    try:
-        p = dict(params, start_time=start_ms, end_time=int(time.time() * 1000), limit=2000)
-        r = requests.get(f"{_CG_BASE_15M}/{path}", headers={"CG-API-KEY": _CG_API_KEY_15M},
-                         params=p, timeout=15)
-        j = r.json()
-        if j.get("code") != "0" or not j.get("data"):
-            return None
-        df = pd.DataFrame(j["data"])
-        df.index = pd.to_datetime(df.pop("time"), unit="ms", utc=True)
-        df = df[~df.index.duplicated(keep="first")].sort_index()
-        df = df.rename(columns=rename)[list(rename.values())].astype(float)
-        return df.iloc[:-1]
-    except Exception:
-        return None
-
-
-def _get_cg_flow_state_sol(now_utc) -> "int | None":
-    """Decode current SOL CG flow-regime state (0-7). Hourly-cached; None on any
-    failure (fail-open). 262h fetch window so liq_tot_z_10d (240h) is computable."""
-    global _CG_FLOW_SOL_PKG
-    _hr = now_utc.replace(minute=0, second=0, microsecond=0)
-    if _CG_FLOW_SOL_CACHE["hour"] == _hr:
-        return _CG_FLOW_SOL_CACHE["state"]
-    if _CG_FLOW_SOL_PKG == "unloaded":
-        try:
-            with open(_CG_FLOW_SOL_PKL, "rb") as _f:
-                _CG_FLOW_SOL_PKG = pickle.load(_f)
-            print(f"  [cg_flow_hmm_sol] Loaded {_CG_FLOW_SOL_PKL.name} "
-                  f"({_CG_FLOW_SOL_PKG['n_states']} states)")
-        except Exception as _e:
-            print(f"  [cg_flow_hmm_sol] load failed: {_e}")
-            _CG_FLOW_SOL_PKG = None
-    if _CG_FLOW_SOL_PKG is None:
-        return None
-    try:
-        start_ms = int(time.time() * 1000) - 262 * 3_600_000
-        fut = _cg_fetch_1h_sol("futures/aggregated-taker-buy-sell-volume/history",
-                               {"symbol": "SOL", "interval": "1h", "exchange_list": "Binance,OKX,Bybit"},
-                               {"aggregated_buy_volume_usd": "fut_buy_usd",
-                                "aggregated_sell_volume_usd": "fut_sell_usd"}, start_ms)
-        spot_df = _cg_fetch_1h_sol("spot/aggregated-taker-buy-sell-volume/history",
-                                   {"symbol": "SOL", "interval": "1h", "exchange_list": "Binance,OKX,Coinbase"},
-                                   {"aggregated_buy_volume_usd": "spot_buy_usd",
-                                    "aggregated_sell_volume_usd": "spot_sell_usd"}, start_ms)
-        oi_df = _cg_fetch_1h_sol("futures/open-interest/aggregated-history",
-                                 {"symbol": "SOL", "interval": "1h"}, {"close": "oi_close"}, start_ms)
-        liq = _cg_fetch_1h_sol("futures/liquidation/aggregated-history",
-                               {"symbol": "SOL", "interval": "1h", "exchange_list": "Binance,OKX,Bybit"},
-                               {"aggregated_long_liquidation_usd": "liq_long_usd",
-                                "aggregated_short_liquidation_usd": "liq_short_usd"}, start_ms)
-        if any(x is None or len(x) < 245 for x in (fut, spot_df, oi_df, liq)):
-            _CG_FLOW_SOL_CACHE.update(hour=_hr, state=None)
-            return None
-        cg = pd.concat([fut, spot_df, oi_df, liq], axis=1).sort_index().dropna()
-        fb, fs = cg["fut_buy_usd"], cg["fut_sell_usd"]
-        sb, ss = cg["spot_buy_usd"], cg["spot_sell_usd"]
-        feat = pd.DataFrame(index=cg.index)
-        feat["fut_ratio_1h"] = fb / (fb + fs).replace(0, float("nan"))
-        feat["fut_cvd_12h"] = (fb - fs).rolling(12).sum() / (fb + fs).rolling(12).sum().replace(0, float("nan"))
-        feat["spot_ratio_1h"] = sb / (sb + ss).replace(0, float("nan"))
-        feat["oi_chg_4h"] = cg["oi_close"].pct_change(4, fill_method=None)
-        _ll, _ls = cg["liq_long_usd"], cg["liq_short_usd"]
-        feat["liq_imb_4h"] = (_ls.rolling(4).sum() - _ll.rolling(4).sum()) / (_ls.rolling(4).sum() + _ll.rolling(4).sum() + 1.0)
-        _lt = _ll + _ls
-        feat["liq_tot_z_10d"] = (_lt - _lt.rolling(240).mean()) / _lt.rolling(240).std().replace(0, float("nan"))
-        feat = feat.dropna()
-        if len(feat) < 5:
-            _CG_FLOW_SOL_CACHE.update(hour=_hr, state=None)
-            return None
-        X = _CG_FLOW_SOL_PKG["scaler"].transform(feat[_CG_FLOW_SOL_PKG["feat_cols"]].values)
-        state = int(_CG_FLOW_SOL_PKG["model"].predict(X)[-1])
-        _CG_FLOW_SOL_CACHE.update(hour=_hr, state=state)
-        return state
-    except Exception as _e:
-        print(f"  [cg_flow_hmm_sol] decode failed: {_e}")
-        _CG_FLOW_SOL_CACHE.update(hour=_hr, state=None)
-        return None
-
-
 def _vwap_hmm_state_predict(live_1m: "pd.DataFrame", asset: str = "BTC") -> "int | None":
     """Predict current VWAP MTF HMM state from live 1m OHLCV data, for the
     given asset's own trained model. Returns None if model unavailable or
@@ -635,9 +541,6 @@ CSV_COLUMNS = [
     "cg_futures_cvd_12h",    # CoinGlass futures rolling 12h cumulative delta [SHADOW]
     # VWAP MTF HMM state (BTC only; 8-state model on 1m/5m/15m VWAP distances)
     "vwap_hmm_state",
-    # 2026-07-09: SOL CoinGlass flow-regime HMM state (0-7; blank for BTC/ETH).
-    # Drives sol_15m_cg_liq_yes_gate (State 4 = long-liquidation regime).
-    "cg_flow_state",
     # 2026-07-04: honest p_up rebuild — SHADOW ONLY (added via migration; keep at end).
     # p_up_v3 = latest hourly v3 score from paper_trades.csv (BTC rows only).
     # v3_agree = 1 if v3@0.50 agrees with the trade side (yes: v3>=0.50, no: v3<0.50),
@@ -1933,15 +1836,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         _rank_labels = {0: "low-vol-bear", 1: "low-vol-bull", 2: "high-vol"}
         print(f"  [vol_hmm] rank={_vol_state}  ({_rank_labels.get(_vol_state, '?')})")
 
-    # SOL CoinGlass flow-regime state — once per scan cycle (hourly-cached inside).
-    _cg_flow_state_sol: "int | None" = None
-    if asset == "SOL":
-        _cg_flow_state_sol = _get_cg_flow_state_sol(datetime.now(timezone.utc))
-        if _cg_flow_state_sol is not None:
-            _cgs_lbl = {4: "LONG-LIQ regime (YES-block)"}.get(_cg_flow_state_sol, str(_cg_flow_state_sol))
-            print(f"  [cg_flow_hmm_sol] state={_cg_flow_state_sol}  ({_cgs_lbl})")
-    sig["cg_flow_state"] = _cg_flow_state_sol if _cg_flow_state_sol is not None else ""
-
     # VWAP MTF HMM state (BTC + SOL — each asset's own model; gates applied in contract loop)
     _vwap_state: "int | None" = None
     if asset in ("BTC", "SOL") and live_1m is not None:
@@ -2979,26 +2873,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             print(f"    [sol_15m_no_zdrift_gate] BLOCK NO {ticker} — "
                   f"z_drift_6h={_z_drift_6h:+.4f}<0.55 (stale-drift regime, "
                   f"ep_edge=-6.9pp P=0.004, complement +5.7pp)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
-        # [sol_15m_cg_liq_yes_gate] Block SOL YES when the CG flow HMM is in State 4
-        # (long-liquidation regime: liq_imb_4h=-0.92 = longs being liquidated, sell
-        # pressure) — YES needs price UP and dies here. Validated 2026-07-09
-        # (reform_results/sol_hmms_20260709/, zero-lookahead joins from the start):
-        # n=140 taken YES, 49 episodes, ep_edge=-11.8pp P=0.014, 0/9 positive weeks,
-        # monotonic worsening May->Jul (-4.9pp -> -21.7pp -> -28.8pp); still
-        # significant in the current era despite thin volume (post-06-24 n=12/8eps,
-        # ep_edge=-27.7pp P=0.015). Existing YES gates already choke most of this
-        # population, so incremental fires will be rare — deployed for the tail risk.
-        # Pure block, fail-open when the CG state is unavailable. Placed in the
-        # final-gate block (flip-chain bypass lesson).
-        # Backup: paper_trade_runner_15m_pre_sol_cg_gate_20260709.py
-        if (asset.upper() == "SOL" and best_side == "yes"
-                and _cg_flow_state_sol is not None and _cg_flow_state_sol == 4):
-            print(f"    [sol_15m_cg_liq_yes_gate] BLOCK YES {ticker} — "
-                  f"cg_flow_state=4 (long-liquidation regime, ep_edge=-11.8pp "
-                  f"P=0.014, 0/9 wks positive)")
             evaluated.append((best_edge, best_side, c, p_model, offset_pct))
             continue
 

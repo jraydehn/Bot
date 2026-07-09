@@ -111,6 +111,8 @@ COLUMNS = [
     "hmm_vol_state",
     # VWAP MTF HMM state (BTC + SOL, each asset's own model; 8-state on 1m/5m/15m VWAP distances)
     "vwap_hmm_state",
+    # 2026-07-09: SOL CoinGlass flow-regime HMM state (0-7; blank for BTC/ETH).
+    "cg_flow_state",
     # 2026-07-08: SOL short-timeframe (5m/15m) VWAP HMM rescue signals -- didn't
     # exist anywhere else in this codebase at 5m/15m before this build.
     "kc_pct_5m", "kc_bo_5m", "kc_pct_15m", "kc_bo_15m",

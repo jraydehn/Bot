@@ -205,4 +205,7 @@ CSV_COLUMNS = [
     # 2026-07-08: CoinGlass flow-regime HMM state (BTC hourly, 0-6). Drives
     # btc_cg_flow_no_gate (block NO in states 1/2/5 unless kc rescue).
     "cg_flow_state",
+    # 2026-07-08: 5m Bollinger bandwidth (BTC hourly). Drives
+    # hmm_pup_v3_crashing_no_gate's rescue (bb_width_5m>=0.0077 lets NO trade).
+    "bb_width_5m",
 ]

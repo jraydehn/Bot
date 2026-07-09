@@ -1,0 +1,35 @@
+base population: n=92
+reconstructing 5m indicators (zero-lookahead)...
+  chg_5m: 92/92
+  bb_pctb_5m: 92/92
+  bb_width_5m: 92/92
+  rsi_5m: 92/92
+  stoch_5m: 92/92
+  donch_5m: 92/92
+  kc_pctb_5m: 92/92
+
+5m candidates with >=15 tickers, zero leak, positive edge:
+    feature            split  rows  tickers   edge  leak    pnl
+   donch_5m   >=0.9245(q0.9)   216       24 0.3999     0 594.75
+     rsi_5m    >=63.32(q0.8)   237       23 0.3709     0 597.26
+ bb_pctb_5m   >=0.8075(q0.8)   240       26 0.3689     0 613.18
+   donch_5m   >=0.8817(q0.8)   240       26 0.3689     0 613.18
+ bb_pctb_5m   >=0.9135(q0.9)   218       23 0.3600     0 525.02
+ kc_pctb_5m   >=0.8571(q0.8)   258       26 0.2696     0 543.80
+bb_width_5m >=0.007452(q0.5)   674       65 0.1477     0 860.20
+bb_width_5m >=0.008167(q0.7)   440       39 0.0881     0 395.37
+bb_width_5m >=0.007725(q0.6)   481       48 0.0597     0 429.50
+bb_width_5m   >=0.0132(q0.8)   271       20 0.0583     0  59.45
+
+bootstrap on top 5m candidates:
+  donch_5m >=0.9245(q0.9): rows=216 tickers=24 edge=+0.4132 P(<=0)=0.0000 pnl=$+594.75
+  rsi_5m >=63.32(q0.8): rows=226 tickers=22 edge=+0.4232 P(<=0)=0.0000 pnl=$+543.86
+  bb_pctb_5m >=0.8075(q0.8): rows=229 tickers=25 edge=+0.3974 P(<=0)=0.0000 pnl=$+559.78
+  donch_5m >=0.8817(q0.8): rows=240 tickers=26 edge=+0.3899 P(<=0)=0.0000 pnl=$+613.18
+  bb_pctb_5m >=0.9135(q0.9): rows=91 tickers=15 edge=+0.4066 P(<=0)=0.0000 pnl=$+303.50
+
+top 5m candidate (donch_5m >=0.9245(q0.9)) tickers: 24
+overlap with stoch_15m>=85 rescue (23 tickers): 21
+NEW tickers not in the 15m rescue: {'KXBTCD-26JUL0611-T62599.99', 'KXBTCD-26JUL0611-T62499.99', 'KXBTCD-26JUL0611-T62399.99'}
+
+DONE_S9

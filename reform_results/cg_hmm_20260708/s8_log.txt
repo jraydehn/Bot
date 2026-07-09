@@ -1,0 +1,41 @@
+joining 29 reconstructed columns onto 1172 rows via ticker map...
+total candidates including offset_pct: 30
+
+540 splits tested across 30 candidate features with sufficient coverage
+
+candidates with >=20 tickers, zero bad-event leakage, positive edge:
+    feature          split  rows  tickers   edge  leak    pnl
+  stoch_15m  >=93.26(q0.9)   226       22 0.3788     0 543.86
+    rsi_15m  >=58.98(q0.8)   237       23 0.3709     0 597.26
+kc_pctb_15m >=0.7561(q0.8)   237       23 0.3709     0 597.26
+  stoch_15m  >=88.55(q0.8)   237       23 0.3709     0 597.26
+    rsi_15m  >=58.98(q0.9)   237       23 0.3709     0 597.26
+    stoch_k  >=74.16(q0.8)   239       24 0.3689     0 598.94
+     chg_1h >=0.3472(q0.9)   240       26 0.3647     0 597.26
+     chg_1h >=0.3472(q0.8)   240       26 0.3647     0 597.26
+bb_pctb_15m >=0.6166(q0.8)   247       26 0.3550     0 597.26
+bb_pctb_15m >=0.6166(q0.9)   247       26 0.3550     0 597.26
+ kc_pctb_1h >=0.4278(q0.9)   250       29 0.3493     0 597.26
+ kc_pctb_1h >=0.4278(q0.8)   250       29 0.3493     0 597.26
+     rsi_1h  >=42.64(q0.8)   250       29 0.3493     0 597.26
+  donch_15m >=0.4902(q0.8)   250       29 0.3493     0 597.26
+  donch_15m >=0.4902(q0.9)   250       29 0.3493     0 597.26
+   stoch_1h  >=24.82(q0.6)   516       42 0.2397     0 921.79
+    chg_15m >=0.1776(q0.8)   283       35 0.2122     0 468.66
+  stoch_15m  >=35.68(q0.6)   549       50 0.1977     0 939.33
+  stoch_15m  >=35.68(q0.7)   549       50 0.1977     0 939.33
+   stoch_1h  >=24.99(q0.8)   456       30 0.1900     0 643.45
+
+--- ticker-clustered bootstrap on top 10 (by edge, tickers>=20, zero leak) ---
+  stoch_15m >=93.26(q0.9): rows=226 tickers=22  edge=+0.4233  P(<=0)=0.0000  pnl=$+543.86
+  rsi_15m >=58.98(q0.8): rows=237 tickers=23  edge=+0.4152  P(<=0)=0.0000  pnl=$+597.26
+  kc_pctb_15m >=0.7561(q0.8): rows=226 tickers=22  edge=+0.4229  P(<=0)=0.0000  pnl=$+543.86
+  stoch_15m >=88.55(q0.8): rows=226 tickers=22  edge=+0.4215  P(<=0)=0.0000  pnl=$+543.86
+  rsi_15m >=58.98(q0.9): rows=237 tickers=23  edge=+0.4130  P(<=0)=0.0000  pnl=$+597.26
+  stoch_k >=74.16(q0.8): rows=239 tickers=24  edge=+0.4005  P(<=0)=0.0000  pnl=$+598.94
+  chg_1h >=0.3472(q0.9): rows=240 tickers=26  edge=+0.3517  P(<=0)=0.0000  pnl=$+597.26
+  chg_1h >=0.3472(q0.8): rows=240 tickers=26  edge=+0.3521  P(<=0)=0.0000  pnl=$+597.26
+  bb_pctb_15m >=0.6166(q0.8): rows=107 tickers=17  edge=+0.4116  P(<=0)=0.0000  pnl=$+410.71
+  bb_pctb_15m >=0.6166(q0.9): rows=107 tickers=17  edge=+0.4109  P(<=0)=0.0000  pnl=$+410.71
+
+DONE_S8

@@ -3297,6 +3297,35 @@ def main() -> None:
             except Exception:
                 pass
 
+        # 5m Bollinger bandwidth for hmm_pup_v3_crashing_no_gate's rescue (2026-07-08).
+        # (upper-lower)/mid on a 20-bar/k=2.0 band, 5-minute bars, completed bars only
+        # (last partial 5m bin dropped). Genuinely new indicator -- Bollinger doesn't
+        # exist anywhere else in this codebase. Validated (reform_results/cg_hmm_20260708/
+        # s7-s9): bb_width_5m >= 0.0077 (median of 92 real crashing-state candidates,
+        # 07-06->07-09) rescues 65/72 clean tickers with ZERO leakage into either of the
+        # two real bad hours (07-07 09:00-10:00, 07-08 07:00-08:00 -- both correctly stay
+        # blocked), P(edge<=0)=0.0024 ticker-clustered bootstrap, +$860 recovered. Strict
+        # superset of every other MTF indicator family tested (offset/chg/RSI/stoch/
+        # Donchian/Keltner at 5m/15m/1h/4h/1d) -- simplest rule with the most coverage.
+        _bb_width_5m = float("nan")
+        if live_1m is not None and len(live_1m) >= 120:
+            try:
+                _bb5 = live_1m.resample("5min").agg(
+                    {"open": "first", "high": "max", "low": "min",
+                     "close": "last", "volume": "sum"}).dropna()
+                _bb5 = _bb5.iloc[:-1]  # drop in-progress bar, completed bars only
+                if len(_bb5) >= 20:
+                    _bb5_c = _bb5["close"].astype(float)
+                    _bb5_ma = _bb5_c.rolling(20).mean()
+                    _bb5_sd = _bb5_c.rolling(20).std()
+                    _bb5_up = _bb5_ma + 2.0 * _bb5_sd
+                    _bb5_lo = _bb5_ma - 2.0 * _bb5_sd
+                    _bb5_mid = float(_bb5_ma.iloc[-1])
+                    if _bb5_mid:
+                        _bb_width_5m = float((_bb5_up.iloc[-1] - _bb5_lo.iloc[-1]) / _bb5_mid)
+            except Exception:
+                pass
+
         # CoinGlass flow-regime state — once per scan cycle (hourly-cached inside).
         _cg_flow_state = _get_cg_flow_state(now_utc) if args.asset == "BTC" else None
         if _cg_flow_state is not None:
@@ -4920,36 +4949,50 @@ def main() -> None:
                 _log_block("sw_bull_trend_no_gate")
                 continue
 
-            # [hmm_pup_v3_rising_yes_gate] Block BTC YES when the p_up_v3 regime HMM
-            # shows "rising" (conviction building). CONTRARIAN, not confirm: rising
-            # momentum + YES loses badly on real trades (mean-reversion, same pattern
-            # as bull_rally_no_gate/candlestick_directional). Real taken trades,
-            # combined archive history (Apr-Jul 2026, 8 distinct weeks):
-            #   n=144, WR=35.4% vs BE=56.4%, edge=-20.9pp, -$2,234.
-            # No rescue tested yet -- pure block. See reform_results/
-            # pup_v3_15m_window_sweep_20260706/ for the full backfill.
+            # [2026-07-08 SAME-DAY DEMOTION TO SHADOW] Both gates below were validated
+            # via s12_combined_history_backfill.py's `lookup_state()`, which joined trades
+            # to the state at the bar CONTAINING the trade time via a raw searchsorted on
+            # logged_at. wf_preds_FINAL's index is 1h-bar OPEN time (hist_BTCUSDT_1h.parquet
+            # is open-time indexed per s1_fetch_history.py) and its features/label use that
+            # bar's CLOSE -- only genuinely known once the bar completes, i.e. real time
+            # T+1h. Zero-lookahead re-join (effective_ts = bar_open + 1h), 2,995 trades,
+            # 88.8% state agreement with the flawed join:
+            #   rising+YES:   -20.9pp -> -4.4pp   (weakened, same direction)
+            #   rising+NO:    +17.7pp -> -1.1pp   (contrarian rationale COLLAPSES)
+            #   crashing+YES: +25.0pp -> +5.4pp   (weakened, same direction)
+            #   crashing+NO:  -23.0pp -> +5.1pp   (INVERTED -- blocked side now a winner)
+            # Both gates SHADOW-ONLY pending a from-scratch honest re-validation (not just
+            # a re-join -- the underlying wf_preds_FINAL features may need embargo review
+            # too). See feedback_zero_lookahead_reconstruction memory.
             if (args.asset == "BTC"
                     and dec_c.side == "yes"
                     and _pup_v3_hmm_state_label == "rising"):
-                print(f"  [hmm_pup_v3_rising_yes_gate] BLOCK YES {c['ticker']} — "
-                      f"pup_v3_hmm=rising (fade momentum, WR=35% vs BE=56% n=144)")
-                _log_block("hmm_pup_v3_rising_yes_gate")
-                continue
+                print(f"  [hmm_pup_v3_rising_yes_gate] SHADOW would-block YES {c['ticker']} — "
+                      f"pup_v3_hmm=rising")
+                _log_block("hmm_pup_v3_rising_yes_gate__shadow")
 
-            # [hmm_pup_v3_crashing_no_gate] Block BTC NO when the p_up_v3 regime HMM
-            # shows "crashing" (conviction collapsing fast -- not just a low level,
-            # a momentum crash). CONTRARIAN: crashing + NO loses badly on real trades
-            # (the imminent-bounce mirror of the rising/YES finding above). Real taken
-            # trades, combined archive history (Apr-Jul 2026, 10 distinct weeks):
-            #   n=69, WR=42.0% vs BE=65.0%, edge=-23.0pp, -$1,189.
-            # No rescue tested yet -- pure block.
+            # [hmm_pup_v3_crashing_no_gate] RE-ENABLED LIVE 2026-07-08 with a rescue.
+            # Block BTC NO when pup_v3_hmm=crashing, UNLESS bb_width_5m >= 0.0077 (5m
+            # Bollinger bandwidth already expanding = the crash isn't quiet/stalled,
+            # genuine continuation risk is lower, NO is safer). Validation: 92 real
+            # candidates 07-06->07-09, two known real bad hours (both correctly still
+            # blocked, zero leakage), rescue P(edge<=0)=0.0024, +$860 recovered vs a
+            # blanket block. See reform_results/cg_hmm_20260708/s7-s9 + memory
+            # project_btc_cg_flow_hmm_20260708 for the full derivation.
             if (args.asset == "BTC"
                     and dec_c.side == "no"
                     and _pup_v3_hmm_state_label == "crashing"):
-                print(f"  [hmm_pup_v3_crashing_no_gate] BLOCK NO {c['ticker']} — "
-                      f"pup_v3_hmm=crashing (bounce likely, WR=42% vs BE=65% n=69)")
-                _log_block("hmm_pup_v3_crashing_no_gate")
-                continue
+                if _bb_width_5m == _bb_width_5m and _bb_width_5m >= 0.0077:
+                    print(f"  [hmm_pup_v3_crashing_no_gate] RESCUE NO {c['ticker']} — "
+                          f"pup_v3_hmm=crashing but bb_width_5m={_bb_width_5m:.5f}>=0.0077 "
+                          f"(vol already expanding, crash likely genuine)")
+                    _log_block("hmm_pup_v3_crashing_no_gate__rescue")
+                else:
+                    print(f"  [hmm_pup_v3_crashing_no_gate] BLOCK NO {c['ticker']} — "
+                          f"pup_v3_hmm=crashing bb_width_5m="
+                          f"{_bb_width_5m if _bb_width_5m == _bb_width_5m else 'n/a'}<0.0077")
+                    _log_block("hmm_pup_v3_crashing_no_gate")
+                    continue
 
             # [btc_zdrift_yes_gate] Block BTC YES in Z-Drift HMM St2 + pm_drift<-0.001 + not R1.
             # St2: low-rvol state (centroid rvol=0.245, drift≈0). Negative 5m pm_drift in this
@@ -7723,6 +7766,7 @@ def main() -> None:
         "eth_p_up_v1":        round(_eth_p_up_cycle, 4) if _eth_p_up_cycle is not None else "",
         "sol_p_up_v1":        round(_sol_p_up_cycle, 4) if _sol_p_up_cycle is not None else "",
         "cg_flow_state":      _cg_flow_state if _cg_flow_state is not None else "",
+        "bb_width_5m":        round(_bb_width_5m, 6) if _bb_width_5m == _bb_width_5m else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

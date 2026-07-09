@@ -1,0 +1,40 @@
+base population: n=92 unique tickers
+reconstructing all indicator families x timeframes (zero-lookahead)...
+  15m done
+  1h done
+  4h done
+  1d done
+
+29 reconstructed columns:
+  stoch_k: 92/92 non-null
+  chg_15m: 92/92 non-null
+  bb_pctb_15m: 92/92 non-null
+  bb_width_15m: 92/92 non-null
+  rsi_15m: 92/92 non-null
+  stoch_15m: 92/92 non-null
+  donch_15m: 92/92 non-null
+  kc_pctb_15m: 92/92 non-null
+  chg_1h: 92/92 non-null
+  bb_pctb_1h: 92/92 non-null
+  bb_width_1h: 92/92 non-null
+  rsi_1h: 92/92 non-null
+  stoch_1h: 92/92 non-null
+  donch_1h: 92/92 non-null
+  kc_pctb_1h: 92/92 non-null
+  chg_4h: 92/92 non-null
+  bb_pctb_4h: 92/92 non-null
+  bb_width_4h: 92/92 non-null
+  rsi_4h: 92/92 non-null
+  stoch_4h: 92/92 non-null
+  donch_4h: 92/92 non-null
+  kc_pctb_4h: 92/92 non-null
+  chg_1d: 92/92 non-null
+  bb_pctb_1d: 92/92 non-null
+  bb_width_1d: 92/92 non-null
+  rsi_1d: 92/92 non-null
+  stoch_1d: 92/92 non-null
+  donch_1d: 92/92 non-null
+  kc_pctb_1d: 92/92 non-null
+
+saved crashing_no_mtf_indicators.csv
+DONE_S7

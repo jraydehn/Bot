@@ -6843,32 +6843,30 @@ def main() -> None:
                     _log_block("btc_nopup_gate")
                     continue
 
-            # [btc_cg_flow_no_gate] Block BTC NO when the CoinGlass flow-regime HMM is in
-            # {neutral(1), buy-flow(2), short-squeeze(5)} — the market is actively being
-            # bought (derivatives taker flow the model can't see) and the NO-heavy book
-            # gets run over. Rescue: completed-bar kc_pct_1h < 0.426 — price already pinned
-            # near the lower Keltner band while flow buys = absorption, not momentum; NO wins.
-            # Built + validated 2026-07-08 (reform_results/cg_hmm_20260708/): 529 resolved
-            # taken trades, orthogonality to the 13 existing HMMs verified (RF≈chance);
-            # blocked bucket n=107 WR=33.6% vs BE=73.3% (-$3,031, cluster-P=1.0000, neg all
-            # 4 wks); rescued n=46 WR=89.1% vs BE=74.8% (+$541, cluster-P=0.018 over 24
-            # expiries, pos all 3 wks it fired). Only 3/76 buy-flow trades overlapped the
-            # live cg_futures_ratio gate — additive, not redundant. Caveats: 3-week window,
-            # one era; CG API has a rolling ~6mo window. Fail-open: no state -> no gate.
-            # Deployed live-dual per explicit user decision; reevaluate ~2 wks (see memory).
-            # [2026-07-08 SAME-DAY DEMOTION TO SHADOW] The validation behind this gate had a
-            # containing-bar lookahead: trades were joined to the CG bar CONTAINING them
-            # (whose flow extends past the trade time) while the live decoder only sees
-            # completed bars. Zero-lookahead re-join: buy-flow NO flips to +4.1pp/+$196
-            # (was "-20.5pp"), gate bucket -$310 (was "-$2,490"). Only neutral(1) survives
-            # honestly (-14.3pp, P=0.992, 0/4 wks) but n=61 — needs a clean re-validation
-            # before any enforcement. Gate now SHADOW-ONLY: logs would-block, never skips.
+            # [btc_cg_flow_no_gate] NARROWED + RE-ENABLED LIVE 2026-07-08. Original scope
+            # (block NO in {neutral(1), buy-flow(2), short-squeeze(5)}) was invalidated by a
+            # containing-bar lookahead in its validation (trades joined to the CG bar
+            # CONTAINING them, whose flow extends past the trade, vs the live decoder which
+            # only sees completed bars). Zero-lookahead re-join, ticker-deduped (527 real
+            # unique contracts, no pseudo-replication): buy-flow NO = +4.1pp P=0.174 (n.s.,
+            # NOT blocked-worthy) and short-squeeze too thin to assess -- both REMOVED from
+            # the block scope, shadow-log only. Only neutral(1) shows a real signal
+            # (-14.3pp, P=0.992, n=61 tickers) -- narrowed to neutral-only block, no rescue
+            # (kc_pct_1h rescue was validated against the old, larger, lookahead-flawed
+            # population and is not carried forward). Caveat: n=61 is still thin (~1 era,
+            # 3 weeks) -- reevaluate as more neutral-state volume accumulates. Fail-open:
+            # no state -> no gate. See project_btc_cg_flow_hmm_20260708 memory.
             if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
-                    and _cg_flow_state is not None and _cg_flow_state in (1, 2, 5)):
-                _cgf_names = {1: "neutral", 2: "buy-flow", 5: "short-squeeze"}
-                print(f"  [btc_cg_flow_no_gate] SHADOW would-block NO {c['ticker']} — "
-                      f"cg_state={_cgf_names[_cg_flow_state]} kc_done="
-                      f"{_kc_pct_1h_done if _kc_pct_1h_done == _kc_pct_1h_done else 'n/a'}")
+                    and _cg_flow_state == 1):
+                print(f"  [btc_cg_flow_no_gate] BLOCK NO {c['ticker']} — "
+                      f"cg_state=neutral (WR=-14.3pp vs BE, real ticker-deduped data)")
+                _log_block("btc_cg_flow_no_gate")
+                continue
+            elif (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
+                    and _cg_flow_state in (2, 5)):
+                _cgf_names = {2: "buy-flow", 5: "short-squeeze"}
+                print(f"  [btc_cg_flow_no_gate] SHADOW (not blocked, no real edge) NO "
+                      f"{c['ticker']} — cg_state={_cgf_names[_cg_flow_state]}")
                 _log_block("btc_cg_flow_no_gate__shadow")
 
             # [eth_kelly_tier] 1.5× Kelly for high-conviction candle+rev signals.

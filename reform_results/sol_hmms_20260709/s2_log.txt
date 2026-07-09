@@ -1,0 +1,43 @@
+1h bars: 22088  2024-01-01 00:00:00+00:00 -> 2026-07-09 07:00:00+00:00
+feature matrix: 21609 x 5
+
+BIC selection:
+  n=2: BIC=265616.9
+  n=3: BIC=231935.0
+  n=4: BIC=208478.6
+  n=5: BIC=192223.3
+  n=6: BIC=180890.5
+  n=7: BIC=170017.8
+  n=8: BIC=159623.1
+selected 8 states
+
+causal states decoded (recent): 2048
+distribution: {0: 94, 1: 328, 2: 225, 3: 427, 4: 154, 5: 376, 6: 443, 7: 1}
+state centroids:
+  S0: vwap_dist_1h=+1.602  vwap_dist_4h=+3.968  vwap_dist_1d=+18.182  vwap_vel_1h=+0.056  vwap_spread=-16.580  (n=94)
+  S1: vwap_dist_1h=+0.077  vwap_dist_4h=+0.035  vwap_dist_1d=+5.725  vwap_vel_1h=-0.042  vwap_spread=-5.647  (n=328)
+  S2: vwap_dist_1h=-0.752  vwap_dist_4h=-3.215  vwap_dist_1d=-5.486  vwap_vel_1h=+0.022  vwap_spread=+4.734  (n=225)
+  S3: vwap_dist_1h=+0.858  vwap_dist_4h=+0.467  vwap_dist_1d=+2.583  vwap_vel_1h=+0.035  vwap_spread=-1.724  (n=427)
+  S4: vwap_dist_1h=+0.978  vwap_dist_4h=+5.164  vwap_dist_1d=+24.783  vwap_vel_1h=-0.097  vwap_spread=-23.805  (n=154)
+  S5: vwap_dist_1h=+0.355  vwap_dist_4h=+1.722  vwap_dist_1d=+7.950  vwap_vel_1h=+0.052  vwap_spread=-7.595  (n=376)
+  S6: vwap_dist_1h=-0.229  vwap_dist_4h=+1.044  vwap_dist_1d=+3.679  vwap_vel_1h=-0.023  vwap_spread=-3.908  (n=443)
+  S7: vwap_dist_1h=-1.417  vwap_dist_4h=+0.002  vwap_dist_1d=+11.778  vwap_vel_1h=+0.818  vwap_spread=-13.196  (n=1)
+
+=== SOL HOURLY: 3 taken trades with state ===
+
+=== SOL 15m: 2276 taken trades with state ===
+  S0 YES: n=47 eps=20 edge=-0.0696 ep_edge=-0.1346 P(<=0)=0.9223 wk+=0/2 $=-102.46
+  S0 NO : n=126 eps=31 edge=-0.0139 ep_edge=+0.0421 P(<=0)=0.2340 wk+=1/2 $=-84.12
+  S1 YES: n=109 eps=17 edge=-0.0484 ep_edge=-0.0161 P(<=0)=0.5890 wk+=1/2 $=-242.84
+  S1 NO : n=143 eps=29 edge=+0.0386 ep_edge=+0.0801 P(<=0)=0.0560 wk+=3/3 $=+456.73
+  S2 YES: n=100 eps=37 edge=+0.0399 ep_edge=-0.0011 P(<=0)=0.5020 wk+=3/3 $=+29.62
+  S2 NO : n=216 eps=64 edge=+0.0133 ep_edge=-0.0194 P(<=0)=0.6773 wk+=2/3 $=-303.30
+  S3 YES: n=127 eps=43 edge=-0.0148 ep_edge=+0.0330 P(<=0)=0.2565 wk+=3/5 $=-81.53
+  S3 NO : n=287 eps=72 edge=-0.0096 ep_edge=+0.0124 P(<=0)=0.3670 wk+=2/5 $=+279.08
+  S4 YES: n=51 eps=26 edge=-0.0518 ep_edge=-0.0759 P(<=0)=0.8532 wk+=1/3 $=-144.20
+  S4 NO : n=175 eps=46 edge=-0.0261 ep_edge=-0.0273 P(<=0)=0.7100 wk+=2/3 $=-53.55
+  S5 YES: n=173 eps=64 edge=-0.0237 ep_edge=-0.0408 P(<=0)=0.7648 wk+=3/5 $=-30.66
+  S5 NO : n=357 eps=75 edge=+0.0361 ep_edge=+0.0575 P(<=0)=0.0553 wk+=3/5 $=+757.83
+  S6 YES: n=110 eps=35 edge=-0.0005 ep_edge=+0.0167 P(<=0)=0.3955 wk+=3/5 $=-99.51
+  S6 NO : n=253 eps=65 edge=+0.0428 ep_edge=+0.0118 P(<=0)=0.3842 wk+=3/5 $=+874.61
+DONE_S2

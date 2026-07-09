@@ -1,0 +1,19 @@
+/Users/justindehn/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+fut taker done
+spot taker done
+OI done
+funding done
+liq done
+saved cg_flow_sol_1h.parquet: 4,319 rows 2026-01-10 08:00:00+00:00 -> 2026-07-09 06:00:00+00:00
+fut_buy_usd      0.0
+fut_sell_usd     0.0
+spot_buy_usd     0.0
+spot_sell_usd    0.0
+oi_close         0.0
+oi_high          0.0
+oi_low           0.0
+funding_close    0.0
+liq_long_usd     0.0
+liq_short_usd    0.0
+S2 DONE

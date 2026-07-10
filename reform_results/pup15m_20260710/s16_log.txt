@@ -1,0 +1,27 @@
+S16 -- hourly-side retest with p_sc (state-conditioned pup15m), run 2026-07-10
+dir mix (sc): {-1: 0.445, 1: 0.35, 0: 0.206}
+
+=== HOURLY archive agreement edge with p_sc (pooled-run baseline: s3_log.txt) ===
+  YES pre  AGREE   : tickers= 6842 tk_edge=+0.0183 P(<=0)=0.0000 wk+=6/7
+  YES pre  DISAGREE: tickers= 7053 tk_edge=-0.0313 P(<=0)=1.0000 wk+=1/7
+  YES post AGREE   : tickers= 1594 tk_edge=+0.0109 P(<=0)=0.0285 wk+=2/2
+  YES post DISAGREE: tickers= 2131 tk_edge=-0.0172 P(<=0)=1.0000 wk+=0/2
+  NO  pre  AGREE   : tickers= 7053 tk_edge=+0.0313 P(<=0)=0.0000 wk+=6/7
+  NO  pre  DISAGREE: tickers= 6842 tk_edge=-0.0183 P(<=0)=1.0000 wk+=1/7
+  NO  post AGREE   : tickers= 2131 tk_edge=+0.0172 P(<=0)=0.0000 wk+=2/2
+  NO  post DISAGREE: tickers= 1594 tk_edge=-0.0109 P(<=0)=0.9715 wk+=0/2
+
+=== REAL-BOOK wait sim with sc-direction (n=558 resolved BTC hourly trades) ===
+actions: {'unchanged': 228, 'missed': 226, 're-entered': 104}
+  pre: EXISTING $+1180.88  WAIT $+1516.06  delta $+335.18
+  post: EXISTING $-33.98  WAIT $+258.95  delta $+292.93
+  TOTAL delta $+628.11  episode-bootstrap P(delta<=0)=0.1185
+  weeks positive: 3/4  (-82 / +72 / +465 / +173)
+(pooled-p15 baseline: delta +$337, P=0.25, 2/5 weeks -- sc roughly doubles the
+effect, makes it era-robust and week-majority; still short of P<=0.05 on a
+4-week book)
+
+BOOK-LEVEL CAVEAT (BTC 15m taken YES book): sc does NOT improve trade ranking
+(post-reform terciles invert; crashing-state YES trades lose -$342 despite
+crashing bars being 62% up -- bar direction != contract outcome vs strike).
+sc's value is bar-level direction: entry timing, drift, wait mechanics.

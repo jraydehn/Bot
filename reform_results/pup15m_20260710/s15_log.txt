@@ -1,0 +1,21 @@
+bars with state: 88078  state mix: {'neutral': 69.9, 'rising': 18.9, 'crashing': 11.2}
+
+=== walk-forward: pooled vs pv3-state-conditioned ===
+  2025 p_pooled : IC=+0.1354  quintile spread=+0.1680
+  2025 p_sc     : IC=+0.1878  quintile spread=+0.2505
+      2025 neutral   bars=24396: IC pooled=+0.1376  sc=+0.1375  base P(up)=0.495
+      2025 rising    bars= 6564: IC pooled=+0.1470  sc=+0.1305  base P(up)=0.368
+      2025 crashing  bars= 3944: IC pooled=+0.1718  sc=+0.1451  base P(up)=0.616
+  2026 p_pooled : IC=+0.0985  quintile spread=+0.1266
+  2026 p_sc     : IC=+0.1495  quintile spread=+0.1909
+      2026 neutral   bars=13037: IC pooled=+0.0926  sc=+0.0909  base P(up)=0.499
+      2026 rising    bars= 3316: IC pooled=+0.1226  sc=+0.1201  base P(up)=0.403
+      2026 crashing  bars= 1822: IC pooled=+0.1281  sc=+0.1258  base P(up)=0.621
+
+=== how the tables differ (train<=2025): P(up) at trend extremes per state ===
+  trend=-6: pooled=0.593  neutral=0.619  rising=0.481  crashing=0.732
+  trend=-3: pooled=0.556  neutral=0.577  rising=0.405  crashing=0.664
+  trend=+0: pooled=0.491  neutral=0.502  rising=0.354  crashing=0.673
+  trend=+3: pooled=0.445  neutral=0.457  rising=0.315  crashing=0.579
+  trend=+6: pooled=0.437  neutral=0.448  rising=0.271  crashing=0.490
+DONE_S15

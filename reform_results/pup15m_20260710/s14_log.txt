@@ -1,0 +1,26 @@
+wf readings: 24184 through 2026-07-04 15:00:00+00:00  | live splice: 95 (2026-07-04 19:00:00+00:00 -> 2026-07-10 06:00:00+00:00)
+feature rows: 24274  2023-10-01 05:00:00+00:00 -> 2026-07-10 06:00:00+00:00
+causal states: 24265
+occupancy: {'neutral': 70.6, 'rising': 18.4, 'crashing': 11.0}
+avg dwell (hours): {'crashing': 1.2, 'neutral': 16.1, 'rising': 2.0}
+yr    pv3_state
+2023  neutral      0.768
+      rising       0.141
+      crashing     0.091
+2024  neutral      0.691
+      rising       0.193
+      crashing     0.116
+2025  neutral      0.699
+      rising       0.188
+      crashing     0.113
+2026  neutral      0.719
+      rising       0.181
+      crashing     0.100
+
+causal vs smoothed decode: overlap=24170  agreement=0.950
+smoothed  crashing  neutral  rising
+causal                             
+crashing      2321      195     136
+neutral        166    16358     543
+rising           6      158    4287
+DONE_S14

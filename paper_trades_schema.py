@@ -224,4 +224,7 @@ CSV_COLUMNS = [
     "pup15m",
     "pup15m_trend",
     "pup15m_rev",
+    # 2026-07-10: state-conditioned variant (tables per pup_v3 intraday regime
+    # state, models/pup15m_sc_tables_btc.pkl). Drives wait_15m_agreement_gate.
+    "pup15m_sc",
 ]

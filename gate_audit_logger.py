@@ -52,6 +52,7 @@ COLUMNS = [
     "funding_bias",
     "sharp_move_active",
     "pup15m",           # 15m directional p_up (BTC only, shadow 2026-07-10)
+    "pup15m_sc",        # state-conditioned variant (drives wait_15m_agreement_gate)
     # Coinalyze liquidation + positioning (logged at block time)
     "liq_score",
     "liq_bias",
@@ -158,6 +159,7 @@ def log_block(
         "funding_bias":     signals.get("funding_bias", ""),
         "sharp_move_active": int(signals.get("sharp_move_active", 0)),
         "pup15m":           _fmt(signals.get("pup15m") if signals.get("pup15m") != "" else None, 4),
+        "pup15m_sc":        _fmt(signals.get("pup15m_sc") if signals.get("pup15m_sc") != "" else None, 4),
         # coinalyze
         "liq_score":        signals.get("liq_score", ""),
         "liq_bias":         signals.get("liq_bias", ""),

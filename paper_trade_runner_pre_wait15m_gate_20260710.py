@@ -261,44 +261,6 @@ _PUP15M_PAYLOAD: "dict | None" = None
 _PUP15M_LOADED = False
 _PUP15M_CACHE: "dict" = {"bar": None, "out": (None, None, None)}
 
-# State-conditioned variant (2026-07-10): same (trend, rev) votes, tables
-# calibrated PER pup_v3 intraday regime state (neutral/rising/crashing) with
-# fallback state-cell -> state-marginal -> pooled-cell -> pooled-marginal ->
-# global. Walk-forward validated: IC 2025 0.188 / 2026 0.150 vs pooled
-# 0.135/0.099 (reform_results/pup15m_20260710/ s15). Drives
-# wait_15m_agreement_gate. Fail-open: returns None when anything is missing.
-_PUP15M_SC_TABLES_PATH = Path(__file__).parent / "models" / "pup15m_sc_tables_btc.pkl"
-_PUP15M_SC_PAYLOAD: "dict | None" = None
-_PUP15M_SC_LOADED = False
-
-
-def _lookup_pup15m_sc(trend: "int | None", rev: "int | None",
-                      state_label: "str | None") -> "float | None":
-    global _PUP15M_SC_PAYLOAD, _PUP15M_SC_LOADED
-    if trend is None or rev is None or state_label is None:
-        return None
-    try:
-        if not _PUP15M_SC_LOADED:
-            _PUP15M_SC_LOADED = True
-            with open(_PUP15M_SC_TABLES_PATH, "rb") as _f:
-                _PUP15M_SC_PAYLOAD = _pickle.load(_f)
-        if _PUP15M_SC_PAYLOAD is None or state_label not in _PUP15M_SC_PAYLOAD["state"]:
-            return None
-        ptbl, pmarg, g = _PUP15M_SC_PAYLOAD["pooled"]
-        stbl, smarg = _PUP15M_SC_PAYLOAD["state"][state_label]
-        t, r = int(trend), int(rev)
-        if (t, r) in stbl:
-            return round(float(stbl[(t, r)]), 4)
-        if smarg.get(t) is not None:
-            return round(float(smarg[t]), 4)
-        if (t, r) in ptbl:
-            return round(float(ptbl[(t, r)]), 4)
-        if pmarg.get(t) is not None:
-            return round(float(pmarg[t]), 4)
-        return round(float(g), 4)
-    except Exception:
-        return None
-
 
 def _compute_pup15m_btc(live_1m: "pd.DataFrame | None"):
     """Return (p15, trend15, rev5) from the last completed 15m bar, or (None,)*3."""
@@ -3547,16 +3509,12 @@ def main() -> None:
         # CoinGlass flow-regime state — once per scan cycle (hourly-cached inside).
         _cg_flow_state = _get_cg_flow_state(now_utc) if args.asset == "BTC" else None
 
-        # 15m directional p_up — pooled value is shadow-log only; the
-        # state-conditioned variant (pup15m_sc) drives wait_15m_agreement_gate.
+        # 15m directional p_up — SHADOW LOGGING ONLY (2026-07-10), cached per 15m bar.
         _pup15m, _pup15m_trend, _pup15m_rev = (
             _compute_pup15m_btc(live_1m) if args.asset == "BTC" else (None, None, None))
-        _pup15m_sc = (_lookup_pup15m_sc(_pup15m_trend, _pup15m_rev, _pup_v3_hmm_state_label)
-                      if args.asset == "BTC" else None)
         if _pup15m is not None:
-            print(f"  [pup15m] p_up_15m={_pup15m:.4f}  sc={_pup15m_sc if _pup15m_sc is not None else 'n/a'}"
-                  f"  trend={_pup15m_trend:+d} rev={_pup15m_rev:+d} "
-                  f"state={_pup_v3_hmm_state_label}")
+            print(f"  [pup15m] p_up_15m={_pup15m:.4f}  trend={_pup15m_trend:+d} "
+                  f"rev={_pup15m_rev:+d}  (shadow-log only)")
 
         # SOL hourly VWAP MTF state — once per scan cycle (hourly-cached inside).
         _vwap1h_state_sol = _get_vwap1h_state_sol(now_utc) if args.asset == "SOL" else None
@@ -4962,7 +4920,6 @@ def main() -> None:
             # Signal snapshot for gate audit logging — captured once per contract evaluation.
             _gate_signals = {
                 "pup15m":            _pup15m if _pup15m is not None else "",
-                "pup15m_sc":         _pup15m_sc if _pup15m_sc is not None else "",
                 "ema_stack_bias":    confirm.ema_stack_bias,
                 "composite_trend":   _active_trend,
                 "composite_rev":     _active_rev,
@@ -7803,10 +7760,6 @@ def main() -> None:
                 # fi_z2_yes_gate (fresh heavy selling z<-1 → WR=39% vs BE)
                 if _yleg_ok and not math.isnan(_fi_z2) and _fi_z2 < -1.0:
                     _yleg_ok = False
-                # wait_15m_agreement (2026-07-10): defer the YES leg while
-                # pup15m_sc firmly says down — same rule as the main gate.
-                if _yleg_ok and _pup15m_sc is not None and _pup15m_sc < 0.48:
-                    _yleg_ok = False
                 if _yleg_ok:
                     if best_yes_candidate is None or _dec_yes.net_edge > best_yes_candidate.net_edge:
                         best_yes_candidate = _dec_yes
@@ -7814,31 +7767,6 @@ def main() -> None:
                         print(f"  [btc_yes_leg] Candidate {c['ticker']} "
                               f"pm={pm:.3f} p_up={_comp_p_up_c:.3f} "
                               f"edge={_dec_yes.net_edge:+.4f} bet=${_dec_yes.bet_amount:.2f}")
-
-            # [wait_15m_agreement_gate 2026-07-10] Entry-timing DEFER (not a block):
-            # if the state-conditioned 15m directional p_up firmly disagrees with
-            # the chosen side, skip THIS cycle; the 60s rescan re-evaluates and the
-            # direction can flip at 15m bar boundaries. A skip places no order so
-            # _SIDE_COOLDOWN never arms. Band ±0.02 exactly as simulated.
-            # Evidence (reform_results/pup15m_20260710/ s15-s18): signal IC OOS
-            # 0.150-0.188 (2yr walk-forward); full 8-wk real-book replay delta
-            # +$1,128 (+73%), 6/8 wks positive, positive in all 3 model eras,
-            # grows w/o top-3 episodes; P=0.15 episode-clustered — deployed on
-            # mechanism+consistency evidence with kill criteria pre-registered
-            # (review 2026-07-24: realized blocked_trades counterfactual; revert
-            # if negative). 347-bucket rescue sweep found NO rescue (pure defer).
-            # Placed AFTER btc_yes_leg capture so a deferred NO cannot silently
-            # drop a signal-supported YES-leg candidate. Fail-open on None.
-            if (args.asset == "BTC" and dec_c.decision == "trade"
-                    and _pup15m_sc is not None):
-                _w15_want = 1 if dec_c.side == "yes" else -1
-                _w15_dir = 1 if _pup15m_sc > 0.52 else (-1 if _pup15m_sc < 0.48 else 0)
-                if _w15_dir == -_w15_want:
-                    print(f"  [wait_15m_agreement] DEFER {dec_c.side.upper()} {c['ticker']} — "
-                          f"pup15m_sc={_pup15m_sc:.4f} (state={_pup_v3_hmm_state_label}) "
-                          f"opposes; re-check next cycle")
-                    _log_block("wait_15m_agreement_gate")
-                    continue
 
             if dec_c.decision == "trade":
                 if best_trade_dec is None or dec_c.net_edge > best_trade_dec.net_edge:
@@ -8115,7 +8043,6 @@ def main() -> None:
         "pup15m":             _pup15m if _pup15m is not None else "",
         "pup15m_trend":       _pup15m_trend if _pup15m_trend is not None else "",
         "pup15m_rev":         _pup15m_rev if _pup15m_rev is not None else "",
-        "pup15m_sc":          _pup15m_sc if _pup15m_sc is not None else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

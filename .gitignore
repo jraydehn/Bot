@@ -33,3 +33,6 @@ nohup.out
 
 # >100MB, refetchable via s1b_fetch_1m.py
 reform_results/pup_v2_rebuild_20260704/hist_BTCUSDT_1m.parquet
+reform_results/vwap_hmm_1h_20260708/corrected_full_analysis.csv
+reform_results/pup15m_20260710/hourly_archive_p15.csv
+reform_results/sol_pup_rebuild_20260706/sim_pup_swap_full.csv

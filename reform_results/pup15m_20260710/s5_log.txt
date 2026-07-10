@@ -1,0 +1,23 @@
+real resolved BTC hourly trades in window: 556  2026-06-17 -> 2026-07-10
+actual-book would_pnl total: $+1,158.55
+
+action breakdown: {'unchanged': 212, 'missed': 189, 're-entered': 155}
+disagree/neutral at entry: 344 of 556
+
+week                          n   EXISTING $     WAIT $     delta
+2026-06-29/2026-07-05       143       -49.34     -62.00    -12.66  [post]
+2026-07-06/2026-07-12        87        27.01     321.06   +294.05  [post]
+2026-06-15/2026-06-21       144       418.02     232.41   -185.61  [pre]
+2026-06-22/2026-06-28       152       583.51     551.49    -32.02  [pre]
+2026-06-29/2026-07-05        30       179.35     452.75   +273.40  [pre]
+
+TOTAL pre-reform (n=326): EXISTING $+1,180.88  WAIT $+1,236.65  DELTA $+55.77
+  modified trades only (n=216): existing $+608.63 -> wait $+664.40
+    re-entered: n=67  their existing pnl $+73.54  their wait pnl $+664.40
+    missed: n=149  their existing pnl $+535.09  (wait pnl $0)
+
+TOTAL post-reform (n=230): EXISTING $-22.33  WAIT $+259.06  DELTA $+281.39
+  modified trades only (n=128): existing $-378.99 -> wait $-97.60
+    re-entered: n=88  their existing pnl $-762.65  their wait pnl $-97.60
+    missed: n=40  their existing pnl $+383.66  (wait pnl $0)
+DONE_S5

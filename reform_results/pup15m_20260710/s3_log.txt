@@ -1,0 +1,28 @@
+archive rows in signal window: 421912  tickers: 14195
+window: 2026-05-18 18:54:10+00:00 -> 2026-07-10 02:59:27+00:00
+p15 staleness at join: median=7.5min  p95=14.2min
+
+=== WITHIN-SIDE edge by p15 agreement (ticker-clustered), per era ===
+  YES pre  15m AGREES   : rows=125363 tickers= 7322 tk_edge=+0.0109 P(<=0)=0.0000 wk+=6/7
+  YES pre  15m NEUTRAL  : rows= 71191 tickers= 5296 tk_edge=-0.0088 P(<=0)=0.9960 wk+=2/7
+  YES pre  15m DISAGREES: rows=140412 tickers= 7286 tk_edge=-0.0212 P(<=0)=1.0000 wk+=1/7
+  YES post 15m AGREES   : rows= 29248 tickers= 1846 tk_edge=+0.0005 P(<=0)=0.4665 wk+=1/2
+  YES post 15m NEUTRAL  : rows= 18322 tickers= 1583 tk_edge=+0.0109 P(<=0)=0.0365 wk+=2/2
+  YES post 15m DISAGREES: rows= 37376 tickers= 2294 tk_edge=-0.0146 P(<=0)=1.0000 wk+=0/2
+  NO  pre  15m AGREES   : rows=140412 tickers= 7286 tk_edge=+0.0212 P(<=0)=0.0000 wk+=6/7
+  NO  pre  15m NEUTRAL  : rows= 71191 tickers= 5296 tk_edge=+0.0088 P(<=0)=0.0040 wk+=5/7
+  NO  pre  15m DISAGREES: rows=125363 tickers= 7322 tk_edge=-0.0109 P(<=0)=1.0000 wk+=1/7
+  NO  post 15m AGREES   : rows= 37376 tickers= 2294 tk_edge=+0.0146 P(<=0)=0.0000 wk+=2/2
+  NO  post 15m NEUTRAL  : rows= 18322 tickers= 1583 tk_edge=-0.0109 P(<=0)=0.9635 wk+=0/2
+  NO  post 15m DISAGREES: rows= 29248 tickers= 1846 tk_edge=-0.0005 P(<=0)=0.5335 wk+=1/2
+
+=== signed-strength gradient (p15 distance from 0.5, signed toward side) ===
+  YES strong support (>0.04)  : tickers= 8969 tk_edge=+0.0099 P(<=0)=0.0000 wk+=5/8
+  YES mild support (0,0.04]   : tickers= 1303 tk_edge=-0.0202 P(<=0)=0.9925 wk+=2/8
+  YES mild oppose (-0.04,0]   : tickers= 7798 tk_edge=+0.0000 P(<=0)=0.4985 wk+=3/8
+  YES strong oppose (<=-0.04) : tickers= 8853 tk_edge=-0.0235 P(<=0)=1.0000 wk+=2/8
+  NO  strong support (>0.04)  : tickers= 8853 tk_edge=+0.0235 P(<=0)=0.0000 wk+=6/8
+  NO  mild support (0,0.04]   : tickers= 7798 tk_edge=-0.0000 P(<=0)=0.5015 wk+=5/8
+  NO  mild oppose (-0.04,0]   : tickers= 1303 tk_edge=+0.0202 P(<=0)=0.0075 wk+=6/8
+  NO  strong oppose (<=-0.04) : tickers= 8969 tk_edge=-0.0099 P(<=0)=1.0000 wk+=3/8
+DONE_S3

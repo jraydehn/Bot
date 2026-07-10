@@ -1,0 +1,31 @@
+15m dir series: 3093 cycles 2026-05-21 21:42:31+00:00 -> 2026-07-10 01:38:58+00:00
+hourly candidates with 15m direction: 80606 rows, 3528 tickers, 2026-05-21 -> 2026-07-10
+
+=== WITHIN-SIDE, full candidate population (no selection confound) ===
+YES 15m AGREES    : rows= 46952 tickers= 2961 tk_edge=-0.0018 P(<=0)=0.6365 wk+=2/5
+YES 15m NEUTRAL   : rows=  3903 tickers=  627 tk_edge=-0.0320 P(<=0)=0.9920 wk+=1/4
+YES 15m DISAGREES : rows= 29751 tickers= 2123 tk_edge=-0.0224 P(<=0)=1.0000 wk+=2/5
+NO 15m AGREES    : rows= 29751 tickers= 2123 tk_edge=+0.0224 P(<=0)=0.0000 wk+=3/5
+NO 15m NEUTRAL   : rows=  3903 tickers=  627 tk_edge=+0.0322 P(<=0)=0.0097 wk+=3/4
+NO 15m DISAGREES : rows= 46952 tickers= 2961 tk_edge=+0.0018 P(<=0)=0.3653 wk+=3/5
+
+=== signed-strength gradient, per side ===
+YES strong support (>0.05)  : tickers= 2711 tk_edge=-0.0048 P(<=0)=0.8093
+YES mild (0,0.05]           : tickers= 1292 tk_edge=+0.0010 P(<=0)=0.4590
+YES mild oppose (-0.05,0]   : tickers= 1413 tk_edge=-0.0073 P(<=0)=0.8005
+YES strong oppose (<=-0.05) : tickers= 1629 tk_edge=-0.0390 P(<=0)=1.0000
+NO strong support (>0.05)  : tickers= 1629 tk_edge=+0.0391 P(<=0)=0.0000
+NO mild (0,0.05]           : tickers= 1413 tk_edge=+0.0074 P(<=0)=0.1805
+NO mild oppose (-0.05,0]   : tickers= 1292 tk_edge=-0.0008 P(<=0)=0.5302
+NO strong oppose (<=-0.05) : tickers= 2711 tk_edge=+0.0050 P(<=0)=0.1915
+
+=== era split (first half vs second half of overlap) ===
+YES AGREE H1: tickers= 1093 tk_edge=-0.0106 P(<=0)=0.8890
+YES AGREE H2: tickers= 1868 tk_edge=+0.0031 P(<=0)=0.3152
+YES DISAGREE H1: tickers= 1365 tk_edge=-0.0406 P(<=0)=1.0000
+YES DISAGREE H2: tickers=  758 tk_edge=+0.0110 P(<=0)=0.1703
+NO AGREE H1: tickers= 1365 tk_edge=+0.0407 P(<=0)=0.0000
+NO AGREE H2: tickers=  758 tk_edge=-0.0109 P(<=0)=0.8407
+NO DISAGREE H1: tickers= 1093 tk_edge=+0.0103 P(<=0)=0.1148
+NO DISAGREE H2: tickers= 1868 tk_edge=-0.0031 P(<=0)=0.6877
+DONE_S3

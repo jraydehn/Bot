@@ -245,112 +245,6 @@ _PUP_V3_HMM_HISTORY: "deque | None" = None  # deque of (hour_ts, p_up_v3) tuples
 _PUP_V3_HMM_SEEDED = False
 
 
-# ---------------------------------------------------------------------------
-# 15m directional p_up -- SHADOW LOGGING ONLY, no gate/sizing consumer (2026-07-10).
-# Empirical (trend15, rev5) -> P(next 15m bar up) calibration tables, trained
-# 2023-10..2025-12 on Binance 1m (reform_results/pup15m_20260710/, tables copied
-# to models/pup15m_tables_btc.pkl). Mean-reversion signal: oversold votes -> up.
-# OOS 2025 IC +0.135 / 2026 IC +0.099; on the hourly scan archive, NO+agree
-# +2.1pp pre-reform / +1.5pp post-reform (P=0.0000 ticker-clustered, s3_log).
-# Parity with the validated join: votes use the LAST COMPLETED 15m bar T
-# (in-progress bar dropped) and the rev vote uses the last 5m bar INSIDE that
-# same 15m window ([T+10,T+15)) -- NOT the freshest 5m bar. Cached per 15m bar.
-# Fail-open: any error -> (None, None, None), nothing downstream consumes it.
-_PUP15M_TABLES_PATH = Path(__file__).parent / "models" / "pup15m_tables_btc.pkl"
-_PUP15M_PAYLOAD: "dict | None" = None
-_PUP15M_LOADED = False
-_PUP15M_CACHE: "dict" = {"bar": None, "out": (None, None, None)}
-
-
-def _compute_pup15m_btc(live_1m: "pd.DataFrame | None"):
-    """Return (p15, trend15, rev5) from the last completed 15m bar, or (None,)*3."""
-    global _PUP15M_PAYLOAD, _PUP15M_LOADED
-    if live_1m is None or len(live_1m) < 700:
-        return (None, None, None)
-    try:
-        if not _PUP15M_LOADED:
-            _PUP15M_LOADED = True
-            with open(_PUP15M_TABLES_PATH, "rb") as _f:
-                _PUP15M_PAYLOAD = _pickle.load(_f)
-        if _PUP15M_PAYLOAD is None:
-            return (None, None, None)
-        agg = {"open": "first", "high": "max", "low": "min",
-               "close": "last", "volume": "sum"}
-        d15 = live_1m.resample("15min").agg(agg).dropna().iloc[:-1]  # completed only
-        if len(d15) < 40:
-            return (None, None, None)
-        bar_t = d15.index[-1]
-        if _PUP15M_CACHE["bar"] == bar_t:
-            return _PUP15M_CACHE["out"]
-        c, h, l, v = d15["close"], d15["high"], d15["low"], d15["volume"]
-        lo14, hi14 = l.rolling(14).min(), h.rolling(14).max()
-        rng14 = (hi14 - lo14).replace(0, float("nan"))
-        stoch = ((c - lo14) / rng14) * 100
-        wpr = -100 * (hi14 - c) / rng14
-        ma20, sd20 = c.rolling(20).mean(), c.rolling(20).std()
-        bbp = (c - (ma20 - 2 * sd20)) / (4 * sd20).replace(0, float("nan"))
-        e10 = c.ewm(span=10, adjust=False).mean()
-        tr = pd.concat([h - l, (h - c.shift(1)).abs(),
-                        (l - c.shift(1)).abs()], axis=1).max(axis=1)
-        a14 = tr.ewm(span=14, adjust=False).mean()
-        kcp = (c - (e10 - 1.5 * a14)) / (3 * a14).replace(0, float("nan"))
-        macd = (c.ewm(span=12, adjust=False).mean()
-                - c.ewm(span=26, adjust=False).mean())
-        hist = macd - macd.ewm(span=9, adjust=False).mean()
-        kd = stoch - stoch.rolling(3).mean()
-        vol_med = v.rolling(20).median()
-        hv_up = (v > 1.5 * vol_med) & (c > d15["open"])
-        hv_dn = (v > 1.5 * vol_med) & (c < d15["open"])
-        trend = pd.Series(0, index=d15.index, dtype=float)
-        trend += (stoch > 80).astype(int) - (stoch < 20).astype(int)
-        trend += (wpr > -20).astype(int) - (wpr < -80).astype(int)
-        trend += (bbp > 0.80).astype(int) - (bbp < 0.20).astype(int)
-        trend += (kcp > 0.85).astype(int) - (kcp < 0.15).astype(int)
-        trend += (((hist > 0) & (hist > hist.shift(1))).astype(int)
-                  - ((hist < 0) & (hist < hist.shift(1))).astype(int))
-        trend += 2 * (kd > 10).astype(int) + ((kd > 5) & (kd <= 10)).astype(int)
-        trend -= 2 * (kd < -10).astype(int) + ((kd < -5) & (kd >= -10)).astype(int)
-        trend += hv_up.astype(int) - hv_dn.astype(int)
-        t_now = int(trend.clip(-6, 6).iloc[-1])
-
-        d5 = live_1m.resample("5min").agg(agg).dropna().iloc[:-1]
-        c5, h5, l5 = d5["close"], d5["high"], d5["low"]
-        lo5, hi5 = l5.rolling(14).min(), h5.rolling(14).max()
-        st5 = ((c5 - lo5) / (hi5 - lo5).replace(0, float("nan"))) * 100
-        ma5, sd5 = c5.rolling(20).mean(), c5.rolling(20).std()
-        bbp5 = (c5 - (ma5 - 2 * sd5)) / (4 * sd5).replace(0, float("nan"))
-        chg5 = c5.pct_change() * 100
-        chg5_z = ((chg5 - chg5.rolling(96).mean())
-                  / chg5.rolling(96).std().replace(0, float("nan")))
-        rng5 = (h5 - l5).replace(0, float("nan"))
-        upper_w = (h5 - pd.concat([d5["open"], c5], axis=1).max(axis=1)) / rng5
-        lower_w = (pd.concat([d5["open"], c5], axis=1).min(axis=1) - l5) / rng5
-        rev5 = pd.Series(0, index=d5.index, dtype=float)
-        rev5 += (st5 < 20).astype(int) - (st5 > 80).astype(int)
-        rev5 += (bbp5 < 0.10).astype(int) - (bbp5 > 0.90).astype(int)
-        rev5 += (chg5_z < -2).astype(int) - (chg5_z > 2).astype(int)
-        rev5 += (lower_w > 0.5).astype(int) - (upper_w > 0.5).astype(int)
-        in_bar = rev5[(rev5.index >= bar_t)
-                      & (rev5.index < bar_t + pd.Timedelta("15min"))]
-        r_now = int(max(-4, min(4, in_bar.iloc[-1]))) if len(in_bar) else 0
-
-        tbl = _PUP15M_PAYLOAD["table"]
-        marg = _PUP15M_PAYLOAD["marginal"]
-        if (t_now, r_now) in tbl:
-            p15 = float(tbl[(t_now, r_now)])
-        elif marg.get(t_now) is not None:
-            p15 = float(marg[t_now])
-        else:
-            p15 = float(_PUP15M_PAYLOAD["global"])
-        out = (round(p15, 4), t_now, r_now)
-        _PUP15M_CACHE["bar"] = bar_t
-        _PUP15M_CACHE["out"] = out
-        return out
-    except Exception as _e:
-        print(f"  [pup15m] compute failed (fail-open): {type(_e).__name__}: {_e}")
-        return (None, None, None)
-
-
 def _load_pup_v3_hmm():
     global _PUP_V3_HMM_PAYLOAD
     if _PUP_V3_HMM_PAYLOAD is not None:
@@ -3509,13 +3403,6 @@ def main() -> None:
         # CoinGlass flow-regime state — once per scan cycle (hourly-cached inside).
         _cg_flow_state = _get_cg_flow_state(now_utc) if args.asset == "BTC" else None
 
-        # 15m directional p_up — SHADOW LOGGING ONLY (2026-07-10), cached per 15m bar.
-        _pup15m, _pup15m_trend, _pup15m_rev = (
-            _compute_pup15m_btc(live_1m) if args.asset == "BTC" else (None, None, None))
-        if _pup15m is not None:
-            print(f"  [pup15m] p_up_15m={_pup15m:.4f}  trend={_pup15m_trend:+d} "
-                  f"rev={_pup15m_rev:+d}  (shadow-log only)")
-
         # SOL hourly VWAP MTF state — once per scan cycle (hourly-cached inside).
         _vwap1h_state_sol = _get_vwap1h_state_sol(now_utc) if args.asset == "SOL" else None
         if _vwap1h_state_sol is not None:
@@ -3850,8 +3737,6 @@ def main() -> None:
                     _gbdt_feats_c["macro_regime_bull"] = round(_early_regime_probs.get("Bull", 0.0), 4)
                     _gbdt_feats_c["macro_regime_sdwy"] = round(_early_regime_probs.get("Sideways", 0.0), 4)
                     _gbdt_feats_c["macro_regime_bear"] = round(_early_regime_probs.get("Bear", 0.0), 4)
-                if _pup15m is not None:
-                    _gbdt_feats_c["pup15m"] = _pup15m
                 try:
                     import scan_archive as _sa
                     _sa.log_scan_row(
@@ -4919,7 +4804,6 @@ def main() -> None:
 
             # Signal snapshot for gate audit logging — captured once per contract evaluation.
             _gate_signals = {
-                "pup15m":            _pup15m if _pup15m is not None else "",
                 "ema_stack_bias":    confirm.ema_stack_bias,
                 "composite_trend":   _active_trend,
                 "composite_rev":     _active_rev,
@@ -8040,9 +7924,6 @@ def main() -> None:
         "macro_regime_bull":  round(_macro_regime_probs.get("Bull", 0.0), 4) if _macro_regime_probs else "",
         "macro_regime_sdwy":  round(_macro_regime_probs.get("Sideways", 0.0), 4) if _macro_regime_probs else "",
         "macro_regime_bear":  round(_macro_regime_probs.get("Bear", 0.0), 4) if _macro_regime_probs else "",
-        "pup15m":             _pup15m if _pup15m is not None else "",
-        "pup15m_trend":       _pup15m_trend if _pup15m_trend is not None else "",
-        "pup15m_rev":         _pup15m_rev if _pup15m_rev is not None else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

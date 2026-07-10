@@ -1,0 +1,32 @@
+model feat_cols: ['vwap_dist_1m', 'vwap_dist_5m', 'vwap_dist_15m', 'vwap_vel_1m', 'vwap_spread']
+88001 15m bars with complete features
+state distribution: {0: 9776, 1: 8892, 2: 12604, 3: 14699, 4: 6048, 5: 18280, 6: 5824, 7: 11878}
+
+state agreement flawed vs fixed: 0.5523
+
+=== St4 pure block (NO), flawed vs fixed ===
+FLAWED St4 NO: n=285 WR=0.196 BE=0.258 edge=-0.0619 P(<=0)=0.9995
+FIXED  St4 NO: n=238 WR=0.303 BE=0.323 edge=-0.0203 P(<=0)=0.7965
+
+=== St2 block condition (vol_ratio<0.216) ===
+FLAWED St2 BLOCK(vol<0.216): n=253 WR=0.277 BE=0.314 edge=-0.0376 P(<=0)=0.9417
+FLAWED St2 RESCUE(vol>=0.216): n=227 WR=0.216 BE=0.275 edge=-0.0593 P(<=0)=0.9940
+FIXED St2 BLOCK(vol<0.216): n=211 WR=0.322 BE=0.324 edge=-0.0019 P(<=0)=0.5230
+FIXED St2 RESCUE(vol>=0.216): n=227 WR=0.344 BE=0.345 edge=-0.0015 P(<=0)=0.5192
+
+=== St5 block condition (stoch_k_1h<85) ===
+FLAWED St5 BLOCK(sk1h<85): n=735 WR=0.384 BE=0.395 edge=-0.0112 P(<=0)=0.7915
+FLAWED St5 RESCUE(sk1h>=85): n=41 WR=0.390 BE=0.349 edge=+0.0411 P(<=0)=0.2612
+FIXED St5 BLOCK(sk1h<85): n=740 WR=0.427 BE=0.391 edge=+0.0363 P(<=0)=0.0040
+FIXED St5 RESCUE(sk1h>=85): n=61 WR=0.328 BE=0.289 edge=+0.0394 P(<=0)=0.1860
+
+=== St7 block condition (chg_15m>=-0.112) ===
+FLAWED St7 BLOCK(chg15m>=-0.112): n=518 WR=0.266 BE=0.309 edge=-0.0422 P(<=0)=0.9950
+FLAWED St7 RESCUE(chg15m<-0.112): n=51 WR=0.569 BE=0.595 edge=-0.0262 P(<=0)=0.6865
+FIXED St7 BLOCK(chg15m>=-0.112): n=483 WR=0.371 BE=0.365 edge=+0.0060 P(<=0)=0.3650
+FIXED St7 RESCUE(chg15m<-0.112): n=58 WR=0.621 BE=0.595 edge=+0.0252 P(<=0)=0.3302
+
+=== St0 NO Kelly boost ===
+FLAWED St0 NO: n=594 WR=0.473 BE=0.404 edge=+0.0693 P(<=0)=0.0000
+FIXED  St0 NO: n=650 WR=0.366 BE=0.355 edge=+0.0113 P(<=0)=0.2243
+DONE

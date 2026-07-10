@@ -1,0 +1,37 @@
+z-events: 9011
+grid: 4367 15-min points, 2026-05-23 05:00:00+00:00 -> 2026-07-09 06:30:00+00:00
+HMM training matrix: 4344 x 3
+
+BIC selection:
+  n=2: BIC=26540.5
+  n=3: BIC=26631.1
+  n=4: BIC=17439.9
+  n=5: BIC=17563.1
+selected 4 states
+
+causal state distribution: {0: 1220, 1: 316, 2: 1730, 3: 1070}
+state centroids (level / delta_1h / ma_6h):
+  S0: level=+0.238  delta=+0.0230  ma=+0.225  (n=1220)
+  S1: level=+1.974  delta=+0.0313  ma=+1.874  (n=316)
+  S2: level=+0.605  delta=-0.0024  ma=+0.625  (n=1730)
+  S3: level=+1.054  delta=-0.0321  ma=+1.080  (n=1070)
+
+NO book with state: 1126/1557
+
+=== KEPT book (z>=0.55) by HMM state — the conviction-boost question ===
+kept baseline: n=557 edge=+0.0566 $=+3575.77
+  S0: n=31 eps=12 edge=+0.0421 ep_edge=+0.0605 P(<=0)=0.1998 wk+=4/5 $=+130.37
+  S1: n=31 eps=12 edge=+0.0973 ep_edge=+0.1068 P(<=0)=0.1340 wk+=4/5 $=+91.11
+  S2: n=274 eps=111 edge=+0.0702 ep_edge=+0.0746 P(<=0)=0.0200 wk+=6/7 $=+2122.28
+  S3: n=221 eps=81 edge=+0.0360 ep_edge=+0.0551 P(<=0)=0.0860 wk+=5/7 $=+1232.01
+
+=== NULL COMPETITOR: plain z-level terciles within kept ===
+  z<0.72: n=186 eps=95 ep_edge=+0.0482 P(<=0)=0.1077 wk+=5/7 $=+988.85
+  z 0.72-0.95: n=185 eps=89 ep_edge=+0.0864 P(<=0)=0.0175 wk+=6/7 $=+1760.35
+  z>=0.95: n=186 eps=61 ep_edge=+0.0529 P(<=0)=0.1308 wk+=6/7 $=+826.57
+
+=== blocked book by state (context) ===
+  S0: n=334 ep_edge=-0.0768 P(<=0)=0.9902 $=-1108.63
+  S2: n=185 ep_edge=-0.0485 P(<=0)=0.8572 $=-939.67
+  S3: n=34 ep_edge=-0.2203 P(<=0)=0.9992 $=-466.62
+DONE_S7

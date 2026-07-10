@@ -1,0 +1,30 @@
+rows: 421912  tickers: 14195
+
+================ side=YES ================
+  DISAGREE/NEUTRAL-at-entry pre: n=6801  edge_now=-0.0215
+    +15min fixed wait:        dcost=-0.0028  edge=-0.0194
+    wait-for-agree: entered 3102/6801 (54% missed)  median_wait=18min
+      dcost=-0.0865  edge_when_entered=-0.0066 (same tickers enter-now: -0.0932)
+    STRATEGY avg/candidate (missed=0): wait=-0.0030 vs now=-0.0215
+  AGREE-at-entry control pre: n=4220  edge_now=-0.0040
+  DISAGREE/NEUTRAL-at-entry post: n=2112  edge_now=+0.0215
+    +15min fixed wait:        dcost=+0.0173  edge=+0.0093
+    wait-for-agree: entered 784/2112 (63% missed)  median_wait=21min
+      dcost=-0.0752  edge_when_entered=-0.0078 (same tickers enter-now: -0.0831)
+    STRATEGY avg/candidate (missed=0): wait=-0.0029 vs now=+0.0215
+  AGREE-at-entry control post: n=1062  edge_now=-0.0204
+
+================ side=NO ================
+  DISAGREE/NEUTRAL-at-entry pre: n=6491  edge_now=+0.0132
+    +15min fixed wait:        dcost=-0.0019  edge=+0.0172
+    wait-for-agree: entered 2756/6491 (58% missed)  median_wait=16min
+      dcost=-0.0766  edge_when_entered=-0.0013 (same tickers enter-now: -0.0779)
+    STRATEGY avg/candidate (missed=0): wait=-0.0006 vs now=+0.0132
+  AGREE-at-entry control pre: n=4530  edge_now=+0.0171
+  DISAGREE/NEUTRAL-at-entry post: n=1717  edge_now=-0.0078
+    +15min fixed wait:        dcost=+0.0028  edge=-0.0139
+    wait-for-agree: entered 837/1717 (51% missed)  median_wait=17min
+      dcost=-0.0698  edge_when_entered=+0.0016 (same tickers enter-now: -0.0682)
+    STRATEGY avg/candidate (missed=0): wait=+0.0008 vs now=-0.0078
+  AGREE-at-entry control post: n=1457  edge_now=-0.0071
+DONE_S4

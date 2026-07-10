@@ -1,0 +1,15 @@
+rows: 80606  tickers: 3528
+entry-decision points: 3223
+
+================ side=NO ================
+  DISAGREE-at-entry (the wait candidates) pre-reform: n=453  edge_now=+0.0008  | +15min: dcost=+0.0002 edge=+0.0060  | wait-for-agree: entered 297/453 (34% missed), dcost=-0.0256, edge_when_entered=+0.0131 (vs their edge_now=-0.0125)  | STRATEGY avg (missed=0): wait=+0.0086 vs now=+0.0008
+  DISAGREE-at-entry (the wait candidates) post-reform: n=1575  edge_now=+0.0005  | +15min: dcost=-0.0064 edge=+0.0025  | wait-for-agree: entered 363/1575 (77% missed), dcost=-0.0813, edge_when_entered=-0.0355 (vs their edge_now=-0.1168)  | STRATEGY avg (missed=0): wait=-0.0082 vs now=+0.0005
+  AGREE-at-entry (control) pre-reform: n=1010  edge_now=+0.0650  | +15min: dcost=+0.0076 edge=+0.0753
+  AGREE-at-entry (control) post-reform: n=93  edge_now=-0.0716  | +15min: dcost=-0.0208 edge=-0.0723
+
+================ side=YES ================
+  DISAGREE-at-entry (the wait candidates) pre-reform: n=1010  edge_now=-0.0650  | +15min: dcost=-0.0076 edge=-0.0753  | wait-for-agree: entered 591/1010 (41% missed), dcost=-0.0429, edge_when_entered=-0.0548 (vs their edge_now=-0.0977)  | STRATEGY avg (missed=0): wait=-0.0321 vs now=-0.0650
+  DISAGREE-at-entry (the wait candidates) post-reform: n=93  edge_now=+0.0716  | +15min: dcost=+0.0208 edge=+0.0723  | wait-for-agree: entered 58/93 (38% missed), dcost=+0.0003, edge_when_entered=+0.0790 (vs their edge_now=+0.0792)  | STRATEGY avg (missed=0): wait=+0.0492 vs now=+0.0716
+  AGREE-at-entry (control) pre-reform: n=453  edge_now=-0.0008  | +15min: dcost=-0.0002 edge=-0.0060
+  AGREE-at-entry (control) post-reform: n=1575  edge_now=-0.0005  | +15min: dcost=+0.0064 edge=-0.0025
+DONE_S4

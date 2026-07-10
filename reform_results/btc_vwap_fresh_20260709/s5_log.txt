@@ -1,0 +1,18 @@
+real taken hourly trades in pre-reform window: 737  actual-book pnl=$+3161.20
+(logged would_pnl for same rows: $+3161.30 -- sanity)
+with 15m direction: 107
+
+action breakdown: {'unchanged': 66, 're-entered': 22, 'missed': 19}
+
+week                        n   EXISTING $     WAIT $     delta
+2026-05-23/2026-05-29      82       775.95     686.06    -89.89
+2026-05-30/2026-06-05      25      -201.91    -130.22    +71.69
+
+TOTAL (pre-reform validated window, real book, actual sizes):
+  EXISTING (enter immediately): $+574.04
+  btc_1h_WAIT (wait for 15m agreement): $+555.85
+  DELTA: $-18.20
+
+modified trades only (disagree-at-entry, n=41):
+  their existing pnl: $+205.43  their wait pnl: $+187.23
+DONE_S5

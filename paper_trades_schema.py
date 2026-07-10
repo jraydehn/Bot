@@ -217,4 +217,11 @@ CSV_COLUMNS = [
     "macro_regime_bull",
     "macro_regime_sdwy",
     "macro_regime_bear",
+    # 2026-07-10: 15m directional p_up (BTC only) -- SHADOW LOGGING, no consumer.
+    # Empirical (trend15, rev5) calibration tables, models/pup15m_tables_btc.pkl.
+    # Validated reform_results/pup15m_20260710/ (OOS both years; NO+agree +1.5pp
+    # post-reform on scan archive). Gate/wait mechanic NOT deployed pending live data.
+    "pup15m",
+    "pup15m_trend",
+    "pup15m_rev",
 ]

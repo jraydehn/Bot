@@ -104,6 +104,8 @@ COLUMNS = [
     "macro_regime_bull",   # P(Bull) from 1h directional HMM
     "macro_regime_sdwy",   # P(Sideways)
     "macro_regime_bear",   # P(Bear)
+    # 15m directional p_up (BTC only, shadow 2026-07-10 — no consumer)
+    "pup15m",              # P(next 15m bar up), (trend15, rev5) calibration tables
     # Outcome (backfilled)
     "resolved_yes",
     "spot_at_expiry", "price_move_pct", "miss_pct",

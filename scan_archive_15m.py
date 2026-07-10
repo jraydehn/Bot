@@ -107,6 +107,8 @@ COLUMNS = [
     "spot_at_expiry", "price_move_pct", "miss_pct",
     # Drift model features (BTC: p_up_v2 + 6h rolling z_drift)
     "p_up_v2_btc", "z_drift_6h",
+    # [2026-07-10] live decision drift (scale=0.25) + OLD hard-cap(0.5) shadow
+    "zdrift_15m", "zdrift_15m_capped_old",
     # HMM vol-regime state (BTC only; 0=low-vol, 1=med-vol, 2=high-vol)
     "hmm_vol_state",
     # VWAP MTF HMM state (BTC + SOL, each asset's own model; 8-state on 1m/5m/15m VWAP distances)

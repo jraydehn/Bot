@@ -610,13 +610,10 @@ CSV_COLUMNS = [
     # Markov regimes (BTC: 1h+15m; ETH: daily; SOL: 6h/4h/1h)
     "markov_regime_1h", "markov_regime_15m",
     "markov_eth_daily", "markov_sol_6h", "markov_sol_4h", "markov_sol_1h",
-    # p_up_v2 -- SHADOW ONLY as of 2026-07-10 (decision path is z_drift, below)
+    # p_up_v2 drift model (BTC only)
     "p_up_v2_btc",
     # Rolling 6h empirical z_drift (for LGBM feature logging)
     "z_drift_6h",
-    # [2026-07-10] the actual live decision drift (scale=0.25, safety_bound=5.0)
-    # and the OLD hard-cap(0.5) shadow, for forward before/after comparison.
-    "zdrift_15m", "zdrift_15m_capped_old",
     # Shadow LGBM output — lgbm_15m_{asset}.pkl runs alongside primary on every scan
     "p_gbdt",
     # Shadow stochastic signals (no gate logic — log-only for future analysis)
@@ -1540,34 +1537,12 @@ def compute_zdrift_empirical_15m(
     w_short: int = 10,
     w_long: int = 30,
     alpha: float = 0.6,
-    safety_bound: float = 5.0,
-    scale: float = 0.25,
+    cap: float = 0.5,
 ) -> Optional[float]:
     """
     Empirical z_drift from resolved 15m BTC trade history.
     Looks up BTC price at each close_time from live_1m (25h window).
     Returns None when fewer than w_short resolved trades are available.
-
-    [2026-07-10] Root-cause investigation (project_pup15m_20260710.md /
-    project_btc15m_paper_mode_20260710.md) found the OLD hard cap (0.5)
-    saturated 73.8% of all decisions -- collapsing every moderate-to-strong
-    trend reading into the exact same maximal-bullish value, and chronically
-    tilting the model YES regardless of how confident the underlying signal
-    actually was. Replaced with: clip to a generous SAFETY bound (5.0, guards
-    only against data corruption -- e.g. the 06-27 spot_at_expiry=2000.0 CSV
-    glitch that produced z~-4800; real raw readings' 99th pctile is ~3.3) then
-    SCALE by a fixed fraction (0.25). This preserves the signal's relative
-    ordering (a stronger raw trend still produces a stronger, more confident
-    drift) instead of flattening every strong reading to one identical
-    ceiling. Ground-truth-anchored test on the real 317-trade YES book
-    (s35, ticker/episode-clustered): net delta +$457 vs the old cap,
-    P(the filtered-out trades were net positive, i.e. this change hurts)=0.14,
-    benefit concentrated almost entirely in the 07-06->07-12 degradation week
-    (-$410 avoided there specifically, not spread evenly/randomly). Deployed
-    BTC 15m paper-only (per project_btc15m_paper_mode_20260710.md) -- no live
-    capital at risk; kill/re-review criteria same as other 07-10 changes.
-    Old cap-based value still shadow-computed and logged (zdrift_capped_old)
-    for direct forward comparison.
     """
     try:
         needed = ["spot", "realized_vol_annual", "tau_minutes", "close_time", "resolved_yes"]
@@ -1596,22 +1571,14 @@ def compute_zdrift_empirical_15m(
                     if idx >= len(m1_idx):
                         continue
                     btc_expiry = float(live_1m.iloc[idx]["open"])
-                z_i = math.log(btc_expiry / spot_val) / sigma_tau
-                # defensive sanity guard: a genuine 15m BTC move never
-                # produces |z|>20 at realistic vol; anything past that is a
-                # data glitch (e.g. a corrupted live_1m lookup), not signal.
-                if abs(z_i) > 20:
-                    continue
-                actual_z_list.append(z_i)
+                actual_z_list.append(math.log(btc_expiry / spot_val) / sigma_tau)
             except Exception:
                 continue
         if len(actual_z_list) < w_short:
             return None
         z_short = sum(actual_z_list[-w_short:]) / w_short
         z_long  = sum(actual_z_list[-w_long:]) / len(actual_z_list[-w_long:])
-        raw = alpha * z_short + (1 - alpha) * z_long
-        raw_safe = max(-safety_bound, min(safety_bound, raw))
-        return float(raw_safe * scale)
+        return float(max(-cap, min(cap, alpha * z_short + (1 - alpha) * z_long)))
     except Exception:
         return None
 
@@ -1894,48 +1861,31 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     sig["markov_sol_4h"]     = _markov_sol_4h    or ""
     sig["markov_sol_1h"]     = _markov_sol_1h    or ""
 
-    # p_up_v2 -- SHADOW ONLY as of 2026-07-10 (see project_btc15m_paper_mode_
-    # 20260710.md). z_drift is computed UNCONDITIONALLY below and is what
-    # actually drives BTC 15m decisions (paper-only); p_up_v2 no longer gates
-    # or replaces it. [BUG FOUND + FIXED 2026-07-10, same session as the
-    # scale-instead-of-cap change: this block used to compute z_drift only
-    # `else` p_up_v2 resolved (a leftover from the pre-shadow design). Once
-    # the fetch_p_up_v2 parse bug was fixed earlier today, p_up_v2 started
-    # resolving on ~every cycle, which silently skipped z_drift entirely and
-    # routed live decisions onto compute_p_model_15m's LGBM path instead --
-    # undetected for several hours (~07:50-17:00 UTC), including the earlier
-    # "8 wins overnight" streak and the worked probability-model example
-    # given to the user, which was NOT actually priced by z_drift as
-    # described. Decoupled here so both are always computed independently.]
+    # p_up_v2 drift model for BTC (k_yes=1.40, k_no=1.56, τ-scaled)
+    # Replaces empirical z_drift. Falls back to z_drift when unavailable.
     _p_up_v2_btc: Optional[float] = None
     _zdrift_15m:  Optional[float] = None
-    _zdrift_15m_capped_old: Optional[float] = None  # shadow: what the OLD hard-cap(0.5) would give
     if asset == "BTC":
         _p_up_v2_btc = fetch_p_up_v2("BTC")
         if _p_up_v2_btc is not None:
-            print(f"  [p_up_v2_btc] {_p_up_v2_btc:.3f}  (shadow only)")
-        _csv_15m = _csv_path(asset)
-        if _csv_15m.exists():
-            try:
-                _df_all  = pd.read_csv(_csv_15m, low_memory=False)
-                _df_res  = _df_all[_df_all["resolved_yes"].notna() &
-                                   (_df_all["resolved_yes"].astype(str) != "")]
-                _zdrift_15m = compute_zdrift_empirical_15m(_df_res, live_1m)
-                # shadow: same raw computation, OLD hard-cap-only behavior
-                # (safety_bound=0.5, scale=1.0 reproduces max(-0.5,min(0.5,raw)))
-                _zdrift_15m_capped_old = compute_zdrift_empirical_15m(
-                    _df_res, live_1m, safety_bound=0.5, scale=1.0)
-                _n_res = len(_df_res)
-                if _zdrift_15m is not None:
-                    print(f"  [zdrift_15m] z_drift={_zdrift_15m:+.4f}  "
-                          f"(old-cap shadow={_zdrift_15m_capped_old:+.4f})  ({_n_res} resolved)")
-                else:
-                    print(f"  [zdrift_15m] insufficient data ({_n_res} resolved, need 10)")
-            except Exception as _ze:
-                print(f"  [zdrift_15m] error: {_ze}")
+            print(f"  [p_up_v2_btc] {_p_up_v2_btc:.3f}  (K={K_PUP_V2_YES}, coherent p_no=1-p_yes)")
+        else:
+            # Fallback to empirical z_drift when p_up_v2 unavailable
+            _csv_15m = _csv_path(asset)
+            if _csv_15m.exists():
+                try:
+                    _df_all  = pd.read_csv(_csv_15m, low_memory=False)
+                    _df_res  = _df_all[_df_all["resolved_yes"].notna() &
+                                       (_df_all["resolved_yes"].astype(str) != "")]
+                    _zdrift_15m = compute_zdrift_empirical_15m(_df_res, live_1m)
+                    _n_res = len(_df_res)
+                    if _zdrift_15m is not None:
+                        print(f"  [zdrift_15m] fallback z_drift={_zdrift_15m:+.4f}  ({_n_res} resolved)")
+                    else:
+                        print(f"  [zdrift_15m] fallback insufficient data ({_n_res} resolved, need 10)")
+                except Exception as _ze:
+                    print(f"  [zdrift_15m] fallback error: {_ze}")
     sig["p_up_v2_btc"] = _p_up_v2_btc if _p_up_v2_btc is not None else ""
-    sig["zdrift_15m"] = _zdrift_15m if _zdrift_15m is not None else ""
-    sig["zdrift_15m_capped_old"] = _zdrift_15m_capped_old if _zdrift_15m_capped_old is not None else ""
 
     # p_up_v3 (honest rebuild, 2026-07-04) — SHADOW ONLY: fetched from the
     # hourly CSV like p_up_v2 (2h staleness rule), logged to p_up_v3/v3_agree
@@ -3095,10 +3045,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         print(f"\n  Contract: {ticker}")
         print(f"    floor_strike={floor_s:.4f}  offset={offset_pct:+.3f}%  "
               f"tau={tau_min:.1f}min  p_market={p_market:.3f}")
-        if asset == "BTC" and _zdrift_15m is not None:
-            _branch_str = f"  p_yes(zdrift)={p_model_yes:.3f}  p_no(1-zdrift)={p_model_no:.3f}"
-        elif asset == "BTC":
-            _branch_str = f"  p_yes(lgbm,zdrift n/a)={p_model_yes:.3f}  p_no(lgbm)={p_model_no:.3f}"
+        if asset == "BTC" and _p_up_v2_btc is not None:
+            _branch_str = f"  p_yes(pup_v2)={p_model_yes:.3f}  p_no(pup_v2)={p_model_no:.3f}"
+        elif asset == "BTC" and _zdrift_15m is not None:
+            _branch_str = f"  p_yes(zdrift)={p_model_yes:.3f}  p_no(lgbm)={p_model_no:.3f}"
         else:
             _branch_str = f"  p_model={p_model:.3f}"
         print(f"   {_branch_str}  edge_yes={edge_yes:+.3f}  edge_no={edge_no:+.3f}"
@@ -3425,8 +3375,6 @@ def _build_row(
         "markov_sol_4h":        sig.get("markov_sol_4h",     ""),
         "markov_sol_1h":        sig.get("markov_sol_1h",     ""),
         "p_up_v2_btc":          _f(sig.get("p_up_v2_btc")),
-        "zdrift_15m":           _f(sig.get("zdrift_15m")),
-        "zdrift_15m_capped_old": _f(sig.get("zdrift_15m_capped_old")),
         "z_drift_6h":           _f(sig.get("z_drift_6h")),
         "p_gbdt":               _f(sig.get("p_gbdt")),
         # Shadow stochastic signals (log-only)

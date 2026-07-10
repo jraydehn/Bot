@@ -1,0 +1,26 @@
+  [hmm] Loaded hmm_btc_multitf.pkl  (8 states, 22 features)
+  [vol_hmm] Loaded hmm_vol_regime_btc_15m.pkl  (3 states)
+  [vwap_hmm_btc] Loaded hmm_vwap_mtf_btc_15m.pkl  (8 states, 5 features)
+  [vwap_hmm_sol] Loaded hmm_vwap_mtf_sol_15m.pkl  (8 states, 5 features)
+real taken YES trades with z_drift_raw available: 317
+
+  cap still_qual  filtered  kept_WR    kept_$  filtered_WR filtered_$_forfeited  net_$_delta
+ 0.50        317         0    74.8%    535.60         nan%                 0.00        -0.00
+ 0.35        292        25    74.3%    601.41        80.0%               -65.81       +65.81
+ 0.25        230        87    72.2%    463.45        81.6%                72.15       -72.15
+ 0.20        192       125    70.8%    394.45        80.8%               141.15      -141.15
+ 0.15        127       190    70.9%    569.85        77.4%               -34.25       +34.25
+ 0.10         58       259    70.7%    293.16        75.7%               242.44      -242.44
+
+=== filtered-trade detail + significance, cap=0.35 and cap=0.25 ===
+
+  cap=0.35: 25 trades filtered out
+    their would_pnl sum: -65.81  (removing them changes the book by +65.81)
+    episode-clustered P(their pnl was net positive, i.e. filtering HURTS)=0.3343
+    weekly breakdown of filtered trades' pnl: {Period('2026-05-25/2026-05-31', 'W-SUN'): -23.0, Period('2026-06-08/2026-06-14', 'W-SUN'): 26.0, Period('2026-06-15/2026-06-21', 'W-SUN'): 4.0, Period('2026-06-22/2026-06-28', 'W-SUN'): 31.0, Period('2026-06-29/2026-07-05', 'W-SUN'): 49.0, Period('2026-07-06/2026-07-12', 'W-SUN'): -153.0}
+
+  cap=0.25: 87 trades filtered out
+    their would_pnl sum: +72.15  (removing them changes the book by -72.15)
+    episode-clustered P(their pnl was net positive, i.e. filtering HURTS)=0.6077
+    weekly breakdown of filtered trades' pnl: {Period('2026-05-25/2026-05-31', 'W-SUN'): -23.0, Period('2026-06-08/2026-06-14', 'W-SUN'): 83.0, Period('2026-06-15/2026-06-21', 'W-SUN'): 15.0, Period('2026-06-22/2026-06-28', 'W-SUN'): -31.0, Period('2026-06-29/2026-07-05', 'W-SUN'): 164.0, Period('2026-07-06/2026-07-12', 'W-SUN'): -135.0}
+DONE_S34

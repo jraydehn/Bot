@@ -1,0 +1,22 @@
+  [hmm] Loaded hmm_btc_multitf.pkl  (8 states, 22 features)
+  [vol_hmm] Loaded hmm_vol_regime_btc_15m.pkl  (3 states)
+  [vwap_hmm_btc] Loaded hmm_vwap_mtf_btc_15m.pkl  (8 states, 5 features)
+  [vwap_hmm_sol] Loaded hmm_vwap_mtf_sol_15m.pkl  (8 states, 5 features)
+clean candidate rows (all weeks): 3182  2026-05-21 21:42:31+00:00 -> 2026-07-10 07:24:51+00:00
+rows per week: {'2026-05-18/2026-05-24': 667, '2026-05-25/2026-05-31': 640, '2026-06-01/2026-06-07': 224, '2026-06-29/2026-07-05': 839, '2026-07-06/2026-07-12': 812}
+with pup15m_sc joined: 3182
+
+total simulated trades: 557
+overall: WR=0.318  BE=0.304  edge=+0.0140
+
+=== per-week breakdown (the whole point: does the EARLY, non-overlapping era agree?) ===
+  2026-05-18/2026-05-24: n=126  side={'no': 87, 'yes': 39}  WR=0.270  BE=0.327  edge=-0.0573
+  2026-05-25/2026-05-31: n=104  side={'no': 80, 'yes': 24}  WR=0.365  BE=0.309  edge=+0.0569
+  2026-06-01/2026-06-07: n= 21  side={'no': 13, 'yes': 8}  WR=0.286  BE=0.261  edge=+0.0248
+  2026-06-29/2026-07-05: n=154  side={'no': 114, 'yes': 40}  WR=0.266  BE=0.264  edge=+0.0019
+  2026-07-06/2026-07-12: n=152  side={'no': 106, 'yes': 46}  WR=0.382  BE=0.327  edge=+0.0545
+
+=== era comparison ===
+  07-01+ (s23 window): n=306  WR=0.324 BE=0.295 edge=+0.0280  $1-proxy total=+8.58  P(<=0)=0.1090
+  pre-07-01 (held-out): n=251  WR=0.311 BE=0.314 edge=-0.0031  $1-proxy total=-0.79  P(<=0)=0.5740
+DONE_S24

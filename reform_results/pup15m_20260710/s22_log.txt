@@ -1,0 +1,56 @@
+  [hmm] Loaded hmm_btc_multitf.pkl  (8 states, 22 features)
+  [vol_hmm] Loaded hmm_vol_regime_btc_15m.pkl  (3 states)
+  [vwap_hmm_btc] Loaded hmm_vwap_mtf_btc_15m.pkl  (8 states, 5 features)
+  [vwap_hmm_sol] Loaded hmm_vwap_mtf_sol_15m.pkl  (8 states, 5 features)
+imported live constants: K_YES=0.5  K_NO=0.3
+candidate rows: 1873  tickers: 810
+candidate rows with valid (fresh, <=2h) p_up_v2: 1495
+
+raw edge distribution (all candidates, both sides' best):
+mean    0.0305
+min    -0.0021
+25%     0.0098
+50%     0.0215
+75%     0.0369
+max     0.3548
+p_model_yes describe: {'mean': 0.493, 'min': 0.03, 'max': 0.97}
+p_model_no describe: {'mean': 0.508, 'min': 0.03, 'max': 0.97}
+
+qualifying (edge>=0.04): 338 of 1495
+side mix: {'no': 228, 'yes': 110}
+
+simulated trades (one per ticker, best edge): 276
+             n     wr     be
+best_side                   
+no         184  0.277  0.295
+yes         92  0.359  0.327
+overall edge = WR - BE: yes=+0.032  no=-0.017
+
+by day:
+             n  n_yes  n_no     wr  avg_cost
+day                                         
+2026-07-01   4      2     2  0.000     0.300
+2026-07-02  30     16    14  0.200     0.297
+2026-07-03  41     14    27  0.341     0.298
+2026-07-04  40     16    24  0.250     0.272
+2026-07-05  37      8    29  0.243     0.273
+2026-07-06  30     10    20  0.367     0.324
+2026-07-07  21      6    15  0.381     0.340
+2026-07-08  32      9    23  0.469     0.334
+2026-07-09  32      9    23  0.312     0.334
+2026-07-10   9      2     7  0.111     0.307
+
+July: simulated (fixed) vs actual (broken-fallback) book:
+             n  n_yes  n_no     wr  avg_cost  real_n  real_pnl
+day                                                           
+2026-07-01   4      2     2  0.000     0.300    22.0    107.16
+2026-07-02  30     16    14  0.200     0.297    25.0    193.83
+2026-07-03  41     14    27  0.341     0.298    21.0    376.45
+2026-07-04  40     16    24  0.250     0.272    25.0    243.70
+2026-07-05  37      8    29  0.243     0.273    11.0    136.45
+2026-07-06  30     10    20  0.367     0.324    22.0    137.19
+2026-07-07  21      6    15  0.381     0.340    14.0   -234.50
+2026-07-08  32      9    23  0.469     0.334     NaN       NaN
+2026-07-09  32      9    23  0.312     0.334    13.0    -90.98
+2026-07-10   9      2     7  0.111     0.307    12.0   -351.95
+DONE_S22

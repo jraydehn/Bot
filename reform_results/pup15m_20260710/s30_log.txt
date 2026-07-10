@@ -1,0 +1,21 @@
+=== ER alone: trade-level correlation with touch/MAE/win, each window ===
+  ER(60min): r2(win)=0.0000(P=0.988)  r2(mae)=0.0004(P=0.788)  r2(touch)=0.0029(P=0.489)
+  ER(120min): r2(win)=0.0127(P=0.148)  r2(mae)=0.0193(P=0.073)  r2(touch)=0.0178(P=0.085)
+  ER(240min): r2(win)=0.0042(P=0.406)  r2(mae)=0.0386(P=0.011)  r2(touch)=0.0192(P=0.074)
+  ER(360min): r2(win)=0.0214(P=0.060)  r2(mae)=0.0251(P=0.041)  r2(touch)=0.0250(P=0.041)
+
+=== rv_ratio(2h/120h) x ER(120min) 2x2 interaction, trade-level (n=167) ===
+  rv_lo(cool)  x er_lo(choppy)   : n= 45  WR=80.0%  touched%=11.1%  mae_mean=+0.0331
+  rv_lo(cool)  x er_hi(trending) : n= 39  WR=76.9%  touched%=12.8%  mae_mean=+0.0421
+  rv_hi(hot)   x er_lo(choppy)   : n= 39  WR=79.5%  touched%=25.6%  mae_mean=-0.0122
+  rv_hi(hot)   x er_hi(trending) : n= 44  WR=70.5%  touched%=31.8%  mae_mean=-0.0235
+
+  touched_strike: R2(rv_ratio alone)=0.0761   R2(rv_ratio + ER + interaction)=0.0782   gain=+0.0021
+
+  mae_pct: R2(rv_ratio alone)=0.0589   R2(rv_ratio + ER + interaction)=0.0678   gain=+0.0089
+
+=== 2.5yr synthetic: ER alone, day-clustered, 2026 holdout ===
+  2024: ER low(choppy) WR=0.6949  ER high(trending) WR=0.6448  spread=-0.0501
+  2025: ER low(choppy) WR=0.7078  ER high(trending) WR=0.6758  spread=-0.0319
+  2026: ER low(choppy) WR=0.7006  ER high(trending) WR=0.6760  spread=-0.0246
+DONE_S30

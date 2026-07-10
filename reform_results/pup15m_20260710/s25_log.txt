@@ -1,0 +1,20 @@
+reconstructed paths: 167 of 167 trades
+
+group                            n     WR  mae_pct  path_rv%  revers  monofrac  touched%
+07-01->07-05 (good)            102  81.4%   0.0314    0.0456    6.57     0.323     12.7%
+07-06->07-07 (crash)            32  65.6%  -0.0338    0.0483    7.03     0.379     37.5%
+07-08->07-10 07:50 (bad)        25  64.0%  -0.0426    0.0455    6.44     0.379     36.0%
+07-10 07:50-> (win)              8 100.0%   0.0702    0.0399    6.38     0.361      0.0%
+
+=== correlation of path features with win/loss (whole sample) ===
+  mae_pct         : winners mean=+0.0550  losers mean=-0.1390  diff=+0.1941
+  path_rv         : winners mean=+0.0005  losers mean=+0.0005  diff=-0.0000
+  reversals       : winners mean=+6.5234  losers mean=+6.9744  diff=-0.4509
+  monotonic_frac  : winners mean=+0.3322  losers mean=+0.3828  diff=-0.0506
+
+=== touched_strike vs outcome (the direct mechanism check) ===
+                size      mean
+touched_strike                
+False            133  0.924812
+True              34  0.147059
+DONE_S25

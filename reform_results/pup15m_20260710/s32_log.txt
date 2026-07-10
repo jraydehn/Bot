@@ -1,0 +1,31 @@
+combined YES trades: 699  2026-05-11 15:02:51.242091+00:00 -> 2026-07-10 13:35:57.466429+00:00
+{'pre-branched-drift': 382, 'current': 317}
+
+reconstructed paths: 699
+
+=== touch mechanism, era-split (does it replicate in the structurally different era?) ===
+  current (n=317):
+                size     mean
+    touched_strike               
+    False            257  0.88716
+    True              60  0.15000
+  pre-branched-drift (n=382):
+                size      mean
+    touched_strike                
+    False            246  0.760163
+    True             136  0.183824
+
+=== does rv_ratio predict touch/MAE in the pre-branched-drift era too? ===
+  current (n=317): r2(touch)=0.0506(P=0.000)  r2(mae)=0.0444(P=0.000)  r2(win)=0.0043(P=0.243)
+    cool: n=105  WR=79.0%  touched%=11.4%
+    hot: n=105  WR=72.4%  touched%=27.6%
+  pre-branched-drift (n=382): r2(touch)=0.0259(P=0.002)  r2(mae)=0.0577(P=0.000)  r2(win)=0.0004(P=0.703)
+    cool: n=126  WR=54.0%  touched%=31.0%
+    hot: n=126  WR=57.1%  touched%=46.0%
+
+=== full combined population (n=699), rv_ratio tercile ===
+  cool: n=231  WR=68.0%  touched%=20.8%
+  mid: n=237  WR=62.0%  touched%=24.9%
+  hot: n=231  WR=62.8%  touched%=38.5%
+  full-pop r2(touch)=0.0431 P=0.0000  (n=699)
+DONE_S32

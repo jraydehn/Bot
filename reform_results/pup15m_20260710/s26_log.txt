@@ -1,0 +1,22 @@
+trades with valid pre-entry features: 167
+
+=== does PRE-entry path behavior predict POST-entry MAE? (correlation) ===
+  corr(pre_rv5, mae_pct) = -0.0909   corr(pre_rv5, win) = -0.0094
+  corr(pre_rv15, mae_pct) = -0.1414   corr(pre_rv15, win) = +0.0242
+  corr(pre_rev5, mae_pct) = -0.1828   corr(pre_rev5, win) = -0.1624
+  corr(pre_rev15, mae_pct) = -0.1192   corr(pre_rev15, win) = -0.0187
+  corr(pre_maxdd5, mae_pct) = -0.1746   corr(pre_maxdd5, win) = -0.0729
+
+=== quintile check: pre_rv15 (pre-entry 15min realized vol) vs outcome ===
+  low (calm before entry)     : n= 55  WR=74.5%  mae_mean=+0.0333  touched%=16.4%
+  mid                         : n= 57  WR=84.2%  mae_mean=+0.0192  touched%=15.8%
+  high (choppy before entry)  : n= 55  WR=70.9%  mae_mean=-0.0238  touched%=29.1%
+
+=== group means of pre-entry features (does overnight-win differ from bad stretch BEFORE entry?) ===
+  07-01->07-05 (good)         : n=102  pre_rv15=0.0502%  pre_rev15=9.45  pre_maxdd5=-0.0227%
+  07-06->07-07 (crash)        : n= 32  pre_rv15=0.0572%  pre_rev15=9.88  pre_maxdd5=-0.0132%
+  07-08->07-10 07:50 (bad)    : n= 25  pre_rv15=0.0462%  pre_rev15=8.92  pre_maxdd5=-0.0126%
+  07-10 07:50-> (win)         : n=  8  pre_rv15=0.0422%  pre_rev15=7.62  pre_maxdd5=-0.0154%
+
+episode-clustered WR(low pre_rv15) - WR(high pre_rv15): +0.0364  P(<=0)=0.1203  (low n=55/36eps, high n=55/35eps)
+DONE_S26

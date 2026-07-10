@@ -1,0 +1,24 @@
+  [hmm] Loaded hmm_btc_multitf.pkl  (8 states, 22 features)
+  [vol_hmm] Loaded hmm_vol_regime_btc_15m.pkl  (3 states)
+  [vwap_hmm_btc] Loaded hmm_vwap_mtf_btc_15m.pkl  (8 states, 5 features)
+  [vwap_hmm_sol] Loaded hmm_vwap_mtf_sol_15m.pkl  (8 states, 5 features)
+common candidate population (both signals fresh): 1495 rows, 641 tickers
+window: 2026-07-01 19:17:04+00:00 -> 2026-07-10 07:09:38+00:00
+
+=== A) p_up_v2 (corrected fetch) ===
+  qualifying candidates: 338 of 1495  |  trades (1/ticker): 276
+  side mix: {'no': 184, 'yes': 92}
+  overall: WR=0.304  BE=0.305  edge=-0.0011
+    no: n=184  WR=0.277  BE=0.295  edge=-0.0175
+    yes: n= 92  WR=0.359  BE=0.327  edge=+0.0316
+  episode-clustered ($1-stake proxy) total=-0.31  P(<=0)=0.5400
+
+=== B) pup15m_sc (regime-conditioned) ===
+  qualifying candidates: 338 of 1495  |  trades (1/ticker): 271
+  side mix: {'no': 198, 'yes': 73}
+  overall: WR=0.339  BE=0.300  edge=+0.0390
+    no: n=198  WR=0.318  BE=0.300  edge=+0.0183
+    yes: n= 73  WR=0.397  BE=0.302  edge=+0.0953
+  episode-clustered ($1-stake proxy) total=+10.58  P(<=0)=0.0790
+
+DONE_S23

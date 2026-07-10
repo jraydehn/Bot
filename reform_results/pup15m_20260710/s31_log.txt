@@ -1,0 +1,43 @@
+feature bars (15m cadence): 87248  2024-01-11 00:45:00+00:00 -> 2026-07-10 16:30:00+00:00
+
+BIC selection (train: 2024-2025 only):
+  n=3: BIC=630079.9
+  n=4: BIC=597176.1
+  n=5: BIC=569877.8
+  n=6: BIC=551285.5
+  n=7: BIC=536819.7
+selected 7 states
+
+state centroids (unscaled):
+   log_rv_ratio   er2h   er6h  log_atr_ratio  occ%
+0         0.430  0.152  0.101          0.698  12.5
+1         0.020  0.073  0.041         -0.064  15.9
+2        -0.820  0.109  0.047         -0.884  10.8
+3        -0.478  0.070  0.031         -0.636  15.7
+4        -0.217  0.066  0.032         -0.358  16.5
+5        -0.264  0.152  0.101         -0.149  16.0
+6         0.298  0.063  0.041          0.224  12.5
+
+=== real trades (n=167) by HMM state ===
+  state 0: n= 26  WR=61.5%  touched%=38.5%  mae_mean=-0.0405
+  state 1: n=  9  WR=66.7%  touched%=33.3%  mae_mean=-0.0347
+  state 2: n= 23  WR=91.3%  touched%=0.0%  mae_mean=+0.0562
+  state 3: n= 15  WR=86.7%  touched%=6.7%  mae_mean=+0.0615
+  state 4: n= 23  WR=60.9%  touched%=26.1%  mae_mean=-0.0040
+  state 5: n= 58  WR=81.0%  touched%=15.5%  mae_mean=+0.0224
+  state 6: n= 13  WR=84.6%  touched%=38.5%  mae_mean=-0.0340
+
+=== 2026 holdout synthetic bet (n=18269) by state ===
+  state 0: n=  2778  WR=0.6051  days=153
+  state 1: n=  1882  WR=0.6567  days=166
+  state 2: n=  3114  WR=0.7970  days=136
+  state 3: n=  2437  WR=0.7214  days=176
+  state 4: n=  2088  WR=0.6983  days=167
+  state 5: n=  4183  WR=0.6801  days=181
+  state 6: n=  1787  WR=0.6150  days=147
+
+  touched_strike: R2(rv_ratio alone)=0.0761   R2(HMM state, 7 dummies)=0.1062
+
+  mae_pct: R2(rv_ratio alone)=0.0589   R2(HMM state, 7 dummies)=0.0751
+
+DONE_S31

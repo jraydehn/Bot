@@ -1,0 +1,19 @@
+=== correlation between 2h/120h and 6h/72h (same info or new?) ===
+  corr = 0.7641
+
+=== day-clustered significance, 2026 holdout only (most relevant to recent behavior) ===
+  rv_new: spread=-0.1057  P(two-sided)=0.0000
+  rv_old: spread=-0.0930  P(two-sided)=0.0000
+
+=== does rv_new explain MORE trade-level touch/MAE variance than rv_old? ===
+  rv_new: r^2(win)=0.0059 (P=0.324)  r^2(mae)=0.0589 (P=0.002)  r^2(touched)=0.0761 (P=0.000)
+  rv_old: r^2(win)=0.0156 (P=0.108)  r^2(mae)=0.0409 (P=0.009)  r^2(touched)=0.0616 (P=0.001)
+  rv_new cool : n= 55 WR=81.8% touched%=9.1%
+  rv_new mid  : n= 57 WR=75.4% touched%=19.3%
+  rv_new hot  : n= 55 WR=72.7% touched%=32.7%
+
+=== real 309-trade YES book: rv_new with PRE-REGISTERED 2024-25 top-quintile threshold ===
+  threshold: rv_new > 1.205
+  hot=False: n=274  WR=76.3%  BE=73.3%  edge=+0.030  $  +748.54
+  hot=True : n= 43  WR=65.1%  BE=70.2%  edge=-0.050  $  -212.94
+DONE_S28

@@ -614,7 +614,7 @@ CSV_COLUMNS = [
     "p_up_v2_btc",
     # Rolling 6h empirical z_drift (for LGBM feature logging)
     "z_drift_6h",
-    # [2026-07-10] the actual live decision drift (scale=0.28, safety_bound=5.0)
+    # [2026-07-10] the actual live decision drift (scale=0.25, safety_bound=5.0)
     # and the OLD hard-cap(0.5) shadow, for forward before/after comparison.
     "zdrift_15m", "zdrift_15m_capped_old",
     # Shadow LGBM output — lgbm_15m_{asset}.pkl runs alongside primary on every scan
@@ -1541,7 +1541,7 @@ def compute_zdrift_empirical_15m(
     w_long: int = 30,
     alpha: float = 0.6,
     safety_bound: float = 5.0,
-    scale: float = 0.28,
+    scale: float = 0.25,
 ) -> Optional[float]:
     """
     Empirical z_drift from resolved 15m BTC trade history.
@@ -1556,24 +1556,18 @@ def compute_zdrift_empirical_15m(
     actually was. Replaced with: clip to a generous SAFETY bound (5.0, guards
     only against data corruption -- e.g. the 06-27 spot_at_expiry=2000.0 CSV
     glitch that produced z~-4800; real raw readings' 99th pctile is ~3.3) then
-    SCALE by a fixed fraction. This preserves the signal's relative ordering
-    (a stronger raw trend still produces a stronger, more confident drift)
-    instead of flattening every strong reading to one identical ceiling.
-    Ground-truth-anchored test on the real 317-trade YES book (s35,
-    ticker/episode-clustered): scale=0.25 gave net delta +$457 vs the old
-    cap, P(hurts)=0.14, benefit concentrated almost entirely in the
-    07-06->07-12 degradation week. [2026-07-10, later same day] scale
-    RAISED 0.25->0.28 after a finer sweep (s36, 0.25-0.30 grid) and
-    independent confirmation from FIVE separate regime-conditional fraction
-    searches (rv_ratio threshold, a 4-state touch-risk HMM, markov_regime_15m,
-    the (stale) multitf HMM's isolated bad state, and a dedicated 2-state
-    touch-risk HMM) all converging on ~0.28 as the better FLAT value with no
-    genuine regime differentiation found in any of them (every "best" split
-    collapsed to the same fraction on both sides). Deployed BTC 15m
-    paper-only (per project_btc15m_paper_mode_20260710.md) -- no live
+    SCALE by a fixed fraction (0.25). This preserves the signal's relative
+    ordering (a stronger raw trend still produces a stronger, more confident
+    drift) instead of flattening every strong reading to one identical
+    ceiling. Ground-truth-anchored test on the real 317-trade YES book
+    (s35, ticker/episode-clustered): net delta +$457 vs the old cap,
+    P(the filtered-out trades were net positive, i.e. this change hurts)=0.14,
+    benefit concentrated almost entirely in the 07-06->07-12 degradation week
+    (-$410 avoided there specifically, not spread evenly/randomly). Deployed
+    BTC 15m paper-only (per project_btc15m_paper_mode_20260710.md) -- no live
     capital at risk; kill/re-review criteria same as other 07-10 changes.
-    Old cap-based value (scale=1.0, safety_bound=0.5) still shadow-computed
-    and logged (zdrift_15m_capped_old) for direct forward comparison.
+    Old cap-based value still shadow-computed and logged (zdrift_capped_old)
+    for direct forward comparison.
     """
     try:
         needed = ["spot", "realized_vol_annual", "tau_minutes", "close_time", "resolved_yes"]

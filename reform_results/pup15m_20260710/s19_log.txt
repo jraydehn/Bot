@@ -1,0 +1,44 @@
+synthetic bets: 87213  years [np.int32(2024), np.int32(2025), np.int32(2026)]  overall WR=0.6844 vs BE 0.73
+year
+2024    0.6707
+2025    0.6962
+2026    0.6874
+
+=== per-feature quintile WR spread, per year (robust = same sign all 3 years) ===
+        feat    2024    2025    2026  consistent
+    rv_ratio -0.0971 -0.0821 -0.1450        True
+   atr_ratio -0.1080 -0.0999 -0.1417        True
+ abs_ret_24h -0.0726 -0.0785 -0.1073        True
+     ret_24h  0.0103  0.0127 -0.0203       False
+late_rev_24h  0.0000  0.0000  0.0000        True
+ whipsaw_24h  0.0438  0.0413  0.0074        True
+range_pos_7d  0.0078  0.0288  0.0104        True
+ bar_flip_1h  0.0029  0.0060  0.0115        True
+      dd_24h  0.0328  0.0284  0.0468        True
+
+=== day-clustered top-vs-bottom quintile (bootstrap over days), consistent feats ===
+  whipsaw_24h    2024: spread=+0.0206  P(two-sided)=0.2440
+  whipsaw_24h    2025: spread=+0.0263  P(two-sided)=0.0920
+  whipsaw_24h    2026: spread=-0.0241  P(two-sided)=0.2320
+  late_rev_24h   2024: spread=+0.0000  P(two-sided)=2.0000
+  late_rev_24h   2025: spread=+0.0000  P(two-sided)=2.0000
+  late_rev_24h   2026: spread=+0.0000  P(two-sided)=2.0000
+  bar_flip_1h    2024: spread=-0.0064  P(two-sided)=0.3180
+  bar_flip_1h    2025: spread=-0.0052  P(two-sided)=0.4280
+  bar_flip_1h    2026: spread=+0.0031  P(two-sided)=0.6620
+  rv_ratio       2024: spread=-0.0521  P(two-sided)=0.0000
+  rv_ratio       2025: spread=-0.0476  P(two-sided)=0.0000
+  rv_ratio       2026: spread=-0.0930  P(two-sided)=0.0000
+  abs_ret_24h    2024: spread=-0.0537  P(two-sided)=0.0000
+  abs_ret_24h    2025: spread=-0.0490  P(two-sided)=0.0020
+  abs_ret_24h    2026: spread=-0.0391  P(two-sided)=0.1020
+  atr_ratio      2024: spread=-0.0739  P(two-sided)=0.0000
+  atr_ratio      2025: spread=-0.0537  P(two-sided)=0.0000
+  atr_ratio      2026: spread=-0.0790  P(two-sided)=0.0000
+  range_pos_7d   2024: spread=-0.0765  P(two-sided)=0.0000
+  range_pos_7d   2025: spread=-0.0415  P(two-sided)=0.0320
+  range_pos_7d   2026: spread=-0.1223  P(two-sided)=0.0000
+  dd_24h         2024: spread=-0.1127  P(two-sided)=0.0000
+  dd_24h         2025: spread=-0.0919  P(two-sided)=0.0000
+  dd_24h         2026: spread=-0.1074  P(two-sided)=0.0000
+DONE_S19

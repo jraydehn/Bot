@@ -1,0 +1,31 @@
+YES trades with both joins: 307
+
+=== 1. combined bucket S[1, 6, 7] & p15<0.48 (as-if pre-registered) ===
+n=51  WR=62.7%  BE=72.5%  edge=-0.097  $ -549.62
+weekly $ (block saves the negative):
+                       size     sum
+week                               
+2026-05-25/2026-05-31     1  -29.70
+2026-06-08/2026-06-14     9   -5.40
+2026-06-15/2026-06-21     2  -65.75
+2026-06-22/2026-06-28     1  -62.55
+2026-06-29/2026-07-05    23  110.64
+2026-07-06/2026-07-12    15 -496.86
+  pre: n=15  WR=46.7% BE=69.4%  $ -220.03
+  post: n=36  WR=69.4% BE=73.7%  $ -329.59
+episodes=37  episode-bootstrap P(bucket_pnl>=0) = 0.0660
+
+=== 2. candidate level (archive), same bucket ===
+tickers=244  tk_edge(YES)=-0.0001  P(edge>=0)=0.5065  wk_neg=3/5
+
+=== 3. selection-honest split-half ===
+  select H1 -> test H2: picked [(6, True), (2, False), (6, False)]
+    test: n=47  WR=83.0% BE=77.4%  $ +289.46  (block would save -289.46)
+  select H2 -> test H1: picked [(4, False), (8, False), (6, True)]
+    test: n=48  WR=68.8% BE=69.6%  $ -29.54  (block would save +29.54)
+
+=== 4. permutation (circular shift of state series), stat = sum of 3 worst YES cells ===
+observed worst-3-cells sum = $-609.84
+null (500 shifts): median $-677.09  5th pct $-922.89
+P(null <= observed) = 0.6800   <- multiplicity-adjusted significance
+DONE_S10

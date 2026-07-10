@@ -211,4 +211,10 @@ CSV_COLUMNS = [
     # 2026-07-09: SOL hourly VWAP MTF HMM state (0-7; blank for BTC/ETH).
     # Drives sol_1h_vwap_s2_no_gate (block) + sol_1h_vwap_s3_no_boost (x1.25).
     "vwap_1h_state",
+    # 2026-07-09: macro HMM regime posteriors (BTC only; the p_up calibration
+    # blend weights). Never logged anywhere before -- the scan-archive version
+    # was dead code, which forced the stale-parquet reconstruction mistake.
+    "macro_regime_bull",
+    "macro_regime_sdwy",
+    "macro_regime_bear",
 ]

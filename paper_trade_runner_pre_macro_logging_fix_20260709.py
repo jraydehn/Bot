@@ -3725,18 +3725,6 @@ def main() -> None:
                     except Exception as _puv2_log_e:
                         _p_up_v2_scanlog = None
                         print(f"  [p_up_v2_scanlog] compute failed: {type(_puv2_log_e).__name__}: {_puv2_log_e}")
-                # [2026-07-09 macro-logging fix] The macro HMM posteriors were only ever
-                # added inside the ETH/SOL elif-branch guarded by `if args.asset=="BTC"`
-                # -- dead code, unreachable for every asset. Result: macro_regime_* was
-                # 100% null across all 415k archive rows, which forced a stale-parquet
-                # reconstruction on 07-08 that produced a false "regime pinned Bull"
-                # conclusion. Fixed by adding the probs to the BTC branch that actually
-                # writes BTC rows. _compute_macro_regime_probs caches per 1h bar -- free.
-                _early_regime_probs = _compute_macro_regime_probs(df_confirm)
-                if _early_regime_probs is not None:
-                    _gbdt_feats_c["macro_regime_bull"] = round(_early_regime_probs.get("Bull", 0.0), 4)
-                    _gbdt_feats_c["macro_regime_sdwy"] = round(_early_regime_probs.get("Sideways", 0.0), 4)
-                    _gbdt_feats_c["macro_regime_bear"] = round(_early_regime_probs.get("Bear", 0.0), 4)
                 try:
                     import scan_archive as _sa
                     _sa.log_scan_row(
@@ -3821,10 +3809,14 @@ def main() -> None:
                     "max_pain_dist_pct":    round((_cg.max_pain_nearest - spot) / spot * 100, 4) if _cg is not None and not math.isnan(_cg.max_pain_nearest) and spot > 0 else float("nan"),
                     "opt_pc_ratio":         float(_cg.opt_pc_ratio)        if _cg is not None else float("nan"),
                 }
-                # [2026-07-09] Removed the dead macro-regime block that lived here: this is
-                # the ETH/SOL elif-branch, so its `if args.asset == "BTC"` guard could never
-                # be true (root cause of macro_regime_* being 100% null for 415k rows).
-                # The working version now sits in the BTC branch above.
+                # BTC: add macro regime probs for scan archive logging
+                # (compute_macro_regime_probs caches by 1h bar — no extra overhead)
+                if args.asset == "BTC":
+                    _early_regime_probs = _compute_macro_regime_probs(df_confirm)
+                    if _early_regime_probs is not None:
+                        _scan_feats_c["macro_regime_bull"]  = round(_early_regime_probs.get("Bull", 0.0), 4)
+                        _scan_feats_c["macro_regime_sdwy"]  = round(_early_regime_probs.get("Sideways", 0.0), 4)
+                        _scan_feats_c["macro_regime_bear"]  = round(_early_regime_probs.get("Bear", 0.0), 4)
                 _asset_lgbm_c = _load_asset_lgbm(args.asset)
                 if _asset_lgbm_c is not None:
                     _p_gbdt_c = _infer_asset_lgbm(_asset_lgbm_c, _scan_feats_c, args.asset)
@@ -7921,9 +7913,6 @@ def main() -> None:
         "cg_flow_state":      _cg_flow_state if _cg_flow_state is not None else "",
         "bb_width_5m":        round(_bb_width_5m, 6) if _bb_width_5m == _bb_width_5m else "",
         "vwap_1h_state":      _vwap1h_state_sol if _vwap1h_state_sol is not None else "",
-        "macro_regime_bull":  round(_macro_regime_probs.get("Bull", 0.0), 4) if _macro_regime_probs else "",
-        "macro_regime_sdwy":  round(_macro_regime_probs.get("Sideways", 0.0), 4) if _macro_regime_probs else "",
-        "macro_regime_bear":  round(_macro_regime_probs.get("Bear", 0.0), 4) if _macro_regime_probs else "",
         "chg_30m":            round(_sharp_move_pct * 100, 4),
         "chg_10m":            round(_sharp_move_pct_10m * 100, 4),
         "chg_5m":             round(_sharp_move_pct_5m * 100, 4),

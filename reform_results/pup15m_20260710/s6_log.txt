@@ -1,0 +1,57 @@
+joined taken trades: 911  staleness median=4.3min p95=10.4min
+eras: {'pre': 746, 'post': 165}  episodes: 343
+
+=== TAKEN BOOK: support buckets per side x era ===
+  YES pre-reform (n=147, $-235.19):
+    supports (>+0.02)         : n=  56  WR=76.8%  BE=71.1%  edge=+0.057  $   +153.80
+    neutral [-0.02,+0.02]     : n=  44  WR=72.7%  BE=72.9%  edge=-0.002  $   -169.02
+    opposes (-0.05,-0.02)     : n=  13  WR=76.9%  BE=71.5%  edge=+0.055  $    +12.05
+    strong opposes (<-0.05)   : n=  34  WR=64.7%  BE=71.8%  edge=-0.071  $   -232.02
+  YES post-reform (n=159, $+459.75):
+    supports (>+0.02)         : n=  47  WR=76.6%  BE=74.9%  edge=+0.017  $   +193.39
+    neutral [-0.02,+0.02]     : n=  49  WR=81.6%  BE=75.9%  edge=+0.057  $   +327.31
+    opposes (-0.05,-0.02)     : n=  18  WR=77.8%  BE=74.3%  edge=+0.035  $    +22.98
+    strong opposes (<-0.05)   : n=  45  WR=68.9%  BE=71.1%  edge=-0.022  $    -83.93
+  NO pre-reform (n=599, $+337.94):
+    supports (>+0.02)         : n= 210  WR=37.6%  BE=39.0%  edge=-0.014  $   -889.49
+    neutral [-0.02,+0.02]     : n= 117  WR=38.5%  BE=40.8%  edge=-0.024  $   -468.09
+    opposes (-0.05,-0.02)     : n=  65  WR=47.7%  BE=40.7%  edge=+0.070  $   +649.07
+    strong opposes (<-0.05)   : n= 207  WR=40.6%  BE=35.9%  edge=+0.047  $  +1046.45
+  NO post-reform (n=6, $+219.03):
+    supports (>+0.02)         : n=   1  WR=100.0%  BE=41.5%  edge=+0.585  $   +132.80
+    neutral [-0.02,+0.02]     : n=0
+    opposes (-0.05,-0.02)     : n=   2  WR=0.0%  BE=26.5%  edge=-0.265  $   -207.26
+    strong opposes (<-0.05)   : n=   3  WR=33.3%  BE=24.8%  edge=+0.085  $   +293.49
+
+=== GATE SIM: block YES when support <= -T (whole book + per era) ===
+  T=0.02: blocked n=110 (ep=68)  wins_blk= 77 loss_blk= 33  net saved=$ +280.92 (pre $+219.97 / post $ +60.95)  P(saved<=0)=0.2947  wk+=4/6
+  T=0.03: blocked n= 95 (ep=59)  wins_blk= 67 loss_blk= 28  net saved=$ +132.43 (pre $+138.27 / post $  -5.84)  P(saved<=0)=0.3870  wk+=4/6
+  T=0.04: blocked n= 95 (ep=59)  wins_blk= 67 loss_blk= 28  net saved=$ +132.43 (pre $+138.27 / post $  -5.84)  P(saved<=0)=0.3870  wk+=4/6
+  T=0.05: blocked n= 79 (ep=50)  wins_blk= 53 loss_blk= 26  net saved=$ +315.95 (pre $+232.02 / post $ +83.93)  P(saved<=0)=0.2573  wk+=4/6
+  T=0.06: blocked n= 62 (ep=42)  wins_blk= 42 loss_blk= 20  net saved=$  +62.72 (pre $+230.75 / post $-168.03)  P(saved<=0)=0.4403  wk+=5/6
+
+=== DAMPENER SIM: halve YES stake when support <= -T (delta vs existing) ===
+  T=0.02: n=110  delta=$ +140.46  P(delta<=0)=0.2947
+  T=0.04: n=95  delta=$  +66.22  P(delta<=0)=0.3870
+
+=== weekly ledger: existing vs block-YES@T=0.02 ===
+                         n  existing    gated   delta
+week                                                 
+2026-05-25/2026-05-31  206     98.33   128.03   29.70
+2026-06-01/2026-06-07  135   -249.25  -249.25    0.00
+2026-06-08/2026-06-14  174    357.75   213.09 -144.66
+2026-06-15/2026-06-21  166   1490.29  1564.27   73.98
+2026-06-22/2026-06-28   38  -1301.51 -1176.97  124.54
+2026-06-29/2026-07-05  134    778.54   524.95 -253.59
+2026-07-06/2026-07-12   58   -392.62    58.33  450.95
+
+TOTAL: existing $+781.53  gated $+1062.45  delta $+280.92
+
+=== CANDIDATE LEVEL (archive, 3157 rows, 1349 tickers) ===
+  pre  YES supports (>0.02)  : tickers= 256 tk_edge=-0.0187 P(<=0)=0.7795 wk+=1/3
+  pre  YES neutral           : tickers= 142 tk_edge=-0.0628 P(<=0)=0.9715 wk+=0/3
+  pre  YES opposes (<-0.02)  : tickers= 252 tk_edge=-0.0060 P(<=0)=0.6130 wk+=1/3
+  post YES supports (>0.02)  : tickers= 246 tk_edge=-0.0042 P(<=0)=0.5720 wk+=1/2
+  post YES neutral           : tickers= 150 tk_edge=+0.0370 P(<=0)=0.1035 wk+=2/2
+  post YES opposes (<-0.02)  : tickers= 303 tk_edge=+0.0025 P(<=0)=0.4280 wk+=1/2
+DONE_S6

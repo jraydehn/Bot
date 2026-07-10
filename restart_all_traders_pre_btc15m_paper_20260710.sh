@@ -47,19 +47,14 @@ nohup python3 run_all_assets.py \
 echo "  PID=$!"
 
 echo ""
-echo "=== Starting 15m watchdog (BTC PAPER / ETH paper / SOL live) ==="
-# BTC 15m converted to PAPER-ONLY 2026-07-10 (user decision): the YES-bias
-# investigation found the live decision path has been running on a chronically
-# bullish-saturated fallback since ~06-26 (see project_pup15m_20260710.md).
-# Live money paused pending a full model revamp; paper collection continues
-# per feedback_paper_always_on, now also shadow-logging the corrected p_up_v2
-# -> K_YES/K_NO model (p_model_yes_v2/no_v2/best_side_v2/best_edge_v2 in
-# btc_scan_archive_15m.csv) for comparison against the existing model.
+echo "=== Starting 15m watchdog (BTC live / ETH paper / SOL live) ==="
+# BTC 15m live since 2026-07-03: $2,500 bankroll, $250 per-runner stop.
 # SOL 15m live restarted 2026-07-06 (user decision): $2,500 bankroll, $150 stop
 # (was stopped 2026-07-05 for degrading performance — no signal-side changes
 # since then, see project_sol_live_stop_20260705.md).
 nohup python3 run_all_15m.py \
     --btc-bankroll 2500 \
+    --btc-live --btc-loss-limit 250 \
     --eth-bankroll 2500 \
     --sol-bankroll 2500 \
     --sol-live --sol-loss-limit 150 \

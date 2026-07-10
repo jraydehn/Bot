@@ -121,6 +121,14 @@ COLUMNS = [
     "kalman_velocity_5m", "kalman_residual_5m", "hurst_exponent_5m", "ou_theta_5m",
     "kalman_velocity_15m", "kalman_residual_15m", "hurst_exponent_15m", "ou_theta_15m",
     "arima_forecast_15m",
+    # 2026-07-10: SHADOW comparison -- corrected p_up_v2 fed through the
+    # 06-30 K_YES/K_NO non-coherent model (never actually live-exercised
+    # until the fetch_p_up_v2 parse bug was fixed this session). Does NOT
+    # drive p_model_yes/p_model_no or trade selection -- BTC 15m stays on
+    # the existing (empirical z_drift) decision path, now paper-only, so
+    # this shadow can be compared against real outcomes without risking
+    # capital. See project_pup15m_20260710.md / feedback_paper_first.
+    "p_model_yes_v2", "p_model_no_v2", "best_side_v2", "best_edge_v2",
 ]
 
 _META_COLS = {

@@ -746,21 +746,14 @@ def fetch_composite_p_up(asset: str) -> Optional[float]:
 
 
 def fetch_p_up_v2(asset: str) -> Optional[float]:
-    """Read most recent p_up_v2 from hourly paper trade CSV (same source as composite_p_up).
-    format="mixed" REQUIRED (fixed 2026-07-10): the hourly CSV carries two
-    timestamp formats since ~06-26; without it every row since then coerces
-    to NaT and this returns None forever -- the bug that silently broke this
-    fetch since 06-26 (fetch_p_up_v3 already had the fix; this one and
-    fetch_composite_p_up did not -- composite_p_up is BTC/ETH/SOL-shared and
-    is being left alone pending its own scoped review, see
-    project_pup15m_20260710.md)."""
+    """Read most recent p_up_v2 from hourly paper trade CSV (same source as composite_p_up)."""
     path = HOURLY_CSV_MAP.get(asset.upper())
     if path is None or not path.exists():
         return None
     try:
         df = pd.read_csv(path, usecols=["logged_at", "p_up_v2"], low_memory=False)
         df["p_up_v2"] = pd.to_numeric(df["p_up_v2"], errors="coerce")
-        df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce", format="mixed")
+        df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce")
         recent = df.dropna(subset=["p_up_v2", "logged_at"]).sort_values("logged_at")
         if recent.empty:
             return None
@@ -2094,39 +2087,22 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         offset_pct = (spot - floor_s) / floor_s * 100
 
         # Compute p_model before already_bet check so scan archive captures all contracts.
-        # [2026-07-10] BTC 15m converted to PAPER-ONLY (user decision, YES-bias
-        # investigation). The K_YES/K_NO non-coherent model (06-30 reform) is
-        # NO LONGER the decision path here -- it never actually ran live (the
-        # p_up_v2 fetch was broken 06-26->07-10, see project_pup15m_20260710.md),
-        # and the fallback path below (empirical z_drift) is what generated the
-        # entire real trading record, including both the profitable and losing
-        # stretches. Decisions stay on the fallback UNCONDITIONALLY so the
-        # existing/live-proven behavior continues in paper mode. The now-fixed
-        # p_up_v2 -> K_YES/K_NO model is computed and logged as a SHADOW below
-        # (p_model_yes_v2/p_model_no_v2 etc.) for direct comparison later --
-        # it does not influence best_side/best_edge/trade placement.
-        p_model_no  = compute_p_model_15m(spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
-        if asset == "BTC" and _zdrift_15m is not None:
-            p_model_yes = compute_p_yes_zdrift_15m(spot, floor_s, tau_min, sig, _zdrift_15m, p_market)
-        else:
-            p_model_yes = p_model_no   # ETH/SOL: single model, both sides same (pre-reform)
-        # BTC fallback: non-coherent convention — invert for NO edge
-        if asset == "BTC":
-            p_model_no = 1.0 - p_model_yes
-
-        # SHADOW: corrected p_up_v2 -> K_YES/K_NO non-coherent model (never
-        # live-exercised; logged only, see comment above). Fail-open to "".
-        p_model_yes_v2 = p_model_no_v2 = edge_yes_v2 = edge_no_v2 = None
-        best_side_v2 = best_edge_v2 = None
+        # BTC: non-coherent model (2026-06-30 reform). YES and NO computed independently.
+        #   p_yes = Φ(K_YES×Φ⁻¹(p_up_v2)×√(τ/60) − z_strike), K_YES=0.50
+        #   p_no  = 1 − Φ(K_NO×Φ⁻¹(p_up_v2)×√(τ/60) − z_strike), K_NO=0.30
+        #   edge_yes = p_yes − pm; edge_no = p_no − (1−pm). Independent, not sum=1.
         if asset == "BTC" and _p_up_v2_btc is not None:
-            p_model_yes_v2 = compute_p_yes_pup_v2_15m(spot, floor_s, tau_min, sig, _p_up_v2_btc, p_market)
-            p_model_no_v2  = compute_p_no_pup_v2_15m(spot, floor_s, tau_min, sig, _p_up_v2_btc, p_market)
-            edge_yes_v2 = p_model_yes_v2 - p_market
-            edge_no_v2  = p_model_no_v2 - (1.0 - p_market)
-            if edge_yes_v2 >= edge_no_v2:
-                best_side_v2, best_edge_v2 = "yes", edge_yes_v2
+            p_model_yes = compute_p_yes_pup_v2_15m(spot, floor_s, tau_min, sig, _p_up_v2_btc, p_market)
+            p_model_no  = compute_p_no_pup_v2_15m(spot, floor_s, tau_min, sig, _p_up_v2_btc, p_market)
+        else:
+            p_model_no  = compute_p_model_15m(spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
+            if asset == "BTC" and _zdrift_15m is not None:
+                p_model_yes = compute_p_yes_zdrift_15m(spot, floor_s, tau_min, sig, _zdrift_15m, p_market)
             else:
-                best_side_v2, best_edge_v2 = "no", edge_no_v2
+                p_model_yes = p_model_no   # ETH/SOL: single model, both sides same (pre-reform)
+            # BTC fallback: non-coherent convention — invert for NO edge
+            if asset == "BTC":
+                p_model_no = 1.0 - p_model_yes
 
         # Shadow LGBM: always run lgbm_15m_{asset}.pkl regardless of primary model path.
         # For BTC this is separate from p_up_v2; for ETH/SOL it equals p_model_no (same model).
@@ -2144,10 +2120,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 features={
                     **sig,
                     "offset_pct":    offset_pct,
-                    "p_model_yes_v2": p_model_yes_v2 if p_model_yes_v2 is not None else float("nan"),
-                    "p_model_no_v2":  p_model_no_v2  if p_model_no_v2  is not None else float("nan"),
-                    "best_side_v2":   best_side_v2    if best_side_v2   is not None else "",
-                    "best_edge_v2":   best_edge_v2    if best_edge_v2   is not None else float("nan"),
                     "liq_score":     _liq_signal.liq_score    if _liq_signal else float("nan"),
                     "liq_bias":      _liq_signal.liq_bias     if _liq_signal else float("nan"),
                     "oi_chg_pct":    _liq_signal.oi_chg_pct   if _liq_signal else float("nan"),

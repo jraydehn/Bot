@@ -1,0 +1,16 @@
+bars with regime: 87701  years [np.int32(2024), np.int32(2025), np.int32(2026)]
+
+=== walk-forward: pooled vs regime-conditioned ===
+  2025 p_pooled : IC=+0.1359  quintile spread=+0.1719
+  2025 p_rc     : IC=+0.1316  quintile spread=+0.1736
+      2025 p_bull bars=16876: IC pooled=+0.1515  rc=+0.1541
+      2025 p_sdwy bars= 5932: IC pooled=+0.1050  rc=+0.0855
+      2025 p_bear bars=12096: IC pooled=+0.1295  rc=+0.1186
+  2026 p_pooled : IC=+0.0986  quintile spread=+0.1270
+  2026 p_rc     : IC=+0.0940  quintile spread=+0.1371
+      2026 p_bull bars= 6817: IC pooled=+0.1092  rc=+0.1067
+      2026 p_sdwy bars= 3372: IC pooled=+0.0779  rc=+0.0692
+      2026 p_bear bars= 8076: IC pooled=+0.0982  rc=+0.0895
+
+saved pup15m_rc_tables.pkl + pup15m_rc_series_2026.csv
+DONE_S12

@@ -1,0 +1,24 @@
+total tests: 347  (expected null minimum P ~ 0.0029)
+buckets with delta<0: 105 of 347
+
+top 15 waiting-hurts candidates:
+            signal bucket   n  delta_sum  P_wait_helps
+  avg_funding_rate     Q2 149   -1050.14         0.024
+           rvol_1h     Q2 149    -884.68         0.055
+          stoch_1h     Q2 149    -745.74         0.058
+           vol_eff     Q2 149    -570.18         0.078
+         donch_15m     Q3 150    -641.37         0.085
+          kelt_15m     Q3 149    -666.41         0.096
+            adx_5m     Q3 150    -632.71         0.100
+            rsi_1h     Q4 151    -517.87         0.100
+          chg_1h_r     Q3 150    -664.75         0.105
+       pm_drift_5m     Q4  70    -523.65         0.106
+vol_implied_kalshi     Q2 144    -519.15         0.109
+            chg_1h     Q4  99    -424.02         0.114
+            chg_1h     Q2  98    -392.64         0.116
+           stoch_k     Q2 150    -464.53         0.120
+           chg_30m     Q4 150    -397.06         0.134
+
+=== split-half confirmation for anything P<=0.02 ===
+  (none reached P<=0.02)
+DONE_S18

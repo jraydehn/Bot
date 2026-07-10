@@ -1,0 +1,16 @@
+S17 -- full-window wait sim (user caught that s16 used only the current
+paper_trades.csv which was archived/reset 06-16; combined the archive chain:
+pre_branched_drift (05-18..05-25) + pre_regime_pup_20260616 (05-25..06-16)
++ current (06-17..now), deduped ticker+decision_time. Window bounded 05-18
+by scan-archive start (re-entry price path). n=1,055 trades, 8 weeks.
+
+WAIT-FOR-SC-AGREEMENT vs EXISTING (real sizes, would_pnl):
+  TOTAL: EXISTING $+1,536.91  WAIT $+2,665.17  delta $+1,128.26 (+73%)
+  weekly: +37 / +568 / -143 / +291 / -335 / +72 / +465 / +173  -> 6/8 positive
+  by hourly-model era: old +$37 | branched-drift +$704 | regime-pup +$386 (all positive)
+  episode bootstrap (180 eps): P(delta<=0)=0.146; sign test 81/147 P=0.124
+  concentration: NOT outlier-driven -- w/o top-3 |delta| episodes delta GROWS
+  to +$1,348 (2 of top 3 are negative); w/o top-5 still +$931.
+  median nonzero episode delta +$4.84 -- small steady effect, high variance;
+  needs ~2x window (or live A/B) to clear P<=0.05.
+Artifacts: wait_sim_full8wk.csv

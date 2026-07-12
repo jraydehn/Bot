@@ -2353,24 +2353,6 @@ def main() -> None:
     # 1h candles for MS/VD HMM — Binance 1m API caps at 1000 rows (~16 1h bars), far below
     # the 72-bar (MS) and 200-bar (VD) minimums. Fetch 1h directly to fix this.
     live_1h = fetch_recent_candles("1h", lookback_bars=250, asset=args.asset)
-
-    # [2026-07-11] SOL hourly HYBRID: compute the SOL 15m model's own signal
-    # dict once per cycle (reusing live_1m/live_1h already fetched above), for
-    # use when tau<=20min -- see the pricing block below (sol_15m_hybrid).
-    # Rationale: at low tau, an hourly contract's remaining-time dynamics
-    # converge toward what the 15m model was built and live-validated for.
-    # Reuses the SAME production code (compute_signals + compute_p_model_15m
-    # from paper_trade_runner_15m.py), not a re-derived approximation.
-    _sol_sig_15m = None
-    if args.asset == "SOL":
-        try:
-            import paper_trade_runner_15m as _r15
-            if "SOL" not in _r15._LGBM_MODELS:
-                _r15._LGBM_MODELS["SOL"] = _r15._load_15m_lgbm("SOL")
-            _sol_sig_15m = _r15.compute_signals(live_1m, asset="SOL", live_1h=live_1h)
-        except Exception as _sig15_e:
-            print(f"  [sol_15m_hybrid] signal compute failed: {type(_sig15_e).__name__}: {_sig15_e}")
-            _sol_sig_15m = None
     # ── p_up_v3 (honest rebuild, 2026-07-04) — SHADOW ONLY ──────────────────
     # Market-level, once per cycle (module caches per completed 1h bar).
     # Logged to the p_up_v3 CSV column; NO decision path reads this value.
@@ -4052,12 +4034,6 @@ def main() -> None:
             # read it unconditionally — crashed the live BTC dual runner 07-07 with
             # UnboundLocalError (watchdog auto-recovered). Consumers all null-check.
             _p_up_v2 = None
-            # [unbound_fix 2026-07-11] Same class, same fix again: sigma_tau_c was only
-            # assigned inside `if _composite_computed:`, but the sol_15m_hybrid path
-            # (tau<=20min) can now reach dec_c.decision=="trade" independently of the
-            # composite block succeeding, exposing this on the SOL runner the same way
-            # the 06-20 and 07-08 instances did. Consumers all null-check / compare >0.
-            sigma_tau_c = 0.0
             if _composite_computed:
                 # April-15 model: vol_factor scales sigma for both YES and NO.
                 sigma_tau_c   = vol_adj_c * math.sqrt(tau_c)
@@ -4132,33 +4108,6 @@ def main() -> None:
                         _active_trend, _active_rev, spot, s_k, sigma_tau_c,
                         asset="ETH", p_up_override=_comp_p_up_c,
                     )
-                elif args.asset == "SOL" and tau_c <= 20 and _sol_sig_15m:
-                    # [sol_15m_hybrid 2026-07-11] For tau<=20min, price this SOL
-                    # hourly contract with the SOL 15m model's full live pipeline
-                    # (compute_signals + compute_p_model_15m from
-                    # paper_trade_runner_15m.py) instead of the hourly composite/
-                    # z_drift path. Rationale: multiple independent tests this
-                    # session (composite score, gated/flat DRIFT_MULTIPLIER sweeps,
-                    # a from-scratch multi-timeframe LGBM) found ~0 incremental
-                    # edge over market pricing for the hourly composite path in
-                    # the genuinely uncertain zone -- while the 15m model has a
-                    # real, ongoing live/paper track record (NO-side dominant,
-                    # +$2,143 over 2 months). At low tau, an hourly contract's
-                    # remaining-time dynamics converge toward what that model was
-                    # built and validated for, so reuse it directly rather than
-                    # re-deriving an unproven low-tau hourly-specific formula.
-                    # Coherent: SOL's compute_p_model_15m returns one probability
-                    # used for both YES and NO (same convention as the composite
-                    # path below). Paper-only (SOL hourly has no live path).
-                    # Backup: paper_trade_runner_pre_sol15m_hybrid_20260711.py
-                    try:
-                        p_model_comp = _r15.compute_p_model_15m(
-                            spot, s_k, tau_c, _sol_sig_15m, asset="SOL", p_market=pm)
-                        print(f"  [sol_15m_hybrid] tau={tau_c:.1f}<=20 -> 15m model, "
-                              f"p_model={p_model_comp:.3f} (pm={pm:.3f})")
-                    except Exception as _hy_e:
-                        print(f"  [sol_15m_hybrid] inference error: {_hy_e} — falling back to composite path")
-                        p_model_comp = None
                 elif direct_p_model.asset_supported(args.asset):
                     try:
                         p_model_comp = direct_p_model.compute_p_model_direct(
@@ -5961,25 +5910,6 @@ def main() -> None:
                         _log_block("btc_garch_highvol_yes_gate")
                         continue
 
-            # [btc_yes_agree_breaker] Block BTC YES when it AGREES with the market's own
-            # lean (pm>=0.5) -- persistently negative every week it's had volume.
-            # Backtested 2026-07-10/11 on actual taken trades (paper_trades.csv, 06-17->now):
-            #   n=40, WR=62.5% BE=67.0% edge=-4.5pp, PnL=-$183.36
-            #   Weekly: 06-22/28 -$90.03, 06-29/07-05 -$60.27, 07-06/07-12 -$41.84 (3/3
-            #   weeks negative, though thin n/week ~7-17).
-            # By contrast YES+CONTRARIAN (pm<0.5, model disagrees with market) is BTC
-            # hourly's best-performing bucket this window: n=25, WR=56.0% BE=37.4%,
-            # +$459.51 -- the market's own price is a useful discriminator here; riding
-            # along with it (AGREE) is where the model adds no independent edge.
-            # n is modest (40 trades / 4wks) -- kill review in 2-3 weeks once more data
-            # accumulates. Paper-only book (BTC hourly moved to paper 2026-07-10).
-            # Backup: paper_trade_runner_pre_btc_agree_gates_20260711.py
-            if args.asset == "BTC" and dec_c.side == "yes" and pm >= 0.5:
-                print(f"  [btc_yes_agree_breaker] BLOCK YES {c['ticker']} — "
-                      f"AGREE bucket (pm={pm:.3f}) — persistent weekly loser, WR=62.5% vs BE=67.0%")
-                _log_block("btc_yes_agree_breaker")
-                continue
-
             # [btc_adx_gate] Block BTC YES when ADX_1h is in moderate trending range [20,40).
             # mispricing_analysis [21a] 2026-05-17: adx_mod(20-40) YES: n=153, WR=36.6%,
             # BE=46.4%, Edge=-9.8%, PnL=-$150, p=0.013.
@@ -6072,25 +6002,6 @@ def main() -> None:
                     (_active_trend <= -3 and confirm.funding_bias == -1)
                     or getattr(confirm, "stretch_score", None) == 1
                 )
-                # [2026-07-11] Rescue override: block anyway (don't rescue) if
-                # chg_1h < -0.15% -- the drop has already been sharp/fast, not just
-                # "confirmed bearish," and the original bounce-risk mechanism this
-                # gate exists for reasserts itself right through the rescue.
-                # Backtested on actual taken trades that passed via rescue AND had
-                # chg_1h<-0.15%: n=13, WR=46.2% BE=74.1%, edge=-27.9pp, PnL=-$257.93 --
-                # nearly the entire loss found in this corner of the book. The
-                # unrescued-by-this-condition stoch[20,35) population with the same
-                # chg_1h<-0.15% filter is fine on its own (n=26, WR=76.9%, +$105.44) --
-                # this is specifically the rescue being too permissive when the move
-                # is already extended, not a general "extended move" signal.
-                # n=13 is thin -- kill review in 2-3 weeks. Paper-only book.
-                # Backup: paper_trade_runner_pre_btc_agree_gates_20260711.py
-                if _stoch_no_rescue and _chg_1h_mtf < -0.15:
-                    print(f"  [btc_stoch_no_gate] RESCUE OVERRIDDEN, BLOCK NO {c['ticker']} — "
-                          f"rescue conditions met BUT chg_1h={_chg_1h_mtf:+.3f}%<-0.15 "
-                          f"(already-extended move, bounce risk reasserts through rescue)")
-                    _log_block("btc_stoch_no_gate__rescue_overridden")
-                    continue
                 if _stoch_no_rescue:
                     _rsrc_stoch = ("ct<=-3+fund=-1" if (_active_trend <= -3 and confirm.funding_bias == -1)
                                    else "vwap_stretch=1")

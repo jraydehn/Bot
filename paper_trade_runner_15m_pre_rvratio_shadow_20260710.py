@@ -617,9 +617,6 @@ CSV_COLUMNS = [
     # [2026-07-10] the actual live decision drift (scale=0.28, safety_bound=5.0)
     # and the OLD hard-cap(0.5) shadow, for forward before/after comparison.
     "zdrift_15m", "zdrift_15m_capped_old",
-    # [2026-07-10] rv_ratio(2h/120h), SHADOW ONLY -- validated touch/MAE risk
-    # predictor, logged live now for future regime-conditioning revisits.
-    "rv_ratio_15m",
     # Shadow LGBM output — lgbm_15m_{asset}.pkl runs alongside primary on every scan
     "p_gbdt",
     # Shadow stochastic signals (no gate logic — log-only for future analysis)
@@ -1853,43 +1850,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
 
     # Fetch 1h candles directly — gives 49 completed bars vs ~16 from resampled 1m.
     # Passed to compute_signals to enable Kalman/OU/Hurst computation (guard: >= 30).
-    # [2026-07-10] bumped 50->130: rv_ratio's long leg needs 120 completed 1h
-    # bars (120h/5d baseline) -- see rv_ratio computation below. Existing
-    # consumers (Kalman/OU/Hurst, donchian, stoch_k_1h) are unaffected by
-    # extra history, they use fixed trailing windows.
-    live_1h = fetch_recent_candles("1h", 130, asset=asset)
+    live_1h = fetch_recent_candles("1h", 50, asset=asset)
 
     # Compute signals
     sig = compute_signals(live_1m, asset=asset, live_1h=live_1h)
-
-    # rv_ratio(2h/120h) -- SHADOW ONLY, no decision path reads it. Validated
-    # 2026-07-10 as the single best predictor found of the touch/MAE buffer-
-    # breach mechanism (reform_results/pup15m_20260710/ s27-s30: 2.5yr
-    # synthetic P=0.0000 all years, real-book pre-registered-threshold edge
-    # cool +3.0pp/hot -5.0pp, trade-level r2=0.076 on touch_strike). Six
-    # regime-conditional z_drift-fraction searches built on it all came back
-    # null (see project_btc15m_paper_mode_20260710.md) -- logging it live now
-    # so a future revisit has real forward data instead of always
-    # reconstructing from the 1m parquet after the fact.
-    # 120h/5d baseline can't come from a single live_1m fetch (CANDLES_NEEDED
-    # caps at 1500min/25h, and Binance's klines endpoint has no pagination in
-    # fetch_recent_candles) -- long leg computed from the 1h series instead,
-    # a standard substitute for a multi-day realized-vol baseline.
-    _rv_ratio_15m: Optional[float] = None
-    try:
-        if asset == "BTC" and live_1m is not None and len(live_1m) >= 121 and live_1h is not None:
-            _r1m_ret = live_1m["close"].iloc[:-1].pct_change().dropna()
-            _rv_2h = float(_r1m_ret.tail(120).std()) if len(_r1m_ret) >= 120 else None
-            _h1_completed = live_1h.iloc[:-1] if len(live_1h) >= 2 else live_1h
-            _r1h_ret = _h1_completed["close"].pct_change().dropna()
-            _rv_120h = float(_r1h_ret.tail(120).std()) if len(_r1h_ret) >= 120 else None
-            if _rv_2h is not None and _rv_120h is not None and _rv_120h > 0:
-                _rv_ratio_15m = round(_rv_2h / _rv_120h, 4)
-    except Exception as _rve:
-        print(f"  [rv_ratio] compute failed (shadow, fail-open): {_rve}")
-    sig["rv_ratio_15m"] = _rv_ratio_15m if _rv_ratio_15m is not None else ""
-    if _rv_ratio_15m is not None:
-        print(f"  [rv_ratio] 2h/120h={_rv_ratio_15m:.4f}  (shadow only)")
 
     # Inject composite_p_up from most recent hourly scan
     composite_p_up = fetch_composite_p_up(asset)
@@ -2834,24 +2798,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         #   6h Bull YES: block unless stoch_cross_1h=0           (rescue n=13, WR=62%, +$152)
         #   6h Bull NO:  block unless offset_pct ≤ −0.006        (rescue n=43, WR=72%, +$79)
         #   4h Sideways YES: hard block (no profitable rescue)
-        #   4h Sideways NO:  block unless stoch_k_1h ≥ 90         (was 86.1)
+        #   4h Sideways NO:  block unless stoch_k_1h ≥ 86.1      (rescue n=28, WR=79%, +$183)
         #   1h Sideways YES: block unless oi_chg_pct ≥ 0.0535    (rescue n=43, WR=63%, +$145)
         # Rescues are OR-combined: any rescue condition saves the contract regardless of
         # which gate triggered the block (matches simulation Scen 2: Δ+$1,951, net +$148).
-        # [2026-07-12] stoch_k_1h threshold raised 86.1->90: real-data reconstruction
-        # (ground-truth-anchored against sol_scan_archive_15m.csv, 4h=Sideways NO
-        # candidates, sane-cost-filtered) found the 86.1 rescue decayed from a real
-        # edge in 2026-05 (WR=62.5%, edge=+12.7pp, +$473) to net-negative in 06/07
-        # (edge=-1.7pp/-2.5pp, -$809/-$703). Swept thresholds 50-99: 90 is the only
-        # cutoff with a positive OVERALL $ total across the full window (+$723) and
-        # 2/3 months clearly positive (05: +$932, 07: +$452; 06 still weak at -$661,
-        # a threshold-independent bad patch present at every cutoff tested, not
-        # specific to this level). Higher cutoffs (97-98) looked stronger but on an
-        # unreliably thin sample (tk=44-46 total across all 3 months, July
-        # uncomputable, May figure identical across three consecutive thresholds --
-        # same handful of events repeated, not real consistency). See
-        # reform_results/sol_hourly_20260710/s17_sol_markov_gate_backtest.py,
-        # s18_stoch_rescue_threshold_sweep.py. Backup: paper_trade_runner_15m_pre_markov_stoch90_20260712.py
         if asset.upper() == "SOL":
             _sc1h = float(sig.get("stoch_cross_1h", 0) or 0)
             _sk1h = float(sig.get("stoch_k_1h", 50.0) or 50.0)
@@ -2869,11 +2819,11 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             )
             _gate_no = (
                 (_markov_sol_6h == "Bull"      and offset_pct > _OFF_MED_SOL)
-                or (_markov_sol_4h == "Sideways" and _sk1h < 90.0)
+                or (_markov_sol_4h == "Sideways" and _sk1h < 86.1)
             )
             _rescue_no = (
                 (_markov_sol_6h == "Bull"      and offset_pct <= _OFF_MED_SOL)
-                or (_markov_sol_4h == "Sideways" and _sk1h >= 90.0)
+                or (_markov_sol_4h == "Sideways" and _sk1h >= 86.1)
             )
 
             _sol_skip = (
@@ -2893,8 +2843,8 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                          else f"oi_chg={_oi:.4f}≥0.054")
                 print(f"    [sol_markov_gate] RESCUE YES [{_rsrc}] ({_regs})")
             elif best_side == "no" and _gate_no and _rescue_no:
-                _rsrc = (f"stoch_k_1h={_sk1h:.1f}≥90"
-                         if _markov_sol_4h == "Sideways" and _sk1h >= 90.0
+                _rsrc = (f"stoch_k_1h={_sk1h:.1f}≥86"
+                         if _markov_sol_4h == "Sideways" and _sk1h >= 86.1
                          else f"offset={offset_pct:+.3f}%≤{_OFF_MED_SOL}")
                 print(f"    [sol_markov_gate] RESCUE NO [{_rsrc}] ({_regs})")
 
@@ -3483,7 +3433,6 @@ def _build_row(
         "p_up_v2_btc":          _f(sig.get("p_up_v2_btc")),
         "zdrift_15m":           _f(sig.get("zdrift_15m")),
         "zdrift_15m_capped_old": _f(sig.get("zdrift_15m_capped_old")),
-        "rv_ratio_15m":         _f(sig.get("rv_ratio_15m")),
         "z_drift_6h":           _f(sig.get("z_drift_6h")),
         "p_gbdt":               _f(sig.get("p_gbdt")),
         # Shadow stochastic signals (log-only)

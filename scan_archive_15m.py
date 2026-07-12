@@ -109,6 +109,8 @@ COLUMNS = [
     "p_up_v2_btc", "z_drift_6h",
     # [2026-07-10] live decision drift (scale=0.25) + OLD hard-cap(0.5) shadow
     "zdrift_15m", "zdrift_15m_capped_old",
+    # [2026-07-10] rv_ratio(2h/120h), SHADOW ONLY -- see paper_trade_runner_15m.py
+    "rv_ratio_15m",
     # HMM vol-regime state (BTC only; 0=low-vol, 1=med-vol, 2=high-vol)
     "hmm_vol_state",
     # VWAP MTF HMM state (BTC + SOL, each asset's own model; 8-state on 1m/5m/15m VWAP distances)

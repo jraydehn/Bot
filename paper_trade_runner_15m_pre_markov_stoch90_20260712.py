@@ -2834,24 +2834,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         #   6h Bull YES: block unless stoch_cross_1h=0           (rescue n=13, WR=62%, +$152)
         #   6h Bull NO:  block unless offset_pct ≤ −0.006        (rescue n=43, WR=72%, +$79)
         #   4h Sideways YES: hard block (no profitable rescue)
-        #   4h Sideways NO:  block unless stoch_k_1h ≥ 90         (was 86.1)
+        #   4h Sideways NO:  block unless stoch_k_1h ≥ 86.1      (rescue n=28, WR=79%, +$183)
         #   1h Sideways YES: block unless oi_chg_pct ≥ 0.0535    (rescue n=43, WR=63%, +$145)
         # Rescues are OR-combined: any rescue condition saves the contract regardless of
         # which gate triggered the block (matches simulation Scen 2: Δ+$1,951, net +$148).
-        # [2026-07-12] stoch_k_1h threshold raised 86.1->90: real-data reconstruction
-        # (ground-truth-anchored against sol_scan_archive_15m.csv, 4h=Sideways NO
-        # candidates, sane-cost-filtered) found the 86.1 rescue decayed from a real
-        # edge in 2026-05 (WR=62.5%, edge=+12.7pp, +$473) to net-negative in 06/07
-        # (edge=-1.7pp/-2.5pp, -$809/-$703). Swept thresholds 50-99: 90 is the only
-        # cutoff with a positive OVERALL $ total across the full window (+$723) and
-        # 2/3 months clearly positive (05: +$932, 07: +$452; 06 still weak at -$661,
-        # a threshold-independent bad patch present at every cutoff tested, not
-        # specific to this level). Higher cutoffs (97-98) looked stronger but on an
-        # unreliably thin sample (tk=44-46 total across all 3 months, July
-        # uncomputable, May figure identical across three consecutive thresholds --
-        # same handful of events repeated, not real consistency). See
-        # reform_results/sol_hourly_20260710/s17_sol_markov_gate_backtest.py,
-        # s18_stoch_rescue_threshold_sweep.py. Backup: paper_trade_runner_15m_pre_markov_stoch90_20260712.py
         if asset.upper() == "SOL":
             _sc1h = float(sig.get("stoch_cross_1h", 0) or 0)
             _sk1h = float(sig.get("stoch_k_1h", 50.0) or 50.0)
@@ -2869,11 +2855,11 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             )
             _gate_no = (
                 (_markov_sol_6h == "Bull"      and offset_pct > _OFF_MED_SOL)
-                or (_markov_sol_4h == "Sideways" and _sk1h < 90.0)
+                or (_markov_sol_4h == "Sideways" and _sk1h < 86.1)
             )
             _rescue_no = (
                 (_markov_sol_6h == "Bull"      and offset_pct <= _OFF_MED_SOL)
-                or (_markov_sol_4h == "Sideways" and _sk1h >= 90.0)
+                or (_markov_sol_4h == "Sideways" and _sk1h >= 86.1)
             )
 
             _sol_skip = (
@@ -2893,8 +2879,8 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                          else f"oi_chg={_oi:.4f}≥0.054")
                 print(f"    [sol_markov_gate] RESCUE YES [{_rsrc}] ({_regs})")
             elif best_side == "no" and _gate_no and _rescue_no:
-                _rsrc = (f"stoch_k_1h={_sk1h:.1f}≥90"
-                         if _markov_sol_4h == "Sideways" and _sk1h >= 90.0
+                _rsrc = (f"stoch_k_1h={_sk1h:.1f}≥86"
+                         if _markov_sol_4h == "Sideways" and _sk1h >= 86.1
                          else f"offset={offset_pct:+.3f}%≤{_OFF_MED_SOL}")
                 print(f"    [sol_markov_gate] RESCUE NO [{_rsrc}] ({_regs})")
 

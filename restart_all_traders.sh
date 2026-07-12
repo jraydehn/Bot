@@ -35,12 +35,15 @@ fi
 echo "  All clear."
 
 echo ""
-echo "=== Starting 1h watchdog (BTC dual / ETH paper / SOL paper) ==="
+echo "=== Starting 1h watchdog (BTC PAPER / ETH paper / SOL paper) ==="
 # 2026-07-05: SOL live/dual STOPPED (user decision — degrading performance).
 # SOL continues in PAPER mode for data collection per feedback_paper_always_on.
-# BTC dual unchanged: bankroll 2500, stop 350 (per-runner series-filtered stops).
+# 2026-07-10: BTC hourly converted to PAPER-ONLY (user decision): slow grind-down
+# in live PnL, user wants to move toward a high-conviction/lower-volume gating
+# approach before risking live capital again. Live money paused; paper collection
+# continues per feedback_paper_always_on. See project_btc_hourly_paper_20260710.md.
 nohup python3 run_all_assets.py \
-    --btc-dual --btc-bankroll 2500 --btc-loss-limit 350 \
+    --btc-bankroll 2500 --btc-loss-limit 350 \
     --eth-bankroll 2500 --eth-loss-limit 20 \
     --sol-bankroll 2500 \
     >> logs/run_all_assets.log 2>&1 &

@@ -2353,24 +2353,6 @@ def main() -> None:
     # 1h candles for MS/VD HMM — Binance 1m API caps at 1000 rows (~16 1h bars), far below
     # the 72-bar (MS) and 200-bar (VD) minimums. Fetch 1h directly to fix this.
     live_1h = fetch_recent_candles("1h", lookback_bars=250, asset=args.asset)
-
-    # [2026-07-11] SOL hourly HYBRID: compute the SOL 15m model's own signal
-    # dict once per cycle (reusing live_1m/live_1h already fetched above), for
-    # use when tau<=20min -- see the pricing block below (sol_15m_hybrid).
-    # Rationale: at low tau, an hourly contract's remaining-time dynamics
-    # converge toward what the 15m model was built and live-validated for.
-    # Reuses the SAME production code (compute_signals + compute_p_model_15m
-    # from paper_trade_runner_15m.py), not a re-derived approximation.
-    _sol_sig_15m = None
-    if args.asset == "SOL":
-        try:
-            import paper_trade_runner_15m as _r15
-            if "SOL" not in _r15._LGBM_MODELS:
-                _r15._LGBM_MODELS["SOL"] = _r15._load_15m_lgbm("SOL")
-            _sol_sig_15m = _r15.compute_signals(live_1m, asset="SOL", live_1h=live_1h)
-        except Exception as _sig15_e:
-            print(f"  [sol_15m_hybrid] signal compute failed: {type(_sig15_e).__name__}: {_sig15_e}")
-            _sol_sig_15m = None
     # ── p_up_v3 (honest rebuild, 2026-07-04) — SHADOW ONLY ──────────────────
     # Market-level, once per cycle (module caches per completed 1h bar).
     # Logged to the p_up_v3 CSV column; NO decision path reads this value.
@@ -4052,12 +4034,6 @@ def main() -> None:
             # read it unconditionally — crashed the live BTC dual runner 07-07 with
             # UnboundLocalError (watchdog auto-recovered). Consumers all null-check.
             _p_up_v2 = None
-            # [unbound_fix 2026-07-11] Same class, same fix again: sigma_tau_c was only
-            # assigned inside `if _composite_computed:`, but the sol_15m_hybrid path
-            # (tau<=20min) can now reach dec_c.decision=="trade" independently of the
-            # composite block succeeding, exposing this on the SOL runner the same way
-            # the 06-20 and 07-08 instances did. Consumers all null-check / compare >0.
-            sigma_tau_c = 0.0
             if _composite_computed:
                 # April-15 model: vol_factor scales sigma for both YES and NO.
                 sigma_tau_c   = vol_adj_c * math.sqrt(tau_c)
@@ -4132,33 +4108,6 @@ def main() -> None:
                         _active_trend, _active_rev, spot, s_k, sigma_tau_c,
                         asset="ETH", p_up_override=_comp_p_up_c,
                     )
-                elif args.asset == "SOL" and tau_c <= 20 and _sol_sig_15m:
-                    # [sol_15m_hybrid 2026-07-11] For tau<=20min, price this SOL
-                    # hourly contract with the SOL 15m model's full live pipeline
-                    # (compute_signals + compute_p_model_15m from
-                    # paper_trade_runner_15m.py) instead of the hourly composite/
-                    # z_drift path. Rationale: multiple independent tests this
-                    # session (composite score, gated/flat DRIFT_MULTIPLIER sweeps,
-                    # a from-scratch multi-timeframe LGBM) found ~0 incremental
-                    # edge over market pricing for the hourly composite path in
-                    # the genuinely uncertain zone -- while the 15m model has a
-                    # real, ongoing live/paper track record (NO-side dominant,
-                    # +$2,143 over 2 months). At low tau, an hourly contract's
-                    # remaining-time dynamics converge toward what that model was
-                    # built and validated for, so reuse it directly rather than
-                    # re-deriving an unproven low-tau hourly-specific formula.
-                    # Coherent: SOL's compute_p_model_15m returns one probability
-                    # used for both YES and NO (same convention as the composite
-                    # path below). Paper-only (SOL hourly has no live path).
-                    # Backup: paper_trade_runner_pre_sol15m_hybrid_20260711.py
-                    try:
-                        p_model_comp = _r15.compute_p_model_15m(
-                            spot, s_k, tau_c, _sol_sig_15m, asset="SOL", p_market=pm)
-                        print(f"  [sol_15m_hybrid] tau={tau_c:.1f}<=20 -> 15m model, "
-                              f"p_model={p_model_comp:.3f} (pm={pm:.3f})")
-                    except Exception as _hy_e:
-                        print(f"  [sol_15m_hybrid] inference error: {_hy_e} — falling back to composite path")
-                        p_model_comp = None
                 elif direct_p_model.asset_supported(args.asset):
                     try:
                         p_model_comp = direct_p_model.compute_p_model_direct(
@@ -5656,48 +5605,6 @@ def main() -> None:
                         print(f"  [sol_contrarian_ls_gate] PASS {dec_c.side.upper()} {c['ticker']} — "
                               f"contrarian (pm={dec_c.p_market:.3f}) BUT ls_long_pct={_sol_ls:.1f}>=71.65")
 
-            # [sol_agree_bucket_breaker] Circuit breaker: block SOL AGREE-bucket bets
-            # (chosen side matches the market's own lean) — the bucket sol_contrarian_ls_gate
-            # above always lets through untouched, and where the live bleed actually is.
-            # Backtested 2026-07-10 on actual taken SOL hourly trades (paper_trades_sol +
-            # archive), AGREE bucket only:
-            #   04-15->06-29 (validated era, what the ls_gate above was tuned on):
-            #     n=449, WR=80.6% BE=72.9% edge=+6.7pp +$2,324
-            #   06-29->07-05: n=34, WR=64.7% BE=73.4% edge=-8.7pp -$380.94
-            #   07-06->07-12: n=38, WR=65.8% BE=75.4% edge=-9.1pp -$664.85
-            # Sharp, discrete break exactly at 06-29 (SOL broke out of its ~66-72 range to
-            # 78-82 that week; realized vol was NOT unusually elevated vs prior good weeks --
-            # reads as a genuine trend/regime change, not a vol spike). Still ongoing as of
-            # this gate's deployment, no sign of reversion across 2 straight weeks.
-            # EXCEPTION: obi_score==1 (cross-exchange order-book imbalance -- orthogonal to
-            # every price/technical signal already in the model, corr with composite_rev=-0.03)
-            # identifies a real sub-pocket that held up UNCHANGED through the break:
-            #   YES, p_market in [0.50,0.65], obi_score==1: n=990/267 tickers,
-            #   WR=61.0% vs avg cost 57.4% (edge=+3.7pp), P(bootstrap loss)=0.130.
-            #   Before 06-29: WR=61.3% (n=341/111tk). After 06-29: WR=60.9% (n=649/156tk) --
-            #   essentially identical, unaffected by the regime break. Exempted below, plus
-            #   a modest Kelly boost (see sol_obi_agree_boost).
-            # No exemption exists for the NO side yet -- obi_score=-1 mirror is too thin to
-            # validate (n=86, 95% CI includes 0.5). Revisit as more data accumulates.
-            # Paper-only book (SOL hourly has no --sol-live flag). Kill review in 2 weeks once
-            # there's enough post-gate data to check whether AGREE has reverted to baseline.
-            # Backup: paper_trade_runner_pre_sol_agree_breaker_obi_boost_20260710.py
-            if args.asset == "SOL" and dec_c.decision == "trade":
-                _sol_agree = not ((dec_c.side == "yes" and dec_c.p_market < 0.5)
-                                   or (dec_c.side == "no" and dec_c.p_market > 0.5))
-                _sol_obi_exempt = (dec_c.side == "yes" and 0.50 <= dec_c.p_market <= 0.65
-                                    and confirm.obi_score is not None and confirm.obi_score == 1)
-                if _sol_agree and not _sol_obi_exempt:
-                    print(f"  [sol_agree_bucket_breaker] BLOCK {dec_c.side.upper()} {c['ticker']} — "
-                          f"AGREE bucket (pm={dec_c.p_market:.3f}) — 2wk regime break since 06-29, "
-                          f"WR=65% vs BE=74% (obi_score={confirm.obi_score})")
-                    _log_block("sol_agree_bucket_breaker")
-                    continue
-                elif _sol_agree and _sol_obi_exempt:
-                    print(f"  [sol_agree_bucket_breaker] PASS {dec_c.side.upper()} {c['ticker']} — "
-                          f"AGREE bucket (pm={dec_c.p_market:.3f}) BUT obi_score=1 "
-                          f"(regime-resistant pocket, WR=61.0% stable through the break)")
-
             # [eth_no_vwap_stretch2_gate] Block NO when vwap_stretch==2 AND composite_rev<=-1.
             # Refined 2026-06-04: adding rev<=-1 condition (overbought context).
             # Original gate (stretch==2 all) failed perm p=0.996 (WR≈bkev, no signal).
@@ -5961,25 +5868,6 @@ def main() -> None:
                         _log_block("btc_garch_highvol_yes_gate")
                         continue
 
-            # [btc_yes_agree_breaker] Block BTC YES when it AGREES with the market's own
-            # lean (pm>=0.5) -- persistently negative every week it's had volume.
-            # Backtested 2026-07-10/11 on actual taken trades (paper_trades.csv, 06-17->now):
-            #   n=40, WR=62.5% BE=67.0% edge=-4.5pp, PnL=-$183.36
-            #   Weekly: 06-22/28 -$90.03, 06-29/07-05 -$60.27, 07-06/07-12 -$41.84 (3/3
-            #   weeks negative, though thin n/week ~7-17).
-            # By contrast YES+CONTRARIAN (pm<0.5, model disagrees with market) is BTC
-            # hourly's best-performing bucket this window: n=25, WR=56.0% BE=37.4%,
-            # +$459.51 -- the market's own price is a useful discriminator here; riding
-            # along with it (AGREE) is where the model adds no independent edge.
-            # n is modest (40 trades / 4wks) -- kill review in 2-3 weeks once more data
-            # accumulates. Paper-only book (BTC hourly moved to paper 2026-07-10).
-            # Backup: paper_trade_runner_pre_btc_agree_gates_20260711.py
-            if args.asset == "BTC" and dec_c.side == "yes" and pm >= 0.5:
-                print(f"  [btc_yes_agree_breaker] BLOCK YES {c['ticker']} — "
-                      f"AGREE bucket (pm={pm:.3f}) — persistent weekly loser, WR=62.5% vs BE=67.0%")
-                _log_block("btc_yes_agree_breaker")
-                continue
-
             # [btc_adx_gate] Block BTC YES when ADX_1h is in moderate trending range [20,40).
             # mispricing_analysis [21a] 2026-05-17: adx_mod(20-40) YES: n=153, WR=36.6%,
             # BE=46.4%, Edge=-9.8%, PnL=-$150, p=0.013.
@@ -6072,25 +5960,6 @@ def main() -> None:
                     (_active_trend <= -3 and confirm.funding_bias == -1)
                     or getattr(confirm, "stretch_score", None) == 1
                 )
-                # [2026-07-11] Rescue override: block anyway (don't rescue) if
-                # chg_1h < -0.15% -- the drop has already been sharp/fast, not just
-                # "confirmed bearish," and the original bounce-risk mechanism this
-                # gate exists for reasserts itself right through the rescue.
-                # Backtested on actual taken trades that passed via rescue AND had
-                # chg_1h<-0.15%: n=13, WR=46.2% BE=74.1%, edge=-27.9pp, PnL=-$257.93 --
-                # nearly the entire loss found in this corner of the book. The
-                # unrescued-by-this-condition stoch[20,35) population with the same
-                # chg_1h<-0.15% filter is fine on its own (n=26, WR=76.9%, +$105.44) --
-                # this is specifically the rescue being too permissive when the move
-                # is already extended, not a general "extended move" signal.
-                # n=13 is thin -- kill review in 2-3 weeks. Paper-only book.
-                # Backup: paper_trade_runner_pre_btc_agree_gates_20260711.py
-                if _stoch_no_rescue and _chg_1h_mtf < -0.15:
-                    print(f"  [btc_stoch_no_gate] RESCUE OVERRIDDEN, BLOCK NO {c['ticker']} — "
-                          f"rescue conditions met BUT chg_1h={_chg_1h_mtf:+.3f}%<-0.15 "
-                          f"(already-extended move, bounce risk reasserts through rescue)")
-                    _log_block("btc_stoch_no_gate__rescue_overridden")
-                    continue
                 if _stoch_no_rescue:
                     _rsrc_stoch = ("ct<=-3+fund=-1" if (_active_trend <= -3 and confirm.funding_bias == -1)
                                    else "vwap_stretch=1")
@@ -7762,28 +7631,6 @@ def main() -> None:
                       f"{dec_c.bet_fraction:.4f}→{_v3_boost_frac:.4f})")
                 dec_c.bet_fraction = _v3_boost_frac
                 dec_c.bet_amount   = round(_v3_boost_frac * args.bankroll, 2)
-
-            # [sol_obi_agree_boost] 1.15x Kelly for SOL YES when p_market in [0.50,0.65]
-            # (the "genuinely uncertain, market close to a coin flip" zone) AND obi_score==1
-            # (cross-exchange order-book imbalance, bullish tilt). This is the exact
-            # population exempted from sol_agree_bucket_breaker above -- modest edge
-            # (WR=61.0% vs avg cost 57.4%, edge=+3.7pp, n=990/267 tickers, P(bootstrap
-            # loss)=0.130), so a modest boost, smaller than the 1.25x/1.5x used elsewhere
-            # for larger-edge gates. Held up unchanged across the 06-29 regime break
-            # (61.3% before -> 60.9% after) -- independent of the composite score
-            # (corr(obi_score,composite_rev)=-0.03; edge survives fully within the
-            # composite-neutral subset, 55.2% there alone, n=964). Paper-only book.
-            # Cap 0.08 bet_fraction (smaller cap than the vwap_s3 boost above, matching
-            # the smaller validated edge). Backup: paper_trade_runner_pre_sol_agree_breaker_obi_boost_20260710.py
-            if (args.asset == "SOL" and dec_c.decision == "trade"
-                    and dec_c.side == "yes" and 0.50 <= dec_c.p_market <= 0.65
-                    and confirm.obi_score is not None and confirm.obi_score == 1):
-                _obi_boost_frac = min(dec_c.bet_fraction * 1.15, 0.08)
-                print(f"  [sol_obi_agree_boost] 1.15x Kelly YES {c['ticker']} — "
-                      f"obi_score=1 in uncertain zone (edge=+3.7pp, "
-                      f"{dec_c.bet_fraction:.4f}→{_obi_boost_frac:.4f})")
-                dec_c.bet_fraction = _obi_boost_frac
-                dec_c.bet_amount   = round(_obi_boost_frac * args.bankroll, 2)
 
             # [btc_vpin_no_boost] Conviction Kelly boost for BTC NO when vpin (informed
             # selling order flow) confirms an OTM NO at pm<0.30. Archive deduped, pm[0.10,0.30):

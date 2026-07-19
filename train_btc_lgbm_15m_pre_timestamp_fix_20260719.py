@@ -79,19 +79,10 @@ def load_data(asset: str) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         else:
             df[c] = float("nan")
-    # [2026-07-19] logged_at mixes tz-aware ("...+00:00") and tz-naive string
-    # formats; pd.to_datetime(..., utc=True) silently turns ~86% of rows to NaT
-    # (pandas infers one format from the first value), and the old sort_values
-    # then pushed all those NaT rows to the bottom, breaking the "chronological"
-    # split. format="mixed" parses both formats correctly, but ~54% of rows
-    # still have a genuinely blank logged_at in the source data. Verified the
-    # raw CSV row order itself is perfectly chronological (append-only scan log,
-    # 0 inversions among the timestamps that do parse), so skip sorting
-    # entirely and rely on natural file order for the chronological split.
     ts_col = "logged_at" if "logged_at" in df.columns else "decision_time"
-    df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", format="mixed", utc=True)
+    df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
     df = df.rename(columns={ts_col: "logged_at"})
-    df = df.reset_index(drop=True)
+    df = df.sort_values("logged_at").reset_index(drop=True)
     return df
 
 
@@ -119,10 +110,8 @@ def train(asset: str = "BTC"):
     print(SEP)
 
     df = load_data(asset)
-    _ts = df["logged_at"].dropna()
     print(f"Loaded {len(df)} resolved rows  "
-          f"({_ts.iloc[0].date() if len(_ts) else '?'} → {_ts.iloc[-1].date() if len(_ts) else '?'}, "
-          f"row order used for split, {df['logged_at'].isna().sum()} rows missing logged_at)")
+          f"({df['logged_at'].iloc[0].date()} → {df['logged_at'].iloc[-1].date()})")
 
     # Chronological 60 / 20 / 20 split
     n = len(df)

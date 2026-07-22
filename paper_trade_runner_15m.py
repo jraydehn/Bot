@@ -37,6 +37,7 @@ import os
 import pickle
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -445,9 +446,31 @@ ASSET_CONFIG = {
 MIN_TAU_MIN      = 2.0    # skip contract if fewer than 2 minutes remain
 MAX_TAU_MIN      = 14.0   # skip contract if more than 14 minutes remain (not opened yet)
 EDGE_THRESHOLD   = 0.04   # minimum model-vs-market edge to bet
+# [2026-07-21, v2] ETH regime drift, superseding the original narrow
+# Bull_Building_HighVol version (0.08 z-drift): that version was sized from a
+# too-conservative starting guess and gated to a 3-way state intersection that
+# only physically reached 1 of 17 real NO-losing flip candidates in the
+# 07-20 streak (the other 16 occurred in other Bull-adjacent states). This
+# version fixes both: triggers on ANY confirmed Bull structural regime
+# (compute_eth_bos_regime's regime_bos=="Bull", no streak/vol-tier gating),
+# and the magnitude (0.5) is set from the actual median z-shift needed to
+# flip the real flip candidates (0.688), not an arbitrary small increment.
+# Validated on real market prices, walk-forward-safe regime detection,
+# discovery/pure-holdout split (both improved 44-47%) and directly against
+# the actual 46 real streak trades (-$574.57 -> +$90.94, turns net positive).
+# A guard-slack sweep (also discovery-selected, holdout-validated) found the
+# STRICT manufacture-guard (no loosening) outperforms any loosened version on
+# holdout while producing an identical streak result -- so no loosening is
+# applied here, unlike an intermediate version tested during design.
+ETH_BULL_DRIFT = 0.5
 KELLY_MULT       = 0.08   # 8% of full-Kelly — allows signal variation (was 0.30, always hit cap)
 MAX_BET_FRAC     = 0.06   # hard cap at 6% of bankroll per trade (was 0.03, 98% of bets hit cap)
-MAX_BET_FRAC_ST7 = 0.09   # elevated cap for HMM State 7 (high-payout NO regime, +$2207 historical)
+# MAX_BET_FRAC_ST7 REMOVED 2026-07-18: the elevated 0.09 cap for BTC HMM State 7
+# (originally +$2207 historical, "high-payout NO regime") was found inverted during
+# a deep gate analysis -- State 7's current edge is -3.3pp vs the baseline's +1.5pp,
+# meaning the boost was sizing UP on a population that's now losing. No re-derivation
+# attempted (out of scope for this pass); falls back to the standard MAX_BET_FRAC.
+# Revert: MAX_BET_FRAC_ST7 = 0.09, restore the _kelly_cap line below.
 P_MARKET_VOL_MIN = 0.12   # block YES when p_market < this (deep OTM)
 P_MARKET_VOL_MAX = 0.88   # block NO when p_market > this (deep OTM)
 CANDLES_NEEDED   = 1500   # 1m candles (25h — need 20+ 1h bars for donchian/stoch_k_1h)
@@ -558,6 +581,68 @@ def _get_markov_regimes_yf(asset: str) -> dict:
         return {}
 
 
+# [2026-07-21] ETH structural (BOS/CHoCH) regime detector -- built during the
+# ETH 15m losing-streak investigation (07-19/07-20). Unlike the rolling-return
+# threshold classifiers above, this tracks confirmed swing-structure breaks
+# (2-bar fractal swing highs/lows, K=2) on 15m bars: a "BOS" is a close beyond
+# the last confirmed same-direction swing (continuation), a "CHoCH" is the
+# first break in the OPPOSITE direction (character change). bos_streak counts
+# consecutive same-direction breaks since the last CHoCH. Validated on 2yr of
+# real price data: reacts to a genuine trend change in ~30min (vs 3+ hours for
+# a rolling-return classifier) and is far more stable (4.8% of bars change
+# state vs 19-29% for rolling-return alternatives). Zero lookahead: a swing
+# is only usable K bars after it forms, exactly matching real-time detection.
+_BOS_K = 2
+
+
+def compute_eth_bos_regime(live_1m: pd.DataFrame) -> tuple:
+    """
+    Return (regime_bos, bos_streak) for ETH from the trailing live_1m window
+    (~25h -> ~100 completed 15m bars). regime_bos is 'Bull'/'Bear'/None (no
+    confirmed break yet in this window). bos_streak counts consecutive
+    same-direction structural breaks since the last character change (1 =
+    just flipped, 2+ = continuation streak). A streak that started more than
+    ~25h ago will undercount here (bounded by the live_1m window) -- rare
+    given the ~5.25h average episode length found in backtesting, and an
+    acceptable approximation for this use.
+    """
+    try:
+        d15 = live_1m.resample("15min").agg(
+            high=("high", "max"), low=("low", "min"), close=("close", "last")
+        ).dropna()
+        if len(d15) < 2 * _BOS_K + 5:
+            return None, 0
+        d15 = d15.iloc[:-1]  # drop the incomplete forming bar
+        n = len(d15)
+        hi = d15["high"].values; lo = d15["low"].values; cl = d15["close"].values
+        is_sh = np.zeros(n, dtype=bool); is_sl = np.zeros(n, dtype=bool)
+        for i in range(_BOS_K, n - _BOS_K):
+            wh = hi[i - _BOS_K:i + _BOS_K + 1]; wl = lo[i - _BOS_K:i + _BOS_K + 1]
+            if hi[i] == wh.max() and (wh == hi[i]).sum() == 1:
+                is_sh[i] = True
+            if lo[i] == wl.min() and (wl == lo[i]).sum() == 1:
+                is_sl[i] = True
+
+        trend = None
+        streak = 0
+        last_sh = None; last_sl = None
+        for i in range(n):
+            ci = i - _BOS_K
+            if ci >= 0:
+                if is_sh[ci]: last_sh = hi[ci]
+                if is_sl[ci]: last_sl = lo[ci]
+            if last_sh is not None and cl[i] > last_sh:
+                streak = streak + 1 if trend == "Bull" else 1
+                trend = "Bull"; last_sh = None
+            elif last_sl is not None and cl[i] < last_sl:
+                streak = streak + 1 if trend == "Bear" else 1
+                trend = "Bear"; last_sl = None
+        return trend, streak
+    except Exception as _e:
+        print(f"  [eth_bos_regime] compute error: {_e}")
+        return None, 0
+
+
 def _load_15m_lgbm(asset: str) -> object:
     path = Path(__file__).parent / "models" / f"lgbm_15m_{asset.lower()}.pkl"
     try:
@@ -644,6 +729,12 @@ CSV_COLUMNS = [
     # 2026-07-09: SOL CoinGlass flow-regime HMM state (0-7; blank for BTC/ETH).
     # Drives sol_15m_cg_liq_yes_gate (State 4 = long-liquidation regime).
     "cg_flow_state",
+    # [2026-07-18] 1h Donchian(20) position (0=bottom of 20h range, 1=top). Drives
+    # donch_low_no_boost (BTC/ETH NO Kelly boost). Was computed (sig["donch_1h_pos"])
+    # and used live since inception but never had a CSV column — added during the
+    # deep-gate-analysis logging audit; ensure_csv()'s locked migration backfills it
+    # blank on existing rows.
+    "donch_1h_pos",
     # 2026-07-04: honest p_up rebuild — SHADOW ONLY (added via migration; keep at end).
     # p_up_v3 = latest hourly v3 score from paper_trades.csv (BTC rows only).
     # v3_agree = 1 if v3@0.50 agrees with the trade side (yes: v3>=0.50, no: v3<0.50),
@@ -667,6 +758,18 @@ CSV_COLUMNS = [
     "kalman_velocity_5m", "kalman_residual_5m", "hurst_exponent_5m", "ou_theta_5m",
     "kalman_velocity_15m", "kalman_residual_15m", "hurst_exponent_15m", "ou_theta_15m",
     "arima_forecast_15m",
+    # [2026-07-20] Distinguishes a real Kalshi live order from a paper-twin
+    # simulated row when both processes log to the same CSV concurrently
+    # (added after the live+paper-twin pattern made every trade appear to be
+    # logged twice with no way to tell which row was the real fill). Blank on
+    # rows logged before this column existed.
+    "is_live",
+    # [2026-07-21] ETH BOS/CHoCH structural regime state (see compute_eth_bos_regime).
+    # eth_regime_state combines direction + bos_streak intensity tier + vol tier,
+    # e.g. "Bull_Building_HighVol" -- drives eth_bull_building_highvol_drift.
+    # eth_regime_drift logs the actual z-space shift applied that scan (0 if the
+    # state didn't match). ETH-only; blank for BTC/SOL.
+    "eth_regime_bos", "eth_bos_streak", "eth_regime_state", "eth_regime_drift",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -686,29 +789,70 @@ def _csv_path(asset: str) -> Path:
 # CSV helpers
 # ---------------------------------------------------------------------------
 
+@contextmanager
+def _csv_lock(path: Path):
+    """Exclusive advisory lock serializing appends and rewrites per trades CSV.
+
+    [2026-07-18] Added after paper_trades_sol15m.csv silently lost ~5,100 rows
+    (05-25 -> 07-17) -- same bug class already found and fixed once in
+    scan_archive.py's _archive_lock (btc_scan_archive.csv lost 06-04->06-24
+    the same way). resolve_pending() below reads the whole CSV, loops a slow
+    per-ticker Kalshi API fetch, then rewrote the whole file from that
+    now-stale in-memory copy with no lock and no atomic replace. Running the
+    live + paper-twin SOL 15m processes concurrently (an intentional design
+    this session, see feedback_parallel_paper_runner) turned a latent race
+    into an active one: resolve_pending() runs every scan cycle (~5min) in
+    BOTH processes, so the stale-overwrite window opens constantly, not just
+    at startup. The lock + re-read-under-lock + os.replace pattern below
+    (mirrors scan_archive.py's _archive_lock exactly) closes every variant.
+    """
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    fd = open(lock_path, "w")
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_EX)
+        yield
+    finally:
+        _fcntl.flock(fd, _fcntl.LOCK_UN)
+        fd.close()
+
+
 def ensure_csv(asset: str) -> None:
     csv_path = _csv_path(asset)
     csv_path.parent.mkdir(exist_ok=True)
     if not csv_path.exists():
-        with open(csv_path, "w", newline="") as f:
-            csv.DictWriter(f, fieldnames=CSV_COLUMNS).writeheader()
+        with _csv_lock(csv_path):
+            if not csv_path.exists():
+                with open(csv_path, "w", newline="") as f:
+                    csv.DictWriter(f, fieldnames=CSV_COLUMNS).writeheader()
         return
     with open(csv_path, "r", newline="") as f:
         existing = csv.DictReader(f).fieldnames or []
     new_cols = [c for c in CSV_COLUMNS if c not in existing]
-    if new_cols:
+    if not new_cols:
+        return
+    with _csv_lock(csv_path):
+        # Re-read fresh under the lock -- another process may have appended
+        # rows (or already migrated the schema) since the unlocked check above.
+        with open(csv_path, "r", newline="") as f:
+            existing = csv.DictReader(f).fieldnames or []
+        new_cols = [c for c in CSV_COLUMNS if c not in existing]
+        if not new_cols:
+            return
         df = pd.read_csv(csv_path)
         for col in new_cols:
             df[col] = ""
         df = df.reindex(columns=CSV_COLUMNS)   # keep header order == DictWriter order
-        df.to_csv(csv_path, index=False)
+        tmp = csv_path.with_suffix(".csv.tmp")
+        df.to_csv(tmp, index=False)
+        os.replace(tmp, csv_path)
 
 
 def append_row(row: dict, asset: str) -> None:
     csv_path = _csv_path(asset)
-    with open(csv_path, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
-        w.writerow(row)
+    with _csv_lock(csv_path):
+        with open(csv_path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+            w.writerow(row)
 
 
 # ---------------------------------------------------------------------------
@@ -921,7 +1065,17 @@ def _fetch_spot_at_time(close_dt: datetime, asset: str = "BTC") -> Optional[floa
 
 
 def resolve_pending(auth: Optional[KalshiAuth], asset: str, is_live: bool = False) -> None:
-    """Fill in resolved_yes / would_win / would_pnl for settled contracts."""
+    """Fill in resolved_yes / would_win / would_pnl for settled contracts.
+
+    [2026-07-18] Rewritten to close the same race that wiped 06-04->06-24 from
+    btc_scan_archive.csv (see _csv_lock docstring above): the API-fetch loop
+    below is slow and runs unlocked against a snapshot; it must NOT write that
+    snapshot back to disk directly, or rows appended by another concurrent
+    process (e.g. the live + paper-twin SOL 15m runners, both of which call
+    this every scan cycle) during the loop get silently discarded. Updates are
+    now collected keyed by (logged_at, contract_ticker) without touching the
+    file, then applied under the lock to a FRESH re-read, written atomically.
+    """
     if is_live and auth is not None:
         live_csv = live_trading.get_live_csv_path(asset)
         live_trading.settle_live_trades(auth, csv_path=live_csv)
@@ -937,7 +1091,7 @@ def resolve_pending(auth: Optional[KalshiAuth], asset: str, is_live: bool = Fals
         return
 
     now_dt = datetime.now(timezone.utc)
-    updated = 0
+    updates: dict = {}  # (logged_at, contract_ticker) -> field updates
     for idx, row in pending.iterrows():
         ct_str = str(row.get("close_time", ""))
         ticker = str(row.get("contract_ticker", ""))
@@ -993,25 +1147,43 @@ def resolve_pending(auth: Optional[KalshiAuth], asset: str, is_live: bool = Fals
 
         would_pnl = round(bet_amt * payout if would_win else -bet_amt, 2)
 
-        df.at[idx, "resolved_yes"] = int(resolved_yes)
-        df.at[idx, "would_win"]    = int(would_win)
-        df.at[idx, "would_pnl"]    = would_pnl
+        upd = {
+            "resolved_yes": int(resolved_yes),
+            "would_win":    int(would_win),
+            "would_pnl":    would_pnl,
+        }
 
         # Log expiry price and move magnitude
         spot_scan = float(row.get("spot", 0) or 0)
         floor_s   = float(row.get("floor_strike", 0) or 0)
         spot_exp  = _fetch_spot_at_time(close_dt, asset)
         if spot_exp and spot_scan > 0:
-            df.at[idx, "spot_at_expiry"] = round(spot_exp, 2)
-            df.at[idx, "price_move_pct"] = round((spot_exp - spot_scan) / spot_scan * 100, 4)
+            upd["spot_at_expiry"] = round(spot_exp, 2)
+            upd["price_move_pct"] = round((spot_exp - spot_scan) / spot_scan * 100, 4)
         if spot_exp and floor_s > 0:
-            df.at[idx, "miss_pct"] = round((spot_exp - floor_s) / floor_s * 100, 4)
+            upd["miss_pct"] = round((spot_exp - floor_s) / floor_s * 100, 4)
 
-        updated += 1
+        updates[(str(row.get("logged_at", "")), ticker)] = upd
 
-    if updated > 0:
-        df.to_csv(csv_path, index=False)
-        print(f"  [resolve] Updated {updated} resolved trade(s).")
+    if not updates:
+        return
+
+    with _csv_lock(csv_path):
+        fresh = pd.read_csv(csv_path)
+        applied = 0
+        for idx, row in fresh.iterrows():
+            key = (str(row.get("logged_at", "")), str(row.get("contract_ticker", "")))
+            upd = updates.get(key)
+            if upd is None:
+                continue
+            for col, val in upd.items():
+                fresh.at[idx, col] = val
+            applied += 1
+        if applied:
+            tmp = csv_path.with_suffix(".csv.tmp")
+            fresh.to_csv(tmp, index=False)
+            os.replace(tmp, csv_path)
+            print(f"  [resolve] Updated {applied} resolved trade(s).")
 
 
 # ---------------------------------------------------------------------------
@@ -1054,7 +1226,8 @@ def _macd_hist(prices: pd.Series, fast: int = 12, slow: int = 26,
 
 
 def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC",
-                    live_1h: Optional[pd.DataFrame] = None) -> dict:
+                    live_1h: Optional[pd.DataFrame] = None,
+                    live_5m: Optional[pd.DataFrame] = None) -> dict:
     """
     Compute microstructure signals from 1m OHLCV data.
     Uses iloc[-2] for completed bars (last bar may be incomplete).
@@ -1100,6 +1273,17 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC",
         {"open": "first", "high": "max", "low": "min",
          "close": "last", "volume": "sum"}
     ).dropna()
+
+    # Override with directly-fetched 5m bars when available.
+    # Resampling 1m->5m is capped at ~200 bars (Binance 1m limit=1000); direct
+    # fetch gives up to ~320 completed bars, enabling vol_ratio_5m's 300-bar
+    # guard to actually pass (it never could from the resampled series -- see
+    # [2026-07-21] fix, vol_ratio_5m was a constant 1.0 for the entire live
+    # history of all three 15m LGBM models as a result).
+    if live_5m is not None and len(live_5m) >= 5:
+        _live_5m_c = live_5m.iloc[:-1] if len(live_5m) >= 2 else live_5m
+        if len(_live_5m_c) > len(df5):
+            df5 = _live_5m_c
 
     if len(df5) >= 2:
         # bp_5m, body_5m, dir_5m: last COMPLETED 5m bar
@@ -1857,10 +2041,24 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # bars (120h/5d baseline) -- see rv_ratio computation below. Existing
     # consumers (Kalman/OU/Hurst, donchian, stoch_k_1h) are unaffected by
     # extra history, they use fixed trailing windows.
-    live_1h = fetch_recent_candles("1h", 130, asset=asset)
+    # [2026-07-21] bumped 130->400: vol_ratio_1h needs a 336-bar (14-day) rolling
+    # median baseline (see compute_signals) -- 130 bars could never satisfy this,
+    # so vol_ratio_1h silently defaulted to the constant fallback (1.0) for the
+    # entire live history of all three 15m LGBM models. 400 gives headroom above
+    # the 336 minimum. Existing trailing-window consumers are unaffected by the
+    # extra history.
+    live_1h = fetch_recent_candles("1h", 400, asset=asset)
+
+    # [2026-07-21] Direct 5m fetch for vol_ratio_5m -- same fix pattern as live_1h
+    # above. vol_ratio_5m needs 300 completed 5m bars (25h); resampling from the
+    # 1m fetch (capped at 1000 rows by the Binance API regardless of CANDLES_NEEDED)
+    # only ever yields ~200 5m bars, so the guard could never pass and vol_ratio_5m
+    # silently defaulted to the constant fallback (1.0) for the entire live history.
+    # 320 gives headroom above the 300 minimum.
+    live_5m = fetch_recent_candles("5m", 320, asset=asset)
 
     # Compute signals
-    sig = compute_signals(live_1m, asset=asset, live_1h=live_1h)
+    sig = compute_signals(live_1m, asset=asset, live_1h=live_1h, live_5m=live_5m)
 
     # rv_ratio(2h/120h) -- SHADOW ONLY, no decision path reads it. Validated
     # 2026-07-10 as the single best predictor found of the touch/MAE buffer-
@@ -2022,6 +2220,49 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     sig["z_drift_6h"] = _z_drift_6h if _z_drift_6h is not None else ""
     if _z_drift_6h is not None:
         print(f"  [z_drift_6h] {_z_drift_6h:+.4f}  (6h rolling mean actual_z)")
+
+    # [2026-07-21] ETH BOS/CHoCH structural regime + vol-tier state, feeding the
+    # eth_bull_building_highvol_drift below. See project_eth15m_streak_analysis_
+    # 20260721.md for the full validation: state defined as (direction=Bull,
+    # bos_streak in [2,3] "Building", vol elevated >1.3x trailing median).
+    # Against-trend NO in this exact state: -5.6pp (discovery) / -6.5pp (full
+    # 10wk) / -8.3pp (pure holdout) -- consistent direction across every
+    # chronological split tested, though the holdout sample alone (n=98) isn't
+    # independently significant. Deployed as a small, incremental z_drift
+    # (not a gate) per user direction -- symmetric lift to YES / dampen to NO,
+    # sized conservatively pending more live data.
+    _eth_regime_bos: Optional[str] = None
+    _eth_bos_streak: int = 0
+    _eth_vol_elevated: Optional[bool] = None
+    _eth_regime_state: str = ""
+    if asset.upper() == "ETH":
+        try:
+            _eth_regime_bos, _eth_bos_streak = compute_eth_bos_regime(live_1m)
+        except Exception as _rbe:
+            print(f"  [eth_bos_regime] error: {_rbe}")
+        try:
+            _rv_now = sig.get("realized_vol_annual")
+            if _rv_now is not None and '_df_log' in dir() and "realized_vol_annual" in _df_log.columns:
+                _rv_hist = pd.to_numeric(_df_log["realized_vol_annual"], errors="coerce").dropna().tail(300)
+                if len(_rv_hist) >= 50:
+                    _rv_med = float(_rv_hist.median())
+                    if _rv_med > 0:
+                        _eth_vol_elevated = float(_rv_now) > 1.3 * _rv_med
+        except Exception as _rve:
+            print(f"  [eth_vol_tier] error: {_rve}")
+
+        _eth_intensity = ("Fresh" if _eth_bos_streak <= 1
+                           else "Building" if _eth_bos_streak <= 3
+                           else "Established")
+        _eth_vol_tier = ("HighVol" if _eth_vol_elevated else "NormalVol"
+                          if _eth_vol_elevated is not None else "")
+        if _eth_regime_bos and _eth_vol_tier:
+            _eth_regime_state = f"{_eth_regime_bos}_{_eth_intensity}_{_eth_vol_tier}"
+        print(f"  [eth_bos_regime] {_eth_regime_bos or 'n/a'}  streak={_eth_bos_streak}  "
+              f"vol_elevated={_eth_vol_elevated}  state={_eth_regime_state or 'n/a'}")
+    sig["eth_regime_bos"]   = _eth_regime_bos or ""
+    sig["eth_bos_streak"]   = _eth_bos_streak
+    sig["eth_regime_state"] = _eth_regime_state
 
     # Vol-regime HMM state (BTC only, shadow-logged — no gate applied yet)
     _vol_state: "int | None" = None
@@ -2206,6 +2447,21 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         if asset == "BTC":
             p_model_no = 1.0 - p_model_yes
 
+        # [eth_bull_regime_drift, v2 2026-07-21] z-space drift, ETH only, active
+        # whenever compute_eth_bos_regime confirms regime_bos == "Bull" (any
+        # confirmed bullish structural break -- not gated to a narrow streak/
+        # vol-tier state, see ETH_BULL_DRIFT's definition above for why).
+        # Symmetric: lifts p_model_yes / dampens p_model_no together (ETH's
+        # non-coherent single-model convention).
+        _eth_drift = 0.0
+        _eth_p_raw = p_model_yes  # pre-drift value, needed by the manufacture-guard below
+        if asset == "ETH" and _eth_regime_bos == "Bull":
+            _eth_drift = ETH_BULL_DRIFT
+            _z_base = norm.ppf(float(np.clip(p_model_yes, 0.001, 0.999)))
+            p_model_yes = float(np.clip(norm.cdf(_z_base + _eth_drift), 0.01, 0.99))
+            p_model_no = p_model_yes
+        sig["eth_regime_drift"] = _eth_drift
+
         # SHADOW: corrected p_up_v2 -> K_YES/K_NO non-coherent model (never
         # live-exercised; logged only, see comment above). Fail-open to "".
         p_model_yes_v2 = p_model_no_v2 = edge_yes_v2 = edge_no_v2 = None
@@ -2277,12 +2533,41 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             best_side, best_edge = "no", edge_no
             p_model = p_model_no
 
-        # [eth_markov_daily_sideways_gate — hard block ALL ETH trades when daily regime=Sideways]
-        # Backtest: 114 trades WR=37.7% -$793; subsumes ETH 4h Bull (100% overlap).
-        # No profitable rescue found (n<30 in all rescue subgroups); revisit at n≥30 for NO.
-        if asset.upper() == "ETH" and _markov_eth_daily == "Sideways":
-            print(f"    [eth_daily_sw_gate] BLOCK {best_side.upper()} → skip — "
-                  f"ETH daily Markov=Sideways (n=114, WR=37.7%, -$793)")
+        # [eth_bull_regime_drift manufacture-guard, v2 2026-07-21] The drift
+        # alone must not create a trade the RAW (pre-drift) model saw no edge
+        # on either side for. A guard-slack sweep (discovery-selected,
+        # holdout-validated) found the STRICT form (no loosening) beats every
+        # loosened variant on the untouched holdout while producing an
+        # identical result on the real streak trades -- so no slack is used.
+        # Full validation: discovery -$26,806->-$14,914 (44%), pure holdout
+        # -$13,354->-$7,071 (47%), actual 07-20 streak trades -$574.57->
+        # +$90.94 (net positive). Drift magnitude (0.5) set from the actual
+        # median z-shift needed to flip the real flip candidates (0.688), not
+        # an arbitrary increment -- see ETH_BULL_DRIFT's definition above.
+        if asset == "ETH" and _eth_regime_bos == "Bull":
+            _raw_edge_yes  = _eth_p_raw - p_market
+            _raw_edge_no   = p_market - _eth_p_raw
+            _raw_best_edge = max(_raw_edge_yes, _raw_edge_no)
+            if _raw_best_edge < EDGE_THRESHOLD:
+                print(f"    [eth_bull_regime_drift_guard] SKIP {ticker} — "
+                      f"drift created edge={best_edge:+.3f} but raw model saw no edge "
+                      f"(raw_best_edge={_raw_best_edge:+.3f})")
+                best_edge = 0.0
+
+        # [eth_markov_daily_sideways_gate — block NO only when daily regime=Sideways]
+        # Original backtest (05-23, n=114): WR=37.7% -$793, blocked BOTH sides.
+        # [2026-07-18] Narrowed to NO-only during a deep gate analysis (2mo of data,
+        # ~10x the original sample). Full re-check found the block has decayed and split
+        # by side: NO side is still genuinely bad (n=670tk, edge=-2.1%, P=0.892 -- keep
+        # blocking) but YES side is no longer bad, in fact mildly positive (n=604tk,
+        # edge=+2.5%, P=0.069, consistent-ish across 3 recent weeks: +1.6%/+4.4%
+        # P=0.045/+1.1%) -- blocking it was leaving ~$385/3wk on the table. Blocking BOTH
+        # sides was never separately justified once split; only ever validated pooled.
+        # See reform_results/eth15m_deepgate_20260718/s1_all_gates.py.
+        # Backup: paper_trade_runner_15m_pre_eth_deepgate_20260718.py
+        if asset.upper() == "ETH" and _markov_eth_daily == "Sideways" and best_side == "no":
+            print(f"    [eth_daily_sw_gate] BLOCK NO → skip — "
+                  f"ETH daily Markov=Sideways (NO side only, n=670tk edge=-2.1%)")
             evaluated.append((best_edge, best_side, c, p_model, offset_pct))
             continue
 
@@ -2292,28 +2577,26 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             if stoch >= 44:
                 best_side, best_edge = "no", edge_no
 
-        # [eth_15m_yes_lowvol_gate] Block YES when vol_ratio<0.80 + pm<0.65 unless OTM+cpu>=0.45.
+        # [eth_15m_yes_lowvol_gate] Block YES when vol_ratio<0.80 + pm<0.65.
         # Analysis (2026-05-23, n=82): WR=34.1%, BE=45.5%, P&L=-$644.
         # offset<-0.10% deep-ITM (n=29): WR=10.3%, -$551 — structurally unwinnable in low-vol.
-        # Rescue: offset_pct>=0 (ITM) + composite_p_up>=0.45 → n=30, WR=60.0%, +$182.
-        # Best rescue: OTM + cpu>=0.45 + ema_bias=-1 → n=24, WR=66.7%, +$241.
-        # Blocked remainder: WR=19.2%, -$825.
+        # [2026-07-18] Rescue (offset>=0+cpu>=0.45, orig n=30 WR=60.0%) REMOVED during a deep
+        # gate analysis. Re-checked on 2mo of real data (n=188tk, well past the original
+        # n=30): edge had inverted to -6.2%, P=0.955 -- negative in every week with data
+        # (05-11: -8.2%, 05-18: +1.0% flat, 05-25: -14.6%, 06-01: -7.5%, 06-08: -5.1%,
+        # never positive after the original validation window). The rescue had gone
+        # dormant after 06-14 but was actively losing (-$290 real, flat $25 stakes) the
+        # whole time it fired -- removed to prevent recurrence if the pm/vol_ratio/offset/
+        # cpu combination becomes reachable again. See
+        # reform_results/eth15m_deepgate_20260718/s1_all_gates.py.
+        # Backup: paper_trade_runner_15m_pre_eth_deepgate_20260718.py
         if asset.upper() == "ETH" and best_side == "yes":
             _vr_eth = float(sig.get("vol_ratio", 1.0) or 1.0)
             if _vr_eth < 0.80 and p_market < 0.65:
-                _cpu_eth = sig.get("composite_p_up")
-                _cpu_eth_f = float(_cpu_eth) if _cpu_eth is not None else 0.0
-                _lowvol_rescue = (offset_pct >= 0.0 and _cpu_eth_f >= 0.45)
-                if not _lowvol_rescue:
-                    print(f"    [eth_15m_yes_lowvol_gate] BLOCK YES→NO {ticker} — "
-                          f"vol_ratio={_vr_eth:.2f}<0.80, pm={p_market:.3f}<0.65, "
-                          f"offset={offset_pct:+.3f}%, cpu={_cpu_eth_f:.3f} "
-                          f"(rescue needs offset>=0+cpu>=0.45)")
-                    best_side, best_edge = "no", edge_no
-                else:
-                    print(f"    [eth_15m_yes_lowvol_gate] RESCUE YES {ticker} — "
-                          f"vol_ratio={_vr_eth:.2f}<0.80 but offset={offset_pct:+.3f}%>=0"
-                          f"+cpu={_cpu_eth_f:.3f}>=0.45 (WR=60-67%)")
+                print(f"    [eth_15m_yes_lowvol_gate] BLOCK YES→NO {ticker} — "
+                      f"vol_ratio={_vr_eth:.2f}<0.80, pm={p_market:.3f}<0.65 "
+                      f"(rescue removed 07-18, had inverted to -6.2% P=0.955)")
+                best_side, best_edge = "no", edge_no
 
         # [eth_15m_yes_lowcpu_gate] Hard block YES when composite_p_up<0.40.
         # Analysis (2026-05-23, n=27): WR=33.3%, BE=63.3%, P&L=-$348.
@@ -2833,7 +3116,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # Gates (validated on 784 resolved SOL 15m trades, flat $25 bet):
         #   6h Bull YES: block unless stoch_cross_1h=0           (rescue n=13, WR=62%, +$152)
         #   6h Bull NO:  block unless offset_pct ≤ −0.006        (rescue n=43, WR=72%, +$79)
-        #   4h Sideways YES: hard block (no profitable rescue)
+        #   4h Sideways YES: block unless stoch_k_1h ≤ 40         (added 2026-07-16, see below)
         #   4h Sideways NO:  block unless stoch_k_1h ≥ 90         (was 86.1)
         #   1h Sideways YES: block unless oi_chg_pct ≥ 0.0535    (rescue n=43, WR=63%, +$145)
         # Rescues are OR-combined: any rescue condition saves the contract regardless of
@@ -2863,6 +3146,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 or (_markov_sol_4h == "Sideways")
                 or (_markov_sol_1h == "Sideways" and _oi < 0.0535)
             )
+            # [2026-07-19] Reverted the 07-16 4h=Sideways YES rescue (stoch_k_1h<=40).
+            # User flagged SOL 15m live degraded steeply right after this landed (07-17
+            # onward); reverting to the pre-07-16 rescue set. See
+            # paper_trade_runner_15m_pre_sol_rescue_revert_20260719.py for the prior state.
             _rescue_yes = (
                 (_markov_sol_6h == "Bull"      and _sc1h == 0)
                 or (_markov_sol_1h == "Sideways" and _oi >= 0.0535)
@@ -2912,7 +3199,9 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # [sol_15m_yes_oi_vwap_gate] Hard block YES when OI declining or below VWAP + low pm.
         # Analysis (2026-05-23, n=107): WR=24.3%, BE=36.5%, P&L=-$364.
         # oi_chg_pct<-0.005 (distribution): n=69, WR=21.7%. vwap_dist<-0.01 (below VWAP): n=80, WR=26.2%.
-        # No rescue found — max WR=33.3% at n=9 across all tested features. Clean hard block.
+        # [2026-07-19] Reverted the 07-17 flip-chain rescue. User flagged SOL 15m live
+        # degraded steeply right after the 07-16/07-17 rescue additions landed; reverting
+        # to a pure block. See paper_trade_runner_15m_pre_sol_rescue_revert_20260719.py.
         if asset.upper() == "SOL" and best_side == "yes":
             _oi_sol = float(sig.get("oi_chg_pct", 0) or 0)
             _vd_sol = float(sig.get("vwap_dist", 0) or 0)
@@ -2943,13 +3232,35 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
 
         # [sol_15m_yes_offset_gate] Hard block YES when offset_pct in [-10%, 0%) — barely OTM zone.
         # Analysis (2026-05-23, n=34): WR=20.6%, BE≈50%, P&L≈-$500.
-        # Spot is below floor strike — YES needs a sharp upward move in 15 min. No rescue.
+        # Spot is below floor strike — YES needs a sharp upward move in 15 min.
+        # [2026-07-13] Flip-chain rescue: when this block's flip-to-NO would ALSO be
+        # blocked downstream by sol_15m_no_zdrift_gate (z_drift_6h<0.55), real data shows
+        # the ORIGINAL YES has genuine positive edge (n=69tk, YES edge=+10.4%,
+        # P(edge<=0)=0.008, 95% CI [+1.9%,+19.6%]) vs a near-flat -1.7% in the rest of the
+        # offset-block population (n=261tk). Consistent sign across May/Jun/Jul
+        # (+8.4/+2.3/+19.5pp), strengthening not decaying. Mechanism: strong OI-driven
+        # markov rescue (1h=Sideways, oi_chg>=0.0535) + compressed 6h drift together
+        # predict the strike is reached more often than either gate's own broad
+        # validation population implies — the flip+re-block chain was erasing this pocket.
+        # See reform_results/sol_hourly_20260710/s24_gate_chain_interaction.py.
+        # Backup: paper_trade_runner_15m_pre_flipchain_rescue_20260713.py
         if asset.upper() == "SOL" and best_side == "yes":
             if -10.0 <= offset_pct < 0.0:
-                print(f"    [sol_15m_yes_offset_gate] BLOCK YES→NO {ticker} — "
-                      f"offset={offset_pct:+.3f}%∈[-10%,0) "
-                      f"(OTM YES in barely-below-floor zone, WR=20.6%, no rescue)")
-                best_side, best_edge = "no", edge_no
+                _flipchain_rescue = (
+                    _markov_sol_1h == "Sideways" and _oi >= 0.0535
+                    and _z_drift_6h is not None and _z_drift_6h < 0.55
+                )
+                if _flipchain_rescue:
+                    print(f"    [sol_15m_yes_offset_gate] RESCUE YES {ticker} — "
+                          f"offset={offset_pct:+.3f}%∈[-10%,0) but flip-chain rescue: "
+                          f"1h=Sideways oi_chg={_oi:.4f}≥0.0535 + "
+                          f"z_drift={_z_drift_6h:+.4f}<0.55 "
+                          f"(n=69tk YES edge=+10.4% P=0.008, was erased by flip+re-block)")
+                else:
+                    print(f"    [sol_15m_yes_offset_gate] BLOCK YES→NO {ticker} — "
+                          f"offset={offset_pct:+.3f}%∈[-10%,0) "
+                          f"(OTM YES in barely-below-floor zone, WR=20.6%, no rescue)")
+                    best_side, best_edge = "no", edge_no
 
         # [sol_15m_yes_ou_theta_gate] Block YES when ou_theta>3.0 + pup<=0.55 + autocorr1_30<-0.008.
         # Analysis (2026-06-10, n=64 net-new): WR=32.8%, edge=-19.4%, PnL=-$488, MCPT p=0.0012.
@@ -3063,6 +3374,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         #   n=127, WR=59.8%, TRUE_BE=56.8%, +3.1pp, +$399, MCPT p=0.0018).
         # Replaces sol_15m_yes_stoch_oversold_gate (old offset>0.07 rescue was not significant).
         # Implemented 2026-06-30. Backup: paper_trade_runner_15m_pre_sol_yes_allow_gate_20260630.py
+        # [2026-07-19] Reverted the 07-17 markov-rescue bypass. User flagged SOL 15m live
+        # degraded steeply right after the 07-16/07-17 rescue additions landed; reverting
+        # to the gate's original unconditional form. See
+        # paper_trade_runner_15m_pre_sol_rescue_revert_20260719.py.
         if asset.upper() == "SOL" and best_side == "yes":
             _sk15m_yes = float(sig.get("stoch_k_15m", 50.0) or 50.0)
             try:
@@ -3182,7 +3497,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             p_model=p_model, raw_edge=best_edge, side="", decision="pass",
             sig=sig, kelly_fraction=0.0, bet_fraction=0.0,
             bet_amount=0.0, bankroll=bankroll, liq_signal=_liq_signal,
-            cg=_cg, spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
+            cg=_cg, spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h, is_live=is_live,
         )
         append_row(row, asset=asset)
 
@@ -3201,8 +3516,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     print(f"\n  [best] → {ticker} {side.upper()}  edge={best_edge:+.3f}"
           f"  ({len(candidates)} contract(s) qualified)")
 
-    # HMM State 7 → elevated Kelly cap (high-payout NO regime, +$116/trade historical)
-    _kelly_cap = MAX_BET_FRAC_ST7 if (asset == "BTC" and _hmm_state == 7) else MAX_BET_FRAC
+    _kelly_cap = MAX_BET_FRAC
     try:
         kelly = compute_kelly_size(
             p_model=p_model, p_market=p_market, bankroll=bankroll,
@@ -3232,16 +3546,21 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             print(f"    [res_damper] nearest_res={_res_dist:.2f}% ≤ 0.5% → Kelly ×0.5 "
                   f"(${_undampened:.2f} → ${kelly.bet_amount:.2f})")
 
-    # ETH YES Kelly dampener: all YES edge bands above [0.04,0.05) have negative flat PnL.
-    # Flat edge is inverted — higher raw_edge correlates with lower actual WR.
-    # 50% reduction approximately halves YES Kelly losses while preserving the only
-    # profitable YES band ([0.04,0.05), tiny Kelly anyway).
-    # Revert: remove this block.
-    if asset == "ETH" and side == "yes":
-        _undampened_eth = kelly.bet_amount
-        kelly.bet_amount = round(kelly.bet_amount * 0.5, 2)
-        print(f"    [eth_yes_kelly_damp] ETH YES ×0.5 "
-              f"(${_undampened_eth:.2f} → ${kelly.bet_amount:.2f})")
+    # ETH YES Kelly dampener REMOVED 2026-07-17. Was live since ~06-14, built on the
+    # pre-06-14 population where "all YES edge bands above [0.04,0.05) have negative
+    # flat PnL." That population no longer exists: taken YES since 06-15 (right after
+    # eth_gate_c_kelly + eth_15m_no_kc_gate went live) is genuinely positive and
+    # stable, not a lucky blip -- edge turned positive that week and has stayed
+    # positive every week since (weekly edge: +1.5%, +4.8%, +2.0%, +15.0%, +22.3%
+    # P=0.033, +5.3%; full post-06-15 population n=272tk, edge=+5.7%, P=0.021,
+    # significant). The ×0.5 halves real money on a population that's been proven
+    # profitable for 5+ consecutive weeks -- estimated ~$574 left on the table over
+    # that window alone (would-be PnL at full Kelly ~$1,149 vs actual $574 dampened).
+    # See reform_results/eth15m_profitability_20260717/s1_base_audit.py.
+    # Kept: the separate nearest_res_dist_pct<=0.5% dampener above (still directionally
+    # justified -- near-resistance YES edge +4.6% P=0.163 vs far +6.3% P=0.031 post-06-15,
+    # not clearly wrong, left untouched).
+    # Backup: paper_trade_runner_15m_pre_eth_yes_kelly_undamp_20260717.py
 
     # SOL YES Kelly dampener removed 2026-06-30: allow gate (stoch>=30 AND cvd4h>=0 OR
     # futures_delta>5M rescue) now isolates positive-edge YES bets (WR=62.1%, TRUE_BE=57.3%,
@@ -3280,6 +3599,39 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                       f"(${kelly.bet_amount:.2f} → ${_boosted:.2f})")
                 kelly.bet_amount = _boosted
 
+    # [sol_15m_no_feargreed_boost 2026-07-15] 1.3x Kelly for SOL NO when CoinGlass
+    # Fear&Greed is in [26,33] (mid-fear zone). Comprehensive sweep of the SOL 15m
+    # scan archive (10,401 rows, ticker-clustered, bootstrap P(edge<=0)): baseline
+    # NO edge overall is +2.8% (tk=3,516); in this zone it's +5.9% (tk=682); outside
+    # the zone it's still +2.0% (tk=2,835) -- so this is a boost region, not a
+    # block-elsewhere signal. 3/3 months positive (May/Jun/Jul), flat-$100 pnl on
+    # the zone alone: +$6,884. See reform_results/sol_hourly_20260710/s25_*.py.
+    if asset == "SOL" and side == "no" and _cg is not None:
+        _fg_sol = getattr(_cg, "fg_value", None)
+        if _fg_sol is not None and 26.0 <= float(_fg_sol) <= 33.0:
+            _boosted_fg = round(min(kelly.bet_amount * 1.3, MAX_BET_FRAC * bankroll), 2)
+            if _boosted_fg > kelly.bet_amount:
+                print(f"    [sol_15m_no_feargreed_boost] fear_greed={float(_fg_sol):.0f}∈[26,33] "
+                      f"→ Kelly ×1.3 (${kelly.bet_amount:.2f} → ${_boosted_fg:.2f})")
+                kelly.bet_amount = _boosted_fg
+
+    # [sol_15m_no_consecdir_boost 2026-07-15] 1.3x Kelly for SOL NO when consec_dir_1h>=3
+    # (3+ consecutive same-direction hourly bars, i.e. a sustained uptrend just prior).
+    # Same sweep: baseline NO edge +2.8% (tk=3,516); consec_dir_1h>=3 zone +5.9%
+    # (tk=408); consec_dir_1h<3 (complement) +2.4% (tk=3,108) -- boost, not block.
+    # Notably asymmetric: consec_dir_1h<=-3 (sustained DOWNtrend) shows -0.5% (tk=309,
+    # roughly flat) -- the mean-reversion edge is specific to prior up-streaks, not
+    # symmetric across both directions, so this boost is intentionally one-sided.
+    # 3/3 months positive, flat-$100 pnl on the zone alone: +$15,420.
+    if asset == "SOL" and side == "no":
+        _cd1h_sol = sig.get("consec_dir_1h")
+        if _cd1h_sol is not None and float(_cd1h_sol) >= 3.0:
+            _boosted_cd = round(min(kelly.bet_amount * 1.3, MAX_BET_FRAC * bankroll), 2)
+            if _boosted_cd > kelly.bet_amount:
+                print(f"    [sol_15m_no_consecdir_boost] consec_dir_1h={float(_cd1h_sol):.0f}>=3 "
+                      f"→ Kelly ×1.3 (${kelly.bet_amount:.2f} → ${_boosted_cd:.2f})")
+                kelly.bet_amount = _boosted_cd
+
     n_contracts = max(1, round(kelly.bet_amount / p_market)) if side == "yes" \
                   else max(1, round(kelly.bet_amount / (1 - p_market)))
     cost = round(n_contracts * (p_market if side == "yes" else 1 - p_market), 2)
@@ -3297,6 +3649,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         sig=sig, kelly_fraction=kelly.kelly_fraction,
         bet_fraction=kelly.bet_fraction, bet_amount=cost, bankroll=bankroll,
         liq_signal=_liq_signal, cg=_cg, spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
+        is_live=is_live,
     )
     append_row(row, asset=asset)
     if already_bet is not None:
@@ -3368,7 +3721,7 @@ def _build_row(
     asset, decision_time, ticker, close_time, spot, floor_s, offset_pct,
     tau_min, p_market, p_model, raw_edge, side, decision, sig,
     kelly_fraction, bet_fraction, bet_amount, bankroll,
-    liq_signal=None, cg=None, spread=0.0, cvd_4h=None,
+    liq_signal=None, cg=None, spread=0.0, cvd_4h=None, is_live=False,
 ) -> dict:
     def _f(v, d=4):
         try:
@@ -3436,6 +3789,7 @@ def _build_row(
         "chg_1h":               _f(sig.get("chg_1h")),
         "dir_1h":               sig.get("dir_1h", ""),
         "consec_dir_1h":        sig.get("consec_dir_1h", ""),
+        "donch_1h_pos":         _f(sig.get("donch_1h_pos"), 4),
         "stoch_k_1h":           _f(sig.get("stoch_k_1h"), 2),
         "stoch_cross_1h":       sig.get("stoch_cross_1h", ""),
         "rsi_1h":               _f(sig.get("rsi_1h"), 2),
@@ -3466,6 +3820,14 @@ def _build_row(
         # CoinGlass macro
         "fear_greed":           _f(cg.fg_value, 1)               if cg is not None else "",
         "cg_composite":         cg.composite_score                if cg is not None else "",
+        # [2026-07-18] Both computed and used live since inception (drive
+        # btc_15m_vwap_hmm_no_gates / vwap_hmm_st0_no_boost / sol_15m_cg_liq_yes_gate /
+        # sol_15m_vwap_hmm_gate respectively) but never had a dict key here -- every
+        # row logged blank since 07-01/07-09. Found during the deep-gate-analysis
+        # logging audit; live decisions were unaffected (they read sig directly), only
+        # the CSV audit trail was broken.
+        "vwap_hmm_state":       sig.get("vwap_hmm_state", ""),
+        "cg_flow_state":        sig.get("cg_flow_state", ""),
         "kelly_fraction":       round(kelly_fraction, 4),
         "bet_fraction":         round(bet_fraction, 4),
         "bet_amount":           round(bet_amount, 2),
@@ -3521,6 +3883,11 @@ def _build_row(
         "hurst_exponent_15m":   _f(sig.get("hurst_exponent_15m")),
         "ou_theta_15m":         _f(sig.get("ou_theta_15m")),
         "arima_forecast_15m":   _f(sig.get("arima_forecast_15m")),
+        "is_live":              1 if is_live else 0,
+        "eth_regime_bos":       sig.get("eth_regime_bos", ""),
+        "eth_bos_streak":       sig.get("eth_bos_streak", ""),
+        "eth_regime_state":     sig.get("eth_regime_state", ""),
+        "eth_regime_drift":     _f(sig.get("eth_regime_drift"), 4),
     }
 
 

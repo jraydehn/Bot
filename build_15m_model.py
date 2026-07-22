@@ -35,12 +35,51 @@ DATA_DIR   = "data"
 MODELS_DIR = "models"
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-# Offsets to simulate (fraction of spot price; positive = OTM YES / ITM NO)
+# Offsets to simulate (fraction of spot price; positive = OTM YES / ITM NO).
+# Fallback only -- run() derives a per-asset, real-data-representative grid via
+# derive_offset_grid() instead. [2026-07-21] The original 6-point grid left a
+# gap between 0% and 0.25% with zero training coverage, while real archive data
+# shows 48-64% of actual live candidates fall inside |offset|<0.10% -- measured
+# calibration in that zone was 2.3-3.2x worse (Brier) than the covered zone.
 OFFSETS = [-0.005, -0.0025, 0.0, 0.0025, 0.005, 0.010]
 TAU_MIN = 15.0   # all 15m contracts
 
-TRAIN_END = "2025-01-01"
-VAL_END   = "2025-07-01"
+
+def derive_offset_grid(sym: str, n_quantiles: int = 60) -> list:
+    """
+    Build a per-asset offset grid from real scan-archive offset_pct density,
+    instead of the fixed 6-point OFFSETS list. Quantile spacing naturally
+    concentrates points where real trading actually clusters (near-ATM) and
+    thins out in the tails, matching the empirical distribution rather than
+    an arbitrary uniform grid. Falls back to OFFSETS if the archive is
+    missing or too small to be informative.
+    """
+    path = f"results/{sym.lower()}_scan_archive_15m.csv"
+    try:
+        real = pd.read_csv(path, low_memory=False, usecols=["offset_pct"])
+        real["offset_pct"] = pd.to_numeric(real["offset_pct"], errors="coerce")
+        real = real["offset_pct"].dropna()
+        if len(real) < 500:
+            raise ValueError(f"too few real rows ({len(real)}) to derive a grid")
+    except Exception as exc:
+        print(f"  [offset_grid] {sym}: falling back to fixed OFFSETS ({exc})")
+        return OFFSETS
+
+    qs = np.linspace(0.01, 0.99, n_quantiles)
+    grid = np.quantile(real.values, qs) / 100.0   # offset_pct is in percent; OFFSETS is a fraction
+    grid = sorted(set(round(float(v), 5) for v in grid))
+    # keep the widest tail points from the fixed list too, so far-OTM/deep-ITM
+    # coverage isn't lost even though real density there is thin
+    for tail in (-0.005, 0.010):
+        if tail not in grid and (tail < grid[0] or tail > grid[-1]):
+            grid.append(tail)
+    grid = sorted(grid)
+    print(f"  [offset_grid] {sym}: {len(grid)} points, range [{grid[0]*100:+.3f}%, {grid[-1]*100:+.3f}%], "
+          f"derived from {len(real):,} real archive rows")
+    return grid
+
+TRAIN_END = "2025-07-01"
+VAL_END   = "2026-01-01"
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
@@ -169,15 +208,16 @@ def build_features(sym: str) -> pd.DataFrame:
     return base.dropna(subset=["spot","future_close"])
 
 
-def generate_training_rows(base: pd.DataFrame) -> pd.DataFrame:
+def generate_training_rows(base: pd.DataFrame, offsets=None) -> pd.DataFrame:
     """Expand each 15m bar into multiple contract rows (one per offset)."""
+    offsets = offsets if offsets is not None else OFFSETS
     rows = []
     for ts, row in base.iterrows():
         spot = float(row["spot"])
         fc   = float(row["future_close"])
         if spot <= 0 or fc <= 0:
             continue
-        for off in OFFSETS:
+        for off in offsets:
             floor_k = spot * (1 + off)
             resolved_yes = int(fc >= floor_k)
             # log-normal z as a feature
@@ -421,6 +461,16 @@ def run(assets=("BTC", "ETH", "SOL")):
         print(f"  Feature rows: {len(base):,}")
 
         print("  Step 2: Generating contract training rows...")
+        # [2026-07-21] derive_offset_grid() (dense, real-density-matched offsets) was
+        # tested and REJECTED -- real-market backtest showed calibration improved but
+        # realized PnL got consistently worse (BTC -$3,043, SOL -$9,336 across
+        # discovery+holdout; likely overfitting the noisiest near-ATM label region).
+        # Left the function in place for reference/future experimentation, but the
+        # fixed OFFSETS grid remains the default so a routine retrain doesn't silently
+        # reproduce the rejected result. (Also: the 15m models actually in production
+        # as of 2026-07-22 are trained on the real Kalshi archive via
+        # backfill_real_archive_15m.py + /tmp/train_final_real_archive.py, not this
+        # synthetic pipeline at all -- see project_15m_real_archive_retrain memory.)
         df = generate_training_rows(base)
         print(f"  Training rows: {len(df):,}  (YES rate: {df['resolved_yes'].mean():.3f})")
 

@@ -37,7 +37,7 @@ from confirmation_indicators import compute_confirmation
 from order_book import fetch_order_book_imbalance
 import btc_p_up_model as _btc_p_up_model
 import asset_p_up_model as _asset_p_up_model
-from pricing_comparison import simulate_p_market, evaluate_edge, DEFAULT_SLIPPAGE, DEFAULT_SPREAD, MIN_NET_EDGE
+from pricing_comparison import simulate_p_market, evaluate_edge, DEFAULT_SLIPPAGE, DEFAULT_SPREAD, MIN_NET_EDGE, kalshi_fee
 from decision import evaluate_trade
 from funding_rate import fetch_funding_rate, FundingRateResult
 import outcome_checker
@@ -45,6 +45,8 @@ import update_data
 import live_trading
 import gate_audit_logger
 from kelly_sizing import compute_kelly_size
+from drawdown_risk import kelly_dampener_multiplier, cascading_daily_loss_limit
+from price_extension_risk import donchian_dampener_multiplier
 from composite_scorer import compute_current_scores, compute_current_scores_30m, compute_current_scores_90m, score_to_p_model, score_to_p_no_model, composite_to_confirmation, lookup_p_up, lookup_p_up_blended, lookup_p_up_regime, K_DRIFT_NO_BTC, K_DRIFT_NO_ETH
 import direct_p_model
 from direct_p_model import compute_p_no_direct, no_model_supported
@@ -5001,7 +5003,8 @@ def main() -> None:
                     obi_score=confirm.obi_score, vol_score=confirm.vol_score,
                     ema_alignment=_ema_align, asset=args.asset,
                     composite_active=_composite_active, composite_p_up=_comp_p_up,
-                    offset_pct=offset_c, p_market_bid=c["bid"], p_market_ask=c["ask"])
+                    offset_pct=offset_c, composite_trend=float(_active_trend),
+                    p_market_bid=c["bid"], p_market_ask=c["ask"])
             # Update pm to side-specific fill-price reference:
             # YES bet fills at YES ask; NO bet fills at 1 - YES bid (so YES bid is reference).
             # Using bid/ask (not mid) prevents edge inflation on wide-spread contracts.
@@ -5056,6 +5059,16 @@ def main() -> None:
             }
 
             def _log_block(gate_name: str) -> None:
+                # [2026-07-22] Mark this candidate as gate-blocked so the "no trade passes
+                # gates, fall back to best seen" path (~line 6720/8124) can't silently
+                # resurrect it. Root-caused via real losing trades where a gate correctly
+                # printed "BLOCK NO" (e.g. rsi_overbought_no_gate, btc_pup_direction_gate)
+                # but the trade still executed and lost anyway, because best_any_dec was
+                # tracking dec_c by raw net_edge with no awareness that a gate had just
+                # rejected it. __rescue/__shadow suffixed calls are NOT real blocks (the
+                # candidate was allowed through), so they don't set this flag.
+                if not gate_name.endswith(("__rescue", "__shadow")):
+                    dec_c.gate_blocked = True
                 # count is only computed at order execution; estimate from bet_amount / cost_per_contract
                 _cost_per  = pm if dec_c.side == "yes" else max(1.0 - pm, 0.01)
                 _est_count = int(dec_c.bet_amount / _cost_per) if _cost_per > 0 else 0
@@ -6716,7 +6729,13 @@ def main() -> None:
                          "p_gbdt": _p_gbdt_c,
                          "p_up_v2": _comp_p_up_c if _composite_computed else None}
 
-            if best_any_dec is None or dec_c.net_edge > best_any_dec.net_edge:
+            # [2026-07-22] Exclude gate-blocked candidates from fallback eligibility --
+            # see _log_block's gate_blocked flag above. A candidate a gate explicitly
+            # rejected this cycle must not become the "best seen" fallback trade just
+            # because it has the highest raw net_edge; that's what let rsi_overbought_no_gate
+            # and btc_pup_direction_gate blocks get silently traded anyway.
+            if (not getattr(dec_c, "gate_blocked", False)
+                    and (best_any_dec is None or dec_c.net_edge > best_any_dec.net_edge)):
                 best_any_dec  = dec_c
                 best_any_meta = meta_c
 
@@ -6730,9 +6749,17 @@ def main() -> None:
             # Gate 2 (NO bullish streak stoch 30-60): BTC + ETH only — SOL 94.4% WR when blocked
             #   BTC rescue: chg_5m < 0 (5m already reversing) → 83.3% WR, +$122
             #   ETH rescue: stoch_k >= 45 (upper band) → 83.3% WR, +$75
-            # Gate 3 (NO stoch<20 block): BTC only — ETH/SOL both win 79-83% WR in this bucket
-            #   Rescue (2026-05-16): composite_rev >= 2 — oversold model signal overrides the gate.
-            #   blocked_trades sim (n=16, all stoch<30 + rev>=2): WR=87.5% BE=69.7% +17.8pp +$28.
+            # Gate 3 (NO stoch<20 block): DEMOTED TO SHADOW 2026-07-22. Was BTC-only, rev<2
+            # still blocked after the 2026-05-16 rev>=2 rescue (blocked_trades sim on the
+            # rescued pop: n=16, WR=87.5% BE=69.7%). Live audit of the STILL-BLOCKED (rev<2)
+            # population since: n=21 dedup / 11 independent episodes spread across 7 distinct
+            # weeks (2026-05-08 to 2026-07-20, not one lucky cluster), WR=90.5% vs BE=73.0%
+            # (+17.5pp), +$242. The rev<2 split no longer separates a losing population from
+            # the rev>=2 winners -- both sides of the split are winning live, so the block
+            # itself (not just the rescue) is the miscalibrated part. Folded into shadow
+            # rather than just widening the rescue, since n=21 doesn't support picking a new
+            # threshold with confidence. Gates 1/2 above are unaffected (checked separately,
+            # both near-breakeven and correctly calibrated).
             if dec_c.decision == "trade" and _streak30 is not None:
                 _sk = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
                 _gate = False
@@ -6768,16 +6795,9 @@ def main() -> None:
                         _gate = True
                         _gate_reason = f"streak30=bullish, stoch_k={_sk:.1f}, chg_5m={_sharp_move_pct_5m*100:+.2f}%"
                 elif dec_c.side == "no" and _sk < 20 and args.asset == "BTC":
-                    if _sharp_move_pct <= 0:
-                        if _active_rev >= 2:
-                            print(f"  [streak_gate] RESCUED NO {c['ticker']} — stoch_k={_sk:.1f}<20, chg_30m={_sharp_move_pct*100:+.2f}% BUT rev={_active_rev}>=2 (oversold, bounce imminent)")
-                            _log_block("streak_gate__rescue")  # rescue outcome logging (2026-07-01 audit)
-                        else:
-                            _gate = True
-                            _gate_reason = f"stoch_k={_sk:.1f}<20, chg_30m={_sharp_move_pct*100:+.2f}% (no bounce, rev={_active_rev}<2)"
-                    else:
-                        print(f"  [streak_gate] RESCUED NO {c['ticker']} — stoch_k={_sk:.1f}<20, chg_30m={_sharp_move_pct*100:+.2f}% (bounce active)")
-                        _log_block("streak_gate__rescue")  # rescue outcome logging (2026-07-01 audit)
+                    print(f"  [streak_gate] SHADOW (not blocked, edge unconfirmed live) NO "
+                          f"{c['ticker']} — stoch_k={_sk:.1f}<20, chg_30m={_sharp_move_pct*100:+.2f}% rev={_active_rev}")
+                    _log_block("streak_gate__shadow")
                 if _gate:
                     print(f"  [streak_gate] Blocked {dec_c.side.upper()} {c['ticker']} — {_gate_reason}")
                     _log_block("streak_gate")
@@ -7273,28 +7293,21 @@ def main() -> None:
                     _log_block("btc_nopup_gate")
                     continue
 
-            # [btc_cg_flow_no_gate] NARROWED + RE-ENABLED LIVE 2026-07-08. Original scope
-            # (block NO in {neutral(1), buy-flow(2), short-squeeze(5)}) was invalidated by a
-            # containing-bar lookahead in its validation (trades joined to the CG bar
-            # CONTAINING them, whose flow extends past the trade, vs the live decoder which
-            # only sees completed bars). Zero-lookahead re-join, ticker-deduped (527 real
-            # unique contracts, no pseudo-replication): buy-flow NO = +4.1pp P=0.174 (n.s.,
-            # NOT blocked-worthy) and short-squeeze too thin to assess -- both REMOVED from
-            # the block scope, shadow-log only. Only neutral(1) shows a real signal
-            # (-14.3pp, P=0.992, n=61 tickers) -- narrowed to neutral-only block, no rescue
-            # (kc_pct_1h rescue was validated against the old, larger, lookahead-flawed
-            # population and is not carried forward). Caveat: n=61 is still thin (~1 era,
-            # 3 weeks) -- reevaluate as more neutral-state volume accumulates. Fail-open:
-            # no state -> no gate. See project_btc_cg_flow_hmm_20260708 memory.
+            # [btc_cg_flow_no_gate] DEMOTED TO SHADOW-ONLY 2026-07-22 (all states). Was
+            # narrowed to a neutral(1)-only block 2026-07-08 on -14.3pp/P=0.992/n=61 tickers
+            # -- already flagged there as thin (P=0.992 is not a real significance bar) with
+            # an explicit "reevaluate in ~2 weeks" trigger. That review: post-narrow live
+            # fires (blocked_trades.csv, 2026-07-08 onward, deduped to 10 independent hourly
+            # episodes) show NO would have won 8/10 -- the OPPOSITE of what justified the
+            # block, i.e. it's been blocking mostly-correct NO bets. n=10 episodes is too
+            # thin to mine a rescue condition out of without overfitting, so per precedent
+            # (buy-flow/short-squeeze got the same treatment the same day this gate first
+            # deployed) it's demoted to shadow rather than patched. cg_state logging
+            # continues for all 3 states; re-evaluate again once more neutral-state volume
+            # accumulates. See project_btc_cg_flow_hmm_20260708 memory.
             if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
-                    and _cg_flow_state == 1):
-                print(f"  [btc_cg_flow_no_gate] BLOCK NO {c['ticker']} — "
-                      f"cg_state=neutral (WR=-14.3pp vs BE, real ticker-deduped data)")
-                _log_block("btc_cg_flow_no_gate")
-                continue
-            elif (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
-                    and _cg_flow_state in (2, 5)):
-                _cgf_names = {2: "buy-flow", 5: "short-squeeze"}
+                    and _cg_flow_state in (1, 2, 5)):
+                _cgf_names = {1: "neutral", 2: "buy-flow", 5: "short-squeeze"}
                 print(f"  [btc_cg_flow_no_gate] SHADOW (not blocked, no real edge) NO "
                       f"{c['ticker']} — cg_state={_cgf_names[_cg_flow_state]}")
                 _log_block("btc_cg_flow_no_gate__shadow")
@@ -7536,21 +7549,24 @@ def main() -> None:
             # Backup: paper_trade_runner_pre_of2_gate_removal_20260621.py (and _pre_of_hmm_gate_20260610.py).
             # _hmm_of_result still computed + logged (hmm_of_state CSV col) for shadow/analysis.
 
-            # [rsi_overbought_no_gate — BTC NO hard block]
-            # Block NO when rsi_1h>=70 AND pm<0.70 (overbought momentum, no valid rescue exists).
-            # chg_1h<0 structurally impossible when rsi_1h>=70 — all apparent rescues are artifacts.
-            # Blocked set: n=1,559, WR=26.9%, bkev=50.7%, edge=−23.8pp. 517 unique snapshots.
-            # pm<0.70 ceiling excludes deep-ITM range not well-represented in archive.
-            # Backup: paper_trade_runner_pre_stoch_rsi_gates_20260607.py
+            # [rsi_overbought_no_gate — DEMOTED TO SHADOW 2026-07-22]
+            # Original justification (n=1,559, WR=26.9%, edge=-23.8pp) was measured on RAW
+            # scan counts, not deduplicated ("517 unique snapshots" noted but not used for the
+            # WR calc) -- same repeat-scan inflation class as the BTC hourly LGBM backtest bug
+            # found earlier this session (a losing contract sits overbought for its whole life
+            # and gets rescanned/relogged many times, inflating apparent edge). Full live
+            # history since deploy (blocked_trades.csv, deduped to independent hourly
+            # episodes): 19 episodes, NO would have won 16/19 (84%) -- the OPPOSITE direction,
+            # consistent from the very first live fire (2026-06-11) through 2026-07-21, not a
+            # recent decay. n=19 is too thin to mine a rescue condition from. Demoted to
+            # shadow-only rather than patched, pending a clean re-validation.
             if (args.asset == "BTC" and dec_c.decision == "trade"
                     and dec_c.side == "no"
                     and _rsi_1h_mtf >= 70.0
                     and pm < 0.70):
-                print(f"  [rsi_overbought_no_gate] BLOCK NO {c['ticker']} — "
-                      f"rsi_1h={_rsi_1h_mtf:.1f}>=70 pm={pm:.3f}<0.70 "
-                      f"(overbought momentum, edge=−24pp vs bkev)")
-                _log_block("rsi_overbought_no_gate")
-                continue
+                print(f"  [rsi_overbought_no_gate] SHADOW (not blocked, edge unconfirmed live) "
+                      f"NO {c['ticker']} — rsi_1h={_rsi_1h_mtf:.1f}>=70 pm={pm:.3f}<0.70")
+                _log_block("rsi_overbought_no_gate__shadow")
 
             # [stoch_overbought_no_gate — BTC NO block]
             # Block NO when stoch_k_1h>70 AND chg_1h>=0 (overbought + still rising).
@@ -7648,10 +7664,26 @@ def main() -> None:
             # Scan archive deduped: BTC Δ=-14pp MCPT p=0.0002 (4/4 wks, n=142),
             # SOL Δ=-21pp p=0.0008 (5/5 wks, n=40), pm[0.50,0.80).
             # ETH borderline (p=0.03, n=53) — shadow only. Backup: paper_trade_runner_pre_cg_futures_cvd_gates_20260626.py
+            # [2026-07-17] pm band widened 0.50-0.80 -> 0.02-0.98. Found during a "was the
+            # CoinGlass tier worth it" audit: this gate had fired 2 times in 3+ weeks live
+            # despite its trigger condition (futures_ratio>1.05) being crossed 1,102 times
+            # in the same window -- not because the market condition is rare, but because
+            # real taken NO trades concentrate at LOW pm (median 0.25, 72% below 0.30) and
+            # almost never land in the validated [0.50,0.80) band. Real-data check (Binance-
+            # resolved outcomes, ticker-clustered bootstrap) across every pm band: the signal
+            # generalizes -- negative edge in every band tested (0-30%: edge=-4.5% P=0.930,
+            # 30-50%: -11.4% P=0.915, 50-80%: -10.8% P=0.898, 80-98%: -0.6% P=0.589). Full
+            # pm=[0.02,0.98) population: n=259 tk=259, edge=-5.5%, P=0.992 -- roughly 6.8x the
+            # $ this gate was catching in its old narrow band ($1,424 vs $210, flat $100
+            # stakes). Rescue logic (none on this gate) unaffected. Only the block condition's
+            # band widened -- the separate cg_futures_no_boost (opposite-direction condition,
+            # futures_ratio<0.90) was NOT re-validated at a wider band and is left untouched.
+            # See reform_results/cg_gate_reposition_20260717/s1_pm_band_check.py.
+            # Backup: paper_trade_runner_pre_cg_pmband_widen_20260717.py
             if (args.asset in ("BTC", "SOL") and dec_c.decision == "trade"
                     and dec_c.side == "no"
                     and _cg is not None and _cg.futures_ratio_4h > 1.05
-                    and 0.50 <= pm < 0.80):
+                    and 0.02 <= pm < 0.98):
                 print(f"  [cg_futures_no_gate] BLOCK NO {c['ticker']} — "
                       f"futures_ratio_4h={_cg.futures_ratio_4h:.4f}>1.05, pm={pm:.3f} "
                       f"(net buying pressure, NO loses)")
@@ -7665,11 +7697,19 @@ def main() -> None:
             # ETH: Δ=-23.6pp MCPT p=0.0000, 4/5 wks, n=57. Rescue impossible (max sub-WR=27.3%). Pure block.
             # Corr(spot,futures)=0.61 — partially orthogonal to cg_futures_no_gate.
             # Backup: paper_trade_runner_pre_spot_cvd_gates_20260626.py
+            # [2026-07-17] pm band widened 0.50-0.80 -> 0.02-0.98, same audit/methodology as
+            # cg_futures_no_gate above: 0 live fires in 3+ weeks despite trigger crossed 838
+            # times; real-data check across pm bands all negative (0-30%: -5.6% P=0.958,
+            # 30-50%: -21.8% P=0.992, 50-80%: -17.3% P=0.980, 80-98%: -0.0% P=0.518); full
+            # range n=241 tk=241 edge=-8.1% P=0.999, ~5.2x the $ vs the old band ($1,946 vs
+            # $373). Rescue (stoch_k>80, BTC only) left as originally scoped -- not
+            # re-validated at the wider band. cg_spot_no_boost (opposite condition) untouched.
+            # Backup: paper_trade_runner_pre_cg_pmband_widen_20260717.py
             _spot_ratio = _cg.spot_cb_ratio_4h if _cg is not None else 1.0
             if (args.asset in ("BTC", "ETH") and dec_c.decision == "trade"
                     and dec_c.side == "no"
                     and _spot_ratio > 1.05
-                    and 0.50 <= pm < 0.80):
+                    and 0.02 <= pm < 0.98):
                 _sk = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
                 _spot_rescued = (args.asset == "BTC" and _sk > 80)
                 if not _spot_rescued:
@@ -7692,12 +7732,20 @@ def main() -> None:
             # SOL: Δ=-16.2pp MCPT p=0.0032 5/5 wks n=48. Rescue impossible (max sub-WR=22.2%).
             # ETH: p=0.13 — skip.
             # Backup: paper_trade_runner_pre_liq_gates_20260626.py
+            # [2026-07-17] pm band widened 0.50-0.80 -> 0.02-0.98, same audit/methodology as
+            # the two gates above: only 4 live fires in 3+ weeks despite trigger crossed
+            # 1,569 times; real-data check across pm bands all negative (0-30%: -6.0%
+            # P=0.992, 30-50%: -18.3% P=0.997, 50-80%: -12.0% P=0.969, 80-98%: -1.2%
+            # P=0.653); full range n=387 tk=387 edge=-7.7% P=1.000, ~6.4x the $ vs the old
+            # band ($2,966 vs $467) -- the strongest and best-powered of the three.
+            # Rescue (stoch_k>80, BTC only) left as originally scoped.
+            # Backup: paper_trade_runner_pre_cg_pmband_widen_20260717.py
             _liq_ratio = _cg.liq_ratio_4h if _cg is not None else 1.0
             _liq_total = _cg.liq_total_4h if _cg is not None else 0.0
             if (args.asset in ("BTC", "SOL") and dec_c.decision == "trade"
                     and dec_c.side == "no"
                     and _liq_ratio < 0.70
-                    and 0.50 <= pm < 0.80):
+                    and 0.02 <= pm < 0.98):
                 _sk = confirm.stoch_k if confirm.stoch_k == confirm.stoch_k else 50.0
                 _liq_rescued = (args.asset == "BTC" and _sk > 80)
                 if not _liq_rescued:
@@ -7992,6 +8040,71 @@ def main() -> None:
                           f"opposes; re-check next cycle")
                     _log_block("wait_15m_agreement_gate")
                     continue
+
+            # [btc_trend_flip 2026-07-16, RELOCATED 2026-07-16] BTC hourly is ~90%
+            # NO-biased regardless of price direction. Real data: June (BTC -10.8%/14d,
+            # downtrend) was profitable (edge+3.4%, +$1,635); July (BTC +10.8%/14d,
+            # uptrend) lost (edge-5.6%, -$731) -- the SAME frozen pre-audit model
+            # degraded identically in July, ruling out the audit as cause.
+            # Real backtest (592 real taken NO trades, real Kalshi prices/outcomes,
+            # zero-lookahead trailing-return join): flip NO->YES when trailing 5-day
+            # BTC return >0% at decision time. Tested against BOTH the profitable
+            # June stretch and the losing July stretch: June impact +$1,177, July
+            # impact +$4,570, combined net +$5,747 vs actual +$763.
+            # RELOCATED from right after the initial evaluate_trade() call (where it
+            # first shipped) to HERE, the true end of the per-contract gate chain.
+            # Root cause of a same-day bug: at the original position, the flip ran
+            # BEFORE ~10 downstream YES-specific gates (hour_yes_gate, btc_adx_gate,
+            # btc_cal_err_yes_gate, bear_trend_yes_gate, fi_z2_yes_gate,
+            # btc_zdrift_yes_gate, liq_cascade_gate, btc_tau_gate,
+            # btc_yes_agree_breaker, wait_15m_agreement_gate...) that were calibrated
+            # on ORGANIC YES candidates, not flipped-from-NO ones. Live check
+            # (logs/paper_btc.log, 2026-07-16): 51/51 flip attempts got re-vetoed by
+            # one of these gates -- ZERO flips ever became an actual trade despite
+            # firing constantly. The 592-trade backtest that validated this mechanism
+            # implicitly tested "flip trades that already survived the full NO gate
+            # chain" with no further YES-gate filtering -- this position restores that
+            # exact assumption: dec_c has now passed every other gate as a genuine NO
+            # trade, and the flip only overrides the side label at the very last step,
+            # never re-entering any YES-specific gate.
+            # Flip keeps the same bet_amount already sized for the NO trade (matches
+            # exactly what was backtested -- no fresh Kelly recompute).
+            # Caveat: ~2mo real data, one regime transition only; the parameter
+            # (5d/0%) was chosen by comparing configs against this same window, so
+            # watch closely through the next reversal before trusting it further.
+            # [2026-07-17] Threshold raised 0% -> +1% (5d/1%, also net-positive in the
+            # original 4-config backtest, second-strongest). Live evidence at 0%: the
+            # only 3 flips fired (OLD model) came in a trailing_5d chop band of
+            # +0.08%..+0.28% -- knife-edge noise, not trend -- and went -$125.00,
+            # -$101.21, +$7.20 while the two losers flipped away NO wins of +$90.52
+            # and +$47.63 (net -$357 swing vs never flipping, n=3). The 1% floor
+            # would have prevented all three; the genuinely-trended regimes the
+            # mechanism was validated on (June -10.8%/14d, July +10.8%/14d) sat far
+            # beyond 1% and are unaffected.
+            # Backup: paper_trade_runner_pre_trend_flip_1pct_20260717.py
+            if (args.asset == "BTC" and dec_c.decision == "trade" and dec_c.side == "no"
+                    and df_confirm is not None and len(df_confirm) > 121):
+                _btc_close_hist = df_confirm["close"].astype(float)
+                _trend_5d = _btc_close_hist.iloc[-1] / _btc_close_hist.iloc[-121] - 1.0
+                if _trend_5d > 0.01:
+                    _flip_pm = c["ask"]
+                    print(f"  [btc_trend_flip] FLIP NO->YES {c['ticker']} — "
+                          f"trailing_5d={_trend_5d:+.2%}>1% "
+                          f"(bet_amount=${dec_c.bet_amount:.2f} unchanged, pm->{_flip_pm:.3f})")
+                    dec_c.side       = "yes"
+                    dec_c.p_market   = _flip_pm
+                    dec_c.raw_edge   = p_yes_adj_c - _flip_pm
+                    dec_c.net_edge   = p_yes_adj_c - _flip_pm - kalshi_fee(_flip_pm)
+                    dec_c.reasons    = dec_c.reasons + [
+                        f"btc_trend_flip: trailing_5d={_trend_5d:+.2%}>1% -> NO flipped to YES"
+                    ]
+                    pm = _flip_pm
+                    # meta_c["p_market"] is a snapshot taken earlier in the loop (pre-flip
+                    # NO-side pm) and is what `chosen`/`p_market` read from at final row-build
+                    # time (best_trade_meta = meta_c, by reference) -- must update in place or
+                    # the logged row ends up with side="yes" but a stale NO-side p_market,
+                    # inconsistent with dec.raw_edge/net_edge which DO reflect the flip.
+                    meta_c["p_market"] = _flip_pm
 
             if dec_c.decision == "trade":
                 if best_trade_dec is None or dec_c.net_edge > best_trade_dec.net_edge:
@@ -8392,6 +8505,39 @@ def main() -> None:
     if contract_ticker:
         print(f"  Contract: {contract_ticker}  close_ts={close_ts}")
 
+    # [2026-07-23 drawdown risk overlay] Applied last, after every other gate/
+    # boost/damper above, so it always has final say on size. Soft, continuous:
+    # reacts to causal drawdown-from-10d-peak (see drawdown_risk.py), not a
+    # predicted direction flip. Safe in both paper and live -- only shrinks
+    # size, never blocks a trade outright (the $3 min-bet check right below
+    # still applies to the dampened amount, so a bet dampened to near-zero is
+    # correctly skipped as too thin rather than placed anyway).
+    if dec.decision == "trade":
+        _dd_mult, _dd_reason = kelly_dampener_multiplier(get_csv_path(args.asset))
+        if _dd_mult < 1.0:
+            _undamped_dd = dec.bet_amount
+            dec.bet_amount = round(dec.bet_amount * _dd_mult, 2)
+            print(f"  [drawdown_dampener] {_dd_reason} (${_undamped_dd:.2f} → ${dec.bet_amount:.2f})")
+
+        # [2026-07-23 price-extension dampener] Independent of the drawdown
+        # dampener above -- reacts to real-time price structure (96h
+        # Donchian position), not lagging PnL. NO weakens near a fresh
+        # 4-day high, YES weakens near a fresh 4-day low; validated on all
+        # three assets' real hourly scan archives, split-half robust. Not
+        # redundant with btc_donch_high_no_gate's 20h hard block (BTC/ETH
+        # NO only): when that gate fires it already `continue`s before
+        # this runs, and the incremental (96h-extended, not 20h-extended)
+        # population still shows real negative NO edge -- see
+        # price_extension_risk.py docstring. drop_forming_bar=False:
+        # df_confirm's last row is already a completed bar (native
+        # parquet series), unlike the 15m runner's live-fetched series.
+        _pe_mult, _pe_reason = donchian_dampener_multiplier(
+            df_confirm, dec.side, drop_forming_bar=False)
+        if _pe_mult < 1.0:
+            _undamped_pe = dec.bet_amount
+            dec.bet_amount = round(dec.bet_amount * _pe_mult, 2)
+            print(f"  [price_extension_dampener] {_pe_reason} (${_undamped_pe:.2f} → ${dec.bet_amount:.2f})")
+
     # Minimum meaningful bet: skip if Kelly sizes below $3.
     # Prevents 1-contract $0.99 trades on deep ITM/OTM contracts where payoff is near-zero.
     if dec.decision == "trade" and dec.bet_amount < 3.0:
@@ -8419,7 +8565,15 @@ def main() -> None:
 
     if _is_live_or_dual and dec.decision == "trade" and auth is not None:
         _live_csv = live_trading.get_live_csv_path(args.asset)
-        _live_limit_ok = live_trading.check_daily_loss_limit(args.daily_loss_limit, _live_csv,
+        # [2026-07-23] Cascading loss limit: ratchets args.daily_loss_limit
+        # down after consecutive breach days (see drawdown_risk.py), computed
+        # from the paper CSV's fuller trailing history rather than the
+        # live-only exposure log. Resets to base after any clean day.
+        _eff_limit, _limit_reason = cascading_daily_loss_limit(
+            get_csv_path(args.asset), base_limit=args.daily_loss_limit)
+        if _eff_limit != args.daily_loss_limit:
+            print(f"  [loss_limit_cascade] {_limit_reason}")
+        _live_limit_ok = live_trading.check_daily_loss_limit(_eff_limit, _live_csv,
                                                              series="hourly")
 
         if _vol_skip_live:

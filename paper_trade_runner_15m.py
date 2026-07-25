@@ -52,6 +52,8 @@ from kalshi_python_sync import KalshiAuth
 from live_signal import load_auth, kalshi_get, fetch_live_spot, fetch_recent_candles, fetch_cvd_1h
 from kelly_sizing import compute_kelly_size
 from market_data import compute_realized_volatility
+from drawdown_risk import kelly_dampener_multiplier, cascading_daily_loss_limit
+from price_extension_risk import donchian_dampener_multiplier
 from probability_engine import implied_vol_from_price, blend_vol, REALIZED_VOL_WEIGHT_BY_ASSET
 from collections import deque as _deque
 
@@ -3516,10 +3518,24 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     print(f"\n  [best] → {ticker} {side.upper()}  edge={best_edge:+.3f}"
           f"  ({len(candidates)} contract(s) qualified)")
 
+    # [2026-07-23 kelly p_model fix] compute_kelly_size always expects p_model
+    # expressed as P(YES), regardless of side -- it derives P(NO) internally
+    # via (1 - p_model). For BTC's non-coherent convention, p_model on the NO
+    # branch is p_model_no = 1.0 - p_model_yes (a genuine, literal P(NO)), so
+    # passing it straight through double-inverts: the function computes
+    # p_yes_model=p_model_no and p_no_model=1-p_model_no=p_model_yes, i.e. the
+    # two probabilities get swapped. Confirmed against two real live scans:
+    # correct Kelly fractions of +16.2% (wrongly computed as -14.3%, killing a
+    # genuinely good trade) and +8.1% (wrongly computed as +57.7%, a ~7x
+    # oversize saved only by the 5% hard cap). ETH/SOL are unaffected --
+    # p_model_no already equals p_model_yes there (single shared model), so
+    # this recovers the same value and is a no-op.
+    p_model_for_kelly = (1.0 - p_model) if (side == "no" and asset == "BTC") else p_model
+
     _kelly_cap = MAX_BET_FRAC
     try:
         kelly = compute_kelly_size(
-            p_model=p_model, p_market=p_market, bankroll=bankroll,
+            p_model=p_model_for_kelly, p_market=p_market, bankroll=bankroll,
             kelly_multiplier=KELLY_MULT, side=side, max_bet_fraction=_kelly_cap,
         )
     except ValueError as e:
@@ -3632,6 +3648,30 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                       f"→ Kelly ×1.3 (${kelly.bet_amount:.2f} → ${_boosted_cd:.2f})")
                 kelly.bet_amount = _boosted_cd
 
+    # [2026-07-23 drawdown risk overlay] Applied last, after all other asset-
+    # specific boosts/dampers above, so it always has final say on size.
+    # Soft, continuous: reacts to causal drawdown-from-10d-peak, not a
+    # predicted direction flip -- see drawdown_risk.py docstring. Safe in
+    # both paper and live since it only shrinks size, never blocks a trade.
+    _dd_mult, _dd_reason = kelly_dampener_multiplier(_csv_path(asset))
+    if _dd_mult < 1.0:
+        _undamped_dd = kelly.bet_amount
+        kelly.bet_amount = round(kelly.bet_amount * _dd_mult, 2)
+        print(f"    [drawdown_dampener] {_dd_reason} "
+              f"(${_undamped_dd:.2f} → ${kelly.bet_amount:.2f})")
+
+    # [2026-07-23 price-extension dampener] Independent of the drawdown
+    # dampener above -- reacts to real-time price structure (96h Donchian
+    # position), not lagging PnL. NO weakens near a fresh 4-day high, YES
+    # weakens near a fresh 4-day low; validated on all three assets (real
+    # archive, split-half robust) -- see price_extension_risk.py docstring.
+    _pe_mult, _pe_reason = donchian_dampener_multiplier(live_1h, side)
+    if _pe_mult < 1.0:
+        _undamped_pe = kelly.bet_amount
+        kelly.bet_amount = round(kelly.bet_amount * _pe_mult, 2)
+        print(f"    [price_extension_dampener] {_pe_reason} "
+              f"(${_undamped_pe:.2f} → ${kelly.bet_amount:.2f})")
+
     n_contracts = max(1, round(kelly.bet_amount / p_market)) if side == "yes" \
                   else max(1, round(kelly.bet_amount / (1 - p_market)))
     cost = round(n_contracts * (p_market if side == "yes" else 1 - p_market), 2)
@@ -3659,7 +3699,15 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # ── Live order placement ──────────────────────────────────────────────────
     if is_live and auth is not None:
         _live_csv = live_trading.get_live_csv_path(asset)
-        if not live_trading.check_daily_loss_limit(daily_loss_limit or 150.0, _live_csv,
+        # [2026-07-23] Cascading loss limit: ratchets the base limit down
+        # after consecutive breach days (see drawdown_risk.py), computed
+        # from the paper CSV's fuller trailing history rather than the
+        # live-only exposure log. Resets to base after any clean day.
+        _eff_limit, _limit_reason = cascading_daily_loss_limit(
+            _csv_path(asset), base_limit=daily_loss_limit or 150.0)
+        if _eff_limit != (daily_loss_limit or 150.0):
+            print(f"    [loss_limit_cascade] {_limit_reason}")
+        if not live_trading.check_daily_loss_limit(_eff_limit, _live_csv,
                                                    series="15m"):
             print("  [live] Daily loss limit reached — skipping live order.")
         else:

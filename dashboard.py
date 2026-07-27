@@ -25,10 +25,27 @@ DISPLAY_FROM    = "2026-05-16 06:56:42"   # hide trades before this UTC time (da
 ASSET_DISPLAY_FROM = {
     "BTC": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 300)
     "ETH": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 240)
-    "SOL": "2026-07-07 20:13:00",  # cleared 2026-07-07 — sol_contrarian_ls_gate live, restart
+    "SOL": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 240)
+                                    # [restored 2026-07-17 per user request — the 07-12 clear was
+                                    # never instructed. See feedback_dashboard_clear_only_when_asked.md]
+    "BTC_OLD": "2026-07-21 17:27:13",  # cleared 2026-07-21 — ported 9 structural/infra bug
+                                    # fixes (schema drift, degenerate ms/vd/of HMM decode,
+                                    # per-runner stop-loss isolation, markov_yf NameError,
+                                    # missing gated-cycle marker row, p_up_v2/p_up_v3/pup15m
+                                    # shadow logging, etc.) into the frozen pre-July-1 file —
+                                    # gate/rescue/sizing logic is untouched, only correctness
+                                    # bugs unrelated to the model itself. Want a clean read
+                                    # isolated from the pre-fix period's HMM-decode etc. noise.
 }
 ASSET_DISPLAY_FROM_15M = {
     "BTC": "2026-06-29 23:31:53",  # cleared 2026-06-29 — 5m stoch zone gates live
+    "ETH": "2026-07-14 22:01:15",  # cleared 2026-07-14 — retrained lgbm_15m_eth.pkl deployed
+                                    # (train split extended thru 2025-07, val thru 2026-01);
+                                    # want a clean read isolated from the pre-retrain model
+                                    # [restored 2026-07-17 per user request after an
+                                    # unprompted clear for the eth_yes_kelly_damp removal —
+                                    # see project_eth15m_yes_kelly_undamp_20260717.md and
+                                    # feedback_dashboard_clear_only_when_asked.md]
     "SOL": "2026-06-18 06:18:28",  # unaffected by the 07-07 hourly-only clear — restores prior cutoff
                                     # (15m falls back to ASSET_DISPLAY_FROM when absent here, which
                                     # would otherwise incorrectly inherit the hourly-only 07-07 clear)
@@ -46,6 +63,11 @@ ASSET_CSV = {
     "BTC": RESULTS_DIR / "paper_trades.csv",
     "ETH": RESULTS_DIR / "paper_trades_eth.csv",
     "SOL": RESULTS_DIR / "paper_trades_sol.csv",
+    # [2026-07-12] Isolated pre-July-1 BTC hourly model, run standalone to test the
+    # user's "revert to old model" hypothesis without contaminating the current
+    # model's shared CSV/scan-archive/blocked-trades files. See
+    # project_btc_hourly_pre_july1_revert_test_20260712.md.
+    "BTC_OLD": RESULTS_DIR / "paper_trades_btc_OLD_pre_july1_test.csv",
 }
 
 ASSET_CSV_15M = {
@@ -205,6 +227,42 @@ def load_trades(asset: str) -> pd.DataFrame:
         df_15m["timeframe"] = "15m"
         df_15m["net_edge"]  = df_15m.get("raw_edge", pd.NA)
 
+        # [2026-07-20] Dedup live + paper-twin duplicate rows. When a live process
+        # and its paper twin both run for the same asset (see
+        # feedback_parallel_paper_runner), each independently evaluates every
+        # contract and logs its own row to the SAME paper_trades_{asset}15m.csv --
+        # e.g. ETH 15m since its 07-18 go-live. These are two real, distinct
+        # decisions (one real money, one simulated), not a data-corruption bug,
+        # but showing both inflates the dashboard's trade count / PnL ~2x.
+        # Merge rows within the same (contract_ticker, decision, side) group that
+        # land within 90s of the previous row into one "session", keeping the
+        # is_live=1 row (the real fill) when both exist. Adjacency-based (not a
+        # fixed time-grid floor) so a live/twin pair landing right on a minute
+        # boundary still merges correctly; 90s is well under the 5-min scan
+        # cadence (LOOP_INTERVAL_SEC), so genuinely distinct re-scans of an
+        # unresolved contract never collapse together. is_live is blank on rows
+        # logged before this column existed (pre-2026-07-20) -- those can't be
+        # tagged retroactively, so this only cleanly prefers the live row going
+        # forward (older rows still merge, just without a live/paper preference).
+        _key_cols = [c for c in ["contract_ticker", "decision", "side"] if c in df_15m.columns]
+        if _key_cols:
+            _ts = pd.to_datetime(df_15m["logged_at"], errors="coerce", utc=True)
+            _is_live_col = df_15m["is_live"] if "is_live" in df_15m.columns \
+                else pd.Series(0, index=df_15m.index)
+            _live_num = pd.to_numeric(_is_live_col, errors="coerce").fillna(0)
+            df_15m = df_15m.assign(_ts=_ts, _live=_live_num) \
+                            .sort_values(_key_cols + ["_ts"])
+            # dropna=False: "side" is blank/NaN for every "pass" decision row --
+            # groupby's default drop of NaN keys would otherwise exclude ALL pass
+            # rows from grouping, defeating the dedup for the far more common
+            # pass-decision duplicates.
+            _gap = df_15m.groupby(_key_cols, dropna=False)["_ts"].diff()
+            _new_session = _gap.isna() | (_gap > pd.Timedelta(seconds=90))
+            df_15m["_session"] = _new_session.cumsum()
+            df_15m = df_15m.sort_values("_live", ascending=False)
+            df_15m = df_15m.drop_duplicates(subset=_key_cols + ["_session"], keep="first")
+            df_15m = df_15m.drop(columns=["_ts", "_live", "_session"])
+
     frames = [f for f in [df_1h, df_15m] if not f.empty]
     if not frames:
         return pd.DataFrame()
@@ -363,22 +421,29 @@ def render_indicator_stats(resolved: pd.DataFrame):
         st.dataframe(styled_ind, use_container_width=True, height=min(38 * len(tbl) + 48, 320))
 
 
-def render_asset(asset: str):
-    spot_data = fetch_spot(asset)
+def render_asset(asset: str, csv_key: str = None, spot_asset: str = None, label: str = None):
+    """csv_key/spot_asset let a synthetic asset (e.g. "BTC_OLD") reuse a real
+    asset's spot-price source and composite-scorer display logic while loading
+    trades from its own dedicated CSV via ASSET_CSV[asset]."""
+    csv_key    = csv_key or asset
+    spot_asset = spot_asset or asset
+    display_label = label or asset
+
+    spot_data = fetch_spot(spot_asset)
     spot      = spot_data["avg"]
     prices    = spot_data["prices"]
 
     # Spot bar
     spot_cols = st.columns(len(prices) + 1)
     with spot_cols[0]:
-        st.metric(f"{asset} (avg)", f"${spot:,.2f}" if spot else "—")
+        st.metric(f"{display_label} (avg)", f"${spot:,.2f}" if spot else "—")
     for i, (name, price) in enumerate(prices.items()):
         spot_cols[i + 1].metric(name.capitalize(), f"${price:,.2f}")
 
     st.markdown("<hr style='margin:14px 0 12px 0;'>", unsafe_allow_html=True)
 
     # Load data
-    df_all = load_trades(asset)
+    df_all = load_trades(csv_key)
 
     if df_all.empty:
         st.markdown("<p style='color:#666;text-align:center;padding:30px 0;'>No trades logged yet.</p>", unsafe_allow_html=True)
@@ -444,7 +509,7 @@ def render_asset(asset: str):
     ls6.metric("Bet",       _fmt(latest.get("bet_amount"),  "${:,.0f}"))
 
     # Composite scorer row
-    if asset in ("BTC", "ETH", "SOL") and "composite_trend" in df.columns:
+    if spot_asset in ("BTC", "ETH", "SOL") and "composite_trend" in df.columns:
         cs1, cs2, cs3, cs4 = st.columns(4)
         comp_trend = latest.get("composite_trend", "—")
         comp_rev   = latest.get("composite_rev",   "—")
@@ -453,7 +518,7 @@ def render_asset(asset: str):
         cs2.metric("Composite Rev",    _fmt(comp_rev,   "{:+.0f}"))
         cs3.metric("Composite p_up",   _fmt(comp_p_up,  "{:.1%}"))
         _p_up_v = _f(comp_p_up)
-        _asset_base = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}.get(asset, 0.504)
+        _asset_base = {"BTC": 0.504, "ETH": 0.509, "SOL": 0.500}.get(spot_asset, 0.504)
         _edge_vs_base = _p_up_v - _asset_base if _p_up_v == _p_up_v else float("nan")
         cs4.metric("vs Baseline",      f"{_edge_vs_base:+.1%}" if _edge_vs_base == _edge_vs_base else "—")
 
@@ -817,7 +882,9 @@ st.markdown("<hr style='margin:12px 0 16px 0;'>", unsafe_allow_html=True)
 # Outer asset tabs
 # ---------------------------------------------------------------------------
 
-tab_btc, tab_eth, tab_sol, tab_cmp = st.tabs(["₿  BTC", "Ξ  ETH", "◎  SOL", "📊  Compare"])
+tab_btc, tab_eth, tab_sol, tab_btc_old, tab_cmp = st.tabs(
+    ["₿  BTC", "Ξ  ETH", "◎  SOL", "🕰️  BTC (OLD MODEL TEST)", "📊  Compare"]
+)
 
 with tab_btc:
     render_asset("BTC")
@@ -827,6 +894,17 @@ with tab_eth:
 
 with tab_sol:
     render_asset("SOL")
+
+with tab_btc_old:
+    st.markdown(
+        "<div style='color:#f0a500;font-size:0.78rem;margin-bottom:16px;'>"
+        "Standalone pre-July-1 BTC hourly model (commit 09df1d9), run in isolation to test "
+        "whether reverting fixes the post-audit degradation. Paper-only, own dedicated CSV — "
+        "does not share data with the BTC tab above."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    render_asset("BTC_OLD", csv_key="BTC_OLD", spot_asset="BTC", label="BTC (OLD)")
 
 with tab_cmp:
     st.markdown(

@@ -85,6 +85,10 @@ def main() -> None:
     parser.add_argument("--btc-loss-limit", type=float, default=250.0,
                         help="Daily loss limit for BTC live 15m runner (counts only this "
                              "runner's own 15m fills — per-runner stops since 2026-07-03)")
+    parser.add_argument("--eth-live", action="store_true",
+                        help="Run ETH 15m in live mode (place real orders)")
+    parser.add_argument("--eth-loss-limit", type=float, default=250.0,
+                        help="Daily loss limit for ETH live 15m runner")
     parser.add_argument("--skip", type=str, default="",
                         help="Comma-separated assets to NOT run here (e.g. BTC when a standalone "
                              "live 15m runner owns BTC — avoids two processes logging the same paper book)")
@@ -94,15 +98,16 @@ def main() -> None:
     assets = [
         (a, br, live, ll) for a, br, live, ll in [
             ("BTC", args.btc_bankroll, args.btc_live, args.btc_loss_limit),
-            ("ETH", args.eth_bankroll, False, 150.0),
+            ("ETH", args.eth_bankroll, args.eth_live, args.eth_loss_limit),
             ("SOL", args.sol_bankroll, args.sol_live, args.sol_loss_limit),
         ] if a not in _skip
     ]
 
     print("=" * 60)
     btc_mode = "LIVE" if args.btc_live else "paper"
+    eth_mode = "LIVE" if args.eth_live else "paper"
     sol_mode = "LIVE" if args.sol_live else "paper"
-    print(f"  15M TRADERS — BTC({btc_mode}) / ETH(paper) / SOL({sol_mode})")
+    print(f"  15M TRADERS — BTC({btc_mode}) / ETH({eth_mode}) / SOL({sol_mode})")
     print("=" * 60)
     for asset, br, live, ll in assets:
         live_tag = f"  LIVE loss-limit=${ll:.0f}" if live else ""

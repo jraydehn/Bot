@@ -52,7 +52,7 @@ from kalshi_python_sync import KalshiAuth
 from live_signal import load_auth, kalshi_get, fetch_live_spot, fetch_recent_candles, fetch_cvd_1h
 from kelly_sizing import compute_kelly_size
 from market_data import compute_realized_volatility
-from drawdown_risk import kelly_dampener_multiplier, cascading_daily_loss_limit
+from drawdown_risk import kelly_dampener_multiplier, cascading_daily_loss_limit, realized_edge_dampener_multiplier, losing_streak_active
 from price_extension_risk import donchian_dampener_multiplier
 from probability_engine import implied_vol_from_price, blend_vol, REALIZED_VOL_WEIGHT_BY_ASSET
 from collections import deque as _deque
@@ -483,6 +483,31 @@ MINS_PER_YEAR    = 525600.0
 # LightGBM models — loaded once per asset at startup, used in compute_p_model_15m
 _LGBM_MODELS: dict = {}
 
+# [2026-07-26 BTC KC mean-reversion correction] The deployed BTC LGBM
+# systematically OVER-reverts: on the real archive, resolved_yes minus p_pred
+# has Spearman +0.17..+0.20 vs every 5m/15m extension level (both time halves)
+# -- when price is extended high the model under-predicts YES, and vice versa.
+# Found via the 2026-07-26 full-history IC sweep (level mean-reversion is real,
+# IC -0.12, but the model overshoots it). Fix: centered isotonic correction of
+# p_model as a function of kc_pct_5m (5m Keltner channel position, completed
+# bars), fit on the full 05-25..07-22 real archive, capped at +/-0.10.
+# Out-of-sample validation (fit early half, test late half, single pre-declared
+# shot): +$907 (+5.6%), both sides improved, median changed-decision +$36, not
+# outlier-driven; late-Q1 +$1,040 / late-Q2 -$133 (time-varying -- hence
+# paper-first). np.interp on these knots reproduces the sklearn isotonic
+# exactly (verified to 1e-8). Centering (KC_REV_CENTER) makes the correction
+# zero-mean over the fit set -- only the SHAPE transfers, not the calibration
+# offset (the uncentered version LOST $800+ OOS). Refit at next BTC retrain.
+_KC_REV_X = [-0.9694, -0.6449, -0.643, -0.5597, -0.5554, -0.5516, -0.5486, -0.543,
+             -0.5392, -0.5384, -0.5364, 0.1838, 0.1839, 0.28, 0.28, 0.5126, 0.5126,
+             0.5247, 0.5247, 1.1269, 1.1281, 1.4848, 1.4907, 1.7153, 1.7487, 2.114]
+_KC_REV_Y = [-0.35886, -0.35886, -0.30382, -0.30382, -0.30362, -0.30362, -0.23703,
+             -0.23703, -0.10544, -0.10544, -0.07376, -0.07376, -0.05527, -0.05527,
+             -0.04551, -0.04551, -0.02859, -0.02859, -0.02436, -0.02436, -0.01597,
+             -0.01597, 0.05294, 0.05294, 0.41734, 0.41734]
+_KC_REV_CENTER = -0.04262
+_KC_REV_CAP = 0.10
+
 # 1h Markov regime cache — refreshed once per UTC hour via yfinance
 _MARKOV_1H_CACHE: dict = {"hour": None, "regime": None}
 # Multi-asset Markov regime cache (ETH/SOL) — refreshed once per UTC hour
@@ -681,7 +706,8 @@ CSV_COLUMNS = [
     "bp_1h", "chg_1h", "dir_1h", "consec_dir_1h",
     "stoch_k_1h", "stoch_cross_1h", "rsi_1h", "macd_hist_1h",
     "donchian_breakout_1h", "engulfing_1h",
-    "bb_pct_1h",
+    "bb_pct_1h", "bb_pct_trend3_1h", "wick_upper_1h", "wick_upper_trend3_1h", "wick_upper_trend12_1h",
+    "kalman_velocity_trend12_5m",
     # 1h rolling drift (matches branched 1h BTC model)
     "mu6h", "mu12h", "mu24h", "regime_z", "arima_forecast_1h",
     # 4h signals
@@ -755,7 +781,8 @@ CSV_COLUMNS = [
     # versions existed). kalman_velocity_15m is the live sol_15m_vwap_hmm_gates
     # rescue condition; the rest are shadow-logged for future re-validation.
     "kc_pct_5m", "kc_bo_5m", "kc_pct_15m", "kc_bo_15m",
-    "donch_breakout_5m", "donch_pos_5m", "donch_breakout_15m", "donch_pos_15m",
+    "donch_breakout_5m", "donch_pos_5m", "donch_trend3_5m", "donch_breakout_15m", "donch_pos_15m",
+    "vol_chg_15m", "vol_chg_trend12_15m", "wick_upper_15m", "wick_upper_trend12_15m",
     "stoch_cross_5m", "stoch_cross_15m",
     "kalman_velocity_5m", "kalman_residual_5m", "hurst_exponent_5m", "ou_theta_5m",
     "kalman_velocity_15m", "kalman_residual_15m", "hurst_exponent_15m", "ou_theta_15m",
@@ -772,6 +799,14 @@ CSV_COLUMNS = [
     # eth_regime_drift logs the actual z-space shift applied that scan (0 if the
     # state didn't match). ETH-only; blank for BTC/SOL.
     "eth_regime_bos", "eth_bos_streak", "eth_regime_state", "eth_regime_drift",
+    # [2026-07-26] BTC KC mean-reversion correction: shift applied to p_model
+    # as a function of kc_pct_5m (see _KC_REV_* constants). BTC-only; blank
+    # for ETH/SOL. kc_pct_5m itself logs via the existing column.
+    "kc_rev_shift_5m",
+    # [2026-07-27] SOL z-space recalibration: pre-expansion LGBM p (the logged
+    # p_model_15m is the EXPANDED value the decision used). SOL-only; blank
+    # for BTC/ETH.
+    "p_model_pre_expand",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -852,6 +887,33 @@ def ensure_csv(asset: str) -> None:
 def append_row(row: dict, asset: str) -> None:
     csv_path = _csv_path(asset)
     with _csv_lock(csv_path):
+        # [2026-07-25] Dedup guard for "trade" decisions only (never "pass" --
+        # those legitimately repeat every scan cycle for every non-winning
+        # candidate). Running live + paper-twin concurrently (intentional,
+        # see feedback_parallel_paper_runner) means both processes can
+        # independently reach the same "trade" decision for the same
+        # contract and each successfully append their own row -- the
+        # 2026-07-18 file-locking fix prevents write CORRUPTION but never
+        # addressed this, a logically-valid double-write from two real,
+        # separate decision-makers. Found 2026-07-25: 32 duplicate
+        # (contract_ticker, side) trade pairs from the 07-18/19 live+twin
+        # window, phantom-double-counting -$468.21 in aggregate PnL. Re-read
+        # under the SAME lock (not a separate check) so this can't itself
+        # race against a concurrent live/twin append.
+        if row.get("decision") == "trade" and csv_path.exists():
+            try:
+                existing = pd.read_csv(csv_path, usecols=["contract_ticker", "decision", "side"], low_memory=False)
+                dup = existing[
+                    (existing["decision"] == "trade")
+                    & (existing["contract_ticker"] == row.get("contract_ticker"))
+                    & (existing["side"] == row.get("side"))
+                ]
+                if len(dup) > 0:
+                    print(f"  [dedup_guard] SKIP duplicate trade row for {row.get('contract_ticker')} "
+                          f"{row.get('side')} -- already logged (live/twin race)")
+                    return
+            except Exception as e:
+                print(f"  [dedup_guard] check failed ({e}) -- logging anyway (fail-open)")
         with open(csv_path, "a", newline="") as f:
             w = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
             w.writerow(row)
@@ -1333,6 +1395,32 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC",
         if len(df5) >= 16:
             sig["stoch_k_5m"] = _stoch_k(df5["high"], df5["low"], df5["close"], 14)
 
+        # [2026-07-26] BTC-only: kc_pct_5m on COMPLETED 5m bars -- input to the
+        # KC mean-reversion p_model correction (_KC_REV_* constants above).
+        # Completed-bar filter by timestamp so the value matches the close-time
+        # -joined validation exactly regardless of whether df5 came from the
+        # direct 5m fetch (already completed) or the 1m resample (forming last
+        # bar). SOL's shortframe block computes its own kc_pct_5m later
+        # (forming-bar variant, unchanged).
+        if asset == "BTC" and len(df5) >= 21:
+            _now5_utc = pd.Timestamp.now(tz="UTC")
+            _df5_done = df5[df5.index + pd.Timedelta("5min") <= _now5_utc]
+            if len(_df5_done) >= 20:
+                _kc5_btc = _keltner_at(_df5_done)
+                sig["kc_pct_5m"] = _kc5_btc[0]
+                sig["kc_bo_5m"] = _kc5_btc[1]
+
+        # [2026-07-26] BTC-only: kalman_velocity_5m 12-bar (~1h) trend --
+        # YES losing-streak dampener precondition signal, see losing_streak_active().
+        # Computed via the same bounded-window Kalman filter used elsewhere
+        # (_kalman_hurst_ou_at), evaluated on the full window and again on the
+        # window trimmed by 12 bars, matching the donch_trend3_5m pattern.
+        if asset == "BTC" and len(df5) >= 76:
+            _kv_now = _kalman_hurst_ou_at(df5)["kalman_velocity"]
+            _kv_12ago = _kalman_hurst_ou_at(df5.iloc[:-12])["kalman_velocity"]
+            if _kv_now == _kv_now and _kv_12ago == _kv_12ago:
+                sig["kalman_velocity_trend12_5m"] = (_kv_now - _kv_12ago) / 12.0
+
     # 15m bars (resample from 1m)
     df15 = live_1m.resample("15min").agg(
         {"open": "first", "high": "max", "low": "min",
@@ -1568,6 +1656,26 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC",
         if _bb_rng > 0 and not np.isnan(_bb_rng):
             sig["bb_pct_1h"] = float(
                 (_c1h_f.iloc[-1] - float(_bb_lo.iloc[-1])) / _bb_rng)
+            # [2026-07-26] 3-bar (~3h) trend of bb_pct_1h -- ETH NO losing-streak
+            # boost precondition signal, see losing_streak_active().
+            if len(df1h_c) >= 8:
+                _bb_rng_3ago = float((_bb_hi - _bb_lo).iloc[-4])
+                if _bb_rng_3ago > 0 and not np.isnan(_bb_rng_3ago):
+                    _bb_pct_3ago = (float(_c1h_f.iloc[-4]) - float(_bb_lo.iloc[-4])) / _bb_rng_3ago
+                    sig["bb_pct_trend3_1h"] = (sig["bb_pct_1h"] - _bb_pct_3ago) / 3.0
+
+        # [2026-07-26] Upper-wick ratio on 1h bars + 3/12-bar trends -- BTC NO
+        # losing-streak boost precondition signal, see losing_streak_active().
+        if len(df1h_c) >= 14:
+            _h1 = df1h_c["high"].astype(float); _l1 = df1h_c["low"].astype(float)
+            _o1 = df1h_c["open"].astype(float); _c1 = df1h_c["close"].astype(float)
+            _wu1h_rng = (_h1 - _l1).replace(0, float("nan"))
+            _wu1h = (_h1 - pd.concat([_o1, _c1], axis=1).max(axis=1)) / _wu1h_rng
+            sig["wick_upper_1h"] = float(_wu1h.iloc[-1]) if not pd.isna(_wu1h.iloc[-1]) else float("nan")
+            if len(_wu1h) >= 4 and not pd.isna(_wu1h.iloc[-4]):
+                sig["wick_upper_trend3_1h"] = (sig["wick_upper_1h"] - float(_wu1h.iloc[-4])) / 3.0
+            if len(_wu1h) >= 13 and not pd.isna(_wu1h.iloc[-13]):
+                sig["wick_upper_trend12_1h"] = (sig["wick_upper_1h"] - float(_wu1h.iloc[-13])) / 12.0
 
         # Keltner Channel (EMA10 ± 1.5×ATR14): channel position and breakout flag.
         _kc_ema10  = _c1h_f.ewm(span=10, adjust=False).mean()
@@ -2000,6 +2108,36 @@ def compute_p_model_15m(spot: float, floor_strike: float,
                 "realized_vol_annual": sig.get("realized_vol_annual", 0.3),
             }])
             p_lgbm = float(lgbm_model.predict_proba(feat)[0, 1])
+            # [2026-07-26] BTC KC mean-reversion correction -- see _KC_REV_*
+            # constants for rationale/validation. Zero-mean shape correction:
+            # un-does the model's excess reversion at 5m Keltner extremes.
+            if asset.upper() == "BTC":
+                _kc5 = sig.get("kc_pct_5m")
+                if isinstance(_kc5, (int, float)) and _kc5 == _kc5:
+                    _shift = float(np.clip(
+                        np.interp(_kc5, _KC_REV_X, _KC_REV_Y) - _KC_REV_CENTER,
+                        -_KC_REV_CAP, _KC_REV_CAP))
+                    sig["kc_rev_shift_5m"] = round(_shift, 4)
+                    if abs(_shift) >= 0.02:
+                        print(f"  [btc_kc_reversion] kc_pct_5m={_kc5:+.3f} → "
+                              f"p_model {p_lgbm:.4f} {'+' if _shift >= 0 else ''}{_shift:.4f}")
+                    p_lgbm = p_lgbm + _shift
+            # [2026-07-27 SOL z-space recalibration expansion] SOL's isotonic
+            # calibrator compresses deviations (~9 output plateaus): calibration
+            # slope of resolved_yes on (p-0.5) is 1.8-2.5 in EVERY liq regime
+            # and both archive halves -- deviations are ~2x undersized, leaving
+            # real-edge trades below the 0.04 threshold. Fix: z-space expansion
+            # p' = Phi(Phi^-1(p) * 1.8). Validated fit-early/test-late single
+            # shot: OOS +$4,527 (+22%), both OOS quarters positive, 0 side
+            # flips, added trades avg +$10.93 (not outlier-driven), dropped
+            # trades were net losers. k=1.8 validated EXACTLY -- do not raise
+            # without a fresh OOS test; retire/refit at next SOL retrain (the
+            # durable fix is uncompressed calibration). BTC/ETH tested with the
+            # same protocol: no coherent effect -- SOL only. Pre-expansion p
+            # logged as p_model_pre_expand for audit.
+            if asset.upper() == "SOL":
+                sig["p_model_pre_expand"] = round(p_lgbm, 4)
+                p_lgbm = float(norm.cdf(norm.ppf(min(max(p_lgbm, 0.01), 0.99)) * 1.8))
             return max(0.05, min(0.96, p_lgbm))
         except Exception as _e:
             print(f"  [{asset.lower()}_15m_lgbm] inference error: {_e}")
@@ -2316,7 +2454,28 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         _kc5 = _keltner_at(df5); sig["kc_pct_5m"] = _kc5[0]; sig["kc_bo_5m"] = _kc5[1]
         _kc15 = _keltner_at(df15); sig["kc_pct_15m"] = _kc15[0]; sig["kc_bo_15m"] = _kc15[1]
         _dc5 = _donchian_at(df5); sig["donch_breakout_5m"] = _dc5[0]; sig["donch_pos_5m"] = _dc5[1]
+        _dc5_3ago = _donchian_at(df5.iloc[:-3]) if len(df5) >= 23 else (float("nan"), float("nan"))
+        sig["donch_trend3_5m"] = (
+            (_dc5[1] - _dc5_3ago[1]) / 3.0
+            if _dc5[1] == _dc5[1] and _dc5_3ago[1] == _dc5_3ago[1] else float("nan")
+        )
         _dc15 = _donchian_at(df15); sig["donch_breakout_15m"] = _dc15[0]; sig["donch_pos_15m"] = _dc15[1]
+        # [2026-07-26] vol_chg_15m / wick_upper_15m + their 12-bar (~3h) trends --
+        # precondition-gated boosts, see losing_streak_active().
+        _vc15 = (df15["volume"] / df15["volume"].rolling(20).mean()).clip(0, 5)
+        sig["vol_chg_15m"] = float(_vc15.iloc[-1]) if len(_vc15) >= 1 and not pd.isna(_vc15.iloc[-1]) else float("nan")
+        _vc15_12ago = float(_vc15.iloc[-13]) if len(_vc15) >= 13 and not pd.isna(_vc15.iloc[-13]) else float("nan")
+        sig["vol_chg_trend12_15m"] = (
+            (sig["vol_chg_15m"] - _vc15_12ago) / 12.0
+            if sig["vol_chg_15m"] == sig["vol_chg_15m"] and _vc15_12ago == _vc15_12ago else float("nan")
+        )
+        _wu15 = (df15["high"] - pd.concat([df15["open"], df15["close"]], axis=1).max(axis=1)) / (df15["high"] - df15["low"]).replace(0, float("nan"))
+        sig["wick_upper_15m"] = float(_wu15.iloc[-1]) if len(_wu15) >= 1 and not pd.isna(_wu15.iloc[-1]) else float("nan")
+        _wu15_12ago = float(_wu15.iloc[-13]) if len(_wu15) >= 13 and not pd.isna(_wu15.iloc[-13]) else float("nan")
+        sig["wick_upper_trend12_15m"] = (
+            (sig["wick_upper_15m"] - _wu15_12ago) / 12.0
+            if sig["wick_upper_15m"] == sig["wick_upper_15m"] and _wu15_12ago == _wu15_12ago else float("nan")
+        )
         sig["stoch_cross_5m"] = _stoch_cross_at(df5)
         sig["stoch_cross_15m"] = _stoch_cross_at(df15)
         _kho5 = _kalman_hurst_ou_at(df5)
@@ -3648,6 +3807,56 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                       f"→ Kelly ×1.3 (${kelly.bet_amount:.2f} → ${_boosted_cd:.2f})")
                 kelly.bet_amount = _boosted_cd
 
+    # [losing_streak_boost 2026-07-26] Conditional boosts/dampener, all requiring
+    # an ACTIVE losing streak (>=2 straight losses, either side, causal) as a
+    # precondition -- each pattern only exists within that regime. Found via the
+    # same streak-conditioned trend sweep run separately per asset (never ported
+    # cross-asset -- see feedback_eth_sol_model_approach). SOL's two are BOOSTS
+    # (worst-quartile-in-losing-streak stays net-positive, so dampening would cut
+    # real profit); BTC's kalman_velocity one is a genuine DAMPENER -- its worst
+    # quartile is net-NEGATIVE in dollars, the only such case found across all
+    # three assets. Real archive validation for all: leak-checked (close-time
+    # join), pseudo-replication-checked, quartile-monotonic, two-way split-half
+    # stable. Single 58-day archive per asset -- paper-only until this
+    # replicates on fresh data.
+    _is_ls, _streak_in, _streak_reason = losing_streak_active(_csv_path(asset))
+    if asset == "SOL" and _is_ls:
+        if side == "no":
+            _vc12 = sig.get("vol_chg_trend12_15m")
+            if isinstance(_vc12, (int, float)) and _vc12 == _vc12 and _vc12 <= -0.0368:
+                _boosted_ls = round(min(kelly.bet_amount * 1.3, MAX_BET_FRAC * bankroll), 2)
+                if _boosted_ls > kelly.bet_amount:
+                    print(f"    [sol_15m_losing_streak_no_boost] {_streak_reason}, "
+                          f"vol_chg_trend12_15m={_vc12:+.4f}<=-0.0368 → Kelly ×1.3 "
+                          f"(${kelly.bet_amount:.2f} → ${_boosted_ls:.2f})")
+                    kelly.bet_amount = _boosted_ls
+        elif side == "yes":
+            _wu12 = sig.get("wick_upper_trend12_15m")
+            if isinstance(_wu12, (int, float)) and _wu12 == _wu12 and _wu12 > 0.00833:
+                _boosted_ls = round(min(kelly.bet_amount * 1.3, MAX_BET_FRAC * bankroll), 2)
+                if _boosted_ls > kelly.bet_amount:
+                    print(f"    [sol_15m_losing_streak_yes_boost] {_streak_reason}, "
+                          f"wick_upper_trend12_15m={_wu12:+.4f}>0.00833 → Kelly ×1.3 "
+                          f"(${kelly.bet_amount:.2f} → ${_boosted_ls:.2f})")
+                    kelly.bet_amount = _boosted_ls
+    elif asset == "BTC" and _is_ls and side == "yes":
+        _kv12 = sig.get("kalman_velocity_trend12_5m")
+        if isinstance(_kv12, (int, float)) and _kv12 == _kv12 and _kv12 > 4.72e-05:
+            _undamped_ls = kelly.bet_amount
+            kelly.bet_amount = round(kelly.bet_amount * 0.4, 2)
+            print(f"    [btc_15m_losing_streak_yes_dampener] {_streak_reason}, "
+                  f"kalman_velocity_trend12_5m={_kv12:+.6f}>4.72e-05 → Kelly ×0.4 "
+                  f"(${_undamped_ls:.2f} → ${kelly.bet_amount:.2f})")
+    elif asset == "ETH" and _is_ls and side == "no":
+        _bb3 = sig.get("bb_pct_trend3_1h")
+        if isinstance(_bb3, (int, float)) and _bb3 == _bb3 and _bb3 <= -0.0178:
+            _boosted_ls = round(min(kelly.bet_amount * 1.3, MAX_BET_FRAC * bankroll), 2)
+            if _boosted_ls > kelly.bet_amount:
+                print(f"    [eth_15m_losing_streak_no_boost] {_streak_reason}, "
+                      f"bb_pct_trend3_1h={_bb3:+.4f}<=-0.0178 → Kelly ×1.3 "
+                      f"(${kelly.bet_amount:.2f} → ${_boosted_ls:.2f})")
+                kelly.bet_amount = _boosted_ls
+
     # [2026-07-23 drawdown risk overlay] Applied last, after all other asset-
     # specific boosts/dampers above, so it always has final say on size.
     # Soft, continuous: reacts to causal drawdown-from-10d-peak, not a
@@ -3671,6 +3880,32 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         kelly.bet_amount = round(kelly.bet_amount * _pe_mult, 2)
         print(f"    [price_extension_dampener] {_pe_reason} "
               f"(${_undamped_pe:.2f} → ${kelly.bet_amount:.2f})")
+
+    # [2026-07-25 realized-edge dampener] Independent of both dampeners
+    # above -- reacts to trailing REALIZED trade-count-windowed edge, a
+    # faster (~20-trade, not 10-day or 96h) timescale than either. Added
+    # after SOL 15m round-tripped +$1,190 -> +$42 -> +$399 within one
+    # calendar day and neither other mechanism engaged. BTC/ETH only --
+    # SOL's realized edge showed genuine negative autocorrelation in
+    # backtest (bad stretches predict recoveries, not continuations; this
+    # mechanism would have systematically dampened right before SOL's
+    # bounces) -- see drawdown_risk.py docstring point 3. The function
+    # itself refuses to dampen SOL, this call is asset-agnostic by design.
+    _re_mult, _re_reason = realized_edge_dampener_multiplier(_csv_path(asset), asset)
+    if _re_mult < 1.0:
+        _undamped_re = kelly.bet_amount
+        kelly.bet_amount = round(kelly.bet_amount * _re_mult, 2)
+        print(f"    [realized_edge_dampener] {_re_reason} "
+              f"(${_undamped_re:.2f} → ${kelly.bet_amount:.2f})")
+
+    # [2026-07-25 donch-trend dampener] REVERTED 2026-07-26 -- the validating
+    # backtest had a containing-bar lookahead bug (archive joined on signal
+    # bar OPEN time instead of CLOSE time, so a decision mid-bar could see
+    # that bar's not-yet-happened close price). Re-validated with a
+    # corrected close-time join: the "flagged" bucket's edge flips from
+    # -2.14pp to +13.71pp -- indistinguishable from the rest of the book.
+    # The signal never existed; donch_trend3_5m is still computed/logged
+    # above (harmless, correctly real-time live) but no longer dampens.
 
     n_contracts = max(1, round(kelly.bet_amount / p_market)) if side == "yes" \
                   else max(1, round(kelly.bet_amount / (1 - p_market)))
@@ -3845,6 +4080,11 @@ def _build_row(
         "donchian_breakout_1h": sig.get("donchian_breakout_1h", ""),
         "engulfing_1h":         sig.get("engulfing_1h", ""),
         "bb_pct_1h":            _f(sig.get("bb_pct_1h")),
+        "bb_pct_trend3_1h":     _f(sig.get("bb_pct_trend3_1h"), 4),
+        "wick_upper_1h":        _f(sig.get("wick_upper_1h")),
+        "wick_upper_trend3_1h": _f(sig.get("wick_upper_trend3_1h"), 4),
+        "wick_upper_trend12_1h": _f(sig.get("wick_upper_trend12_1h"), 4),
+        "kalman_velocity_trend12_5m": _f(sig.get("kalman_velocity_trend12_5m"), 6),
         # 1h rolling drift
         "mu6h":                 _f(sig.get("mu6h"), 7),
         "mu12h":                _f(sig.get("mu12h"), 7),
@@ -3914,10 +4154,17 @@ def _build_row(
         # 2026-07-08: SOL short-timeframe VWAP HMM rescue signals (blank for BTC/ETH)
         "kc_pct_5m":            _f(sig.get("kc_pct_5m")),
         "kc_bo_5m":             sig.get("kc_bo_5m", ""),
+        "kc_rev_shift_5m":      _f(sig.get("kc_rev_shift_5m"), 4),
+        "p_model_pre_expand":   _f(sig.get("p_model_pre_expand"), 4),
         "kc_pct_15m":           _f(sig.get("kc_pct_15m")),
         "kc_bo_15m":            sig.get("kc_bo_15m", ""),
         "donch_breakout_5m":    sig.get("donch_breakout_5m", ""),
         "donch_pos_5m":         _f(sig.get("donch_pos_5m")),
+        "donch_trend3_5m":      _f(sig.get("donch_trend3_5m"), 4),
+        "vol_chg_15m":          _f(sig.get("vol_chg_15m")),
+        "vol_chg_trend12_15m":  _f(sig.get("vol_chg_trend12_15m"), 4),
+        "wick_upper_15m":       _f(sig.get("wick_upper_15m")),
+        "wick_upper_trend12_15m": _f(sig.get("wick_upper_trend12_15m"), 4),
         "donch_breakout_15m":   sig.get("donch_breakout_15m", ""),
         "donch_pos_15m":        _f(sig.get("donch_pos_15m")),
         "stoch_cross_5m":       sig.get("stoch_cross_5m", ""),
@@ -3959,13 +4206,27 @@ def main() -> None:
                         help=f"Run continuously, scanning every {LOOP_INTERVAL_SEC // 60} minutes")
     parser.add_argument("--live", action="store_true",
                         help="Place real orders on Kalshi (default: paper only)")
+    parser.add_argument("--dual", action="store_true",
+                        help="Single-process live+paper: places real orders AND logs the paper "
+                             "record from the SAME evaluation cycle/market snapshot (mirrors the "
+                             "hourly runner's --dual). Use this instead of running a separate "
+                             "--live process alongside a plain paper-twin process -- those are two "
+                             "independent processes on independent clocks that can evaluate the "
+                             "same contract minutes apart at different prices/edges/sizes. Do NOT "
+                             "run a --dual process together with a separate paper-twin for the same "
+                             "asset -- that reintroduces the exact live/twin double-write problem "
+                             "--dual exists to avoid (see the 2026-07-25 dedup_guard fix).")
     parser.add_argument("--daily-loss-limit", type=float, default=150.0,
                         help="Max daily loss in dollars before halting live orders (default: $150)")
     args = parser.parse_args()
     asset = args.asset.upper()
+    _is_live_or_dual = args.live or args.dual
 
     # Single-process-per-asset guard — prevents watchdog from spawning duplicates.
-    _lock_prefix = "live_trade_15m" if args.live else "paper_trade_15m"
+    # --dual shares the live lock name: it places real orders, so it must be
+    # mutually exclusive with a plain --live process the same way --live is
+    # exclusive with itself.
+    _lock_prefix = "live_trade_15m" if _is_live_or_dual else "paper_trade_15m"
     _lock_path = Path(__file__).parent / f".{_lock_prefix}_{asset}.lock"
     _lock_fd = open(_lock_path, "w")
     try:
@@ -3975,14 +4236,15 @@ def main() -> None:
         sys.exit(1)
 
     series = ASSET_CONFIG[asset]["series_ticker"]
+    _mode_label = "DUAL" if args.dual else ("LIVE" if args.live else "paper")
     print("=" * 60)
     print(f"  {asset} 15M PAPER TRADER  ({series})")
     print("=" * 60)
     print(f"  Bankroll: ${args.bankroll:,.2f}")
     print(f"  Edge threshold: {EDGE_THRESHOLD:.2f}")
     print(f"  Kelly multiplier: {KELLY_MULT:.0%}")
-    print(f"  Mode: {'*** LIVE ***' if args.live else 'paper'}")
-    if args.live:
+    print(f"  Mode: {'*** ' + _mode_label + ' ***' if _is_live_or_dual else _mode_label}")
+    if _is_live_or_dual:
         print(f"  Daily loss limit: ${args.daily_loss_limit:.0f}")
     if args.loop:
         print(f"  Loop mode: ON (every {LOOP_INTERVAL_SEC // 60} min)")
@@ -3995,7 +4257,7 @@ def main() -> None:
 
     _LGBM_MODELS[asset] = _load_15m_lgbm(asset)
 
-    if args.live:
+    if _is_live_or_dual:
         _live_csv = live_trading.get_live_csv_path(asset)
         live_trading.ensure_live_csv_exists(_live_csv)
         print(f"  Live CSV: {_live_csv}")
@@ -4024,9 +4286,9 @@ def main() -> None:
 
     if not args.loop:
         print("\nChecking pending resolutions...")
-        resolve_pending(auth, asset, is_live=args.live)
+        resolve_pending(auth, asset, is_live=_is_live_or_dual)
         run_scan(auth, args.bankroll, asset, already_bet=already_bet,
-                 is_live=args.live, daily_loss_limit=args.daily_loss_limit)
+                 is_live=_is_live_or_dual, daily_loss_limit=args.daily_loss_limit)
         return
 
     scan_count = 0
@@ -4034,7 +4296,7 @@ def main() -> None:
         scan_count += 1
         print(f"\n  [loop] Scan #{scan_count}  (session bets: {len(already_bet)})")
         try:
-            resolve_pending(auth, asset, is_live=args.live)
+            resolve_pending(auth, asset, is_live=_is_live_or_dual)
             if scan_count % 3 == 0:
                 try:
                     import scan_archive_15m as _sa15
@@ -4042,7 +4304,7 @@ def main() -> None:
                 except Exception:
                     pass
             run_scan(auth, args.bankroll, asset, already_bet=already_bet,
-                     is_live=args.live, daily_loss_limit=args.daily_loss_limit)
+                     is_live=_is_live_or_dual, daily_loss_limit=args.daily_loss_limit)
         except KeyboardInterrupt:
             print("\n  [loop] Stopped by user.")
             break

@@ -194,6 +194,7 @@ def evaluate_trade(
     composite_active: bool = False,
     composite_p_up: float = 0.504,
     offset_pct: float = 0.0,
+    composite_trend: float = 0.0,
     p_market_bid: float = None,
     p_market_ask: float = None,
 ) -> DecisionResult:
@@ -289,7 +290,8 @@ def evaluate_trade(
                                  ema_alignment=ema_alignment, asset=asset,
                                  composite_active=composite_active,
                                  composite_p_up=composite_p_up,
-                                 offset_pct=offset_pct)
+                                 offset_pct=offset_pct,
+                                 composite_trend=composite_trend)
         dec_no  = evaluate_trade(structure_bias, confirmation_bias, p_model, _pm_no,
                                  bankroll, slippage, spread, min_net_edge,
                                  confirmation_score, no_score, no_bias, force_side="no",
@@ -297,7 +299,8 @@ def evaluate_trade(
                                  ema_alignment=ema_alignment, asset=asset,
                                  composite_active=composite_active,
                                  composite_p_up=composite_p_up,
-                                 offset_pct=offset_pct)
+                                 offset_pct=offset_pct,
+                                 composite_trend=composite_trend)
         if dec_yes.decision == "trade" and dec_no.decision == "trade":
             return dec_yes if dec_yes.net_edge >= dec_no.net_edge else dec_no
         elif dec_yes.decision == "trade":
@@ -445,7 +448,28 @@ def evaluate_trade(
     # contracts (strike below spot) already have a natural buffer and pricing edge alone
     # is sufficient. OTM YES requires a move UP to win, so directional conviction is needed.
     COMPOSITE_YES_P_UP_MIN = 0.55
-    if composite_active and side == "yes" and offset_pct > 0 and composite_p_up < COMPOSITE_YES_P_UP_MIN:
+    # [2026-07-15] SOL-only narrowing: real-price-resolved backtest of the FULL
+    # current-model era (04-21 reform onward, n=636 tickers combining the archived
+    # pre-07-07 SOL history with the live file) found this block's population is
+    # net POSITIVE, not negative: edge=+4.2%, P(edge<=0)=0.003, 95% CI [+1.0%,+7.5%],
+    # +$15,089 flat-$100, 10/12 weeks positive. Splitting it further: candidates with
+    # offset_pct<=0.62% AND composite_trend<=1 ("rescued") are edge=+7.8%,
+    # P(edge<=0)=0.001, 95% CI [+3.6%,+12.2%], 4/4 months positive, +$18,892 — real,
+    # not noise. The complement (offset>0.62%, deep OTM -- OR composite_trend>1, a
+    # bullish-trend/bearish-p_up contradiction) stays edge=-1.7%, -$3,803, negative
+    # 3/4 months (Apr -6.0%, May -6.8%, Jun -2.8%, Jul +13.3% -- most recent month
+    # flipped, watch this) -- kept blocked. BTC/ETH not re-validated, left as-is.
+    # NOTE: backtest was run against the offset_pct CSV column, which is logged in
+    # PERCENT units (0.62 == 0.62%); this function's offset_pct parameter is the raw
+    # fraction (offset_c = strike/spot - 1, e.g. 0.0062 == 0.62%) -- threshold divided
+    # by 100 to match.
+    # See reform_results/sol_hourly_20260710/ for methodology.
+    # Backup: decision_pre_sol_gatecs_rescue_20260715.py
+    _cs_sol_rescue = (
+        asset == "SOL" and offset_pct <= 0.0062 and composite_trend <= 1.0
+    )
+    if (composite_active and side == "yes" and offset_pct > 0
+            and composite_p_up < COMPOSITE_YES_P_UP_MIN and not _cs_sol_rescue):
         fee = kalshi_fee(p_market)
         cs_raw_edge = p_model - p_market
         cs_net_edge = cs_raw_edge - fee - slippage - spread
@@ -464,7 +488,14 @@ def evaluate_trade(
             was_capped=False, reasons=reasons,
         )
     if composite_active and side == "yes":
-        if offset_pct > 0:
+        if offset_pct > 0 and _cs_sol_rescue and composite_p_up < COMPOSITE_YES_P_UP_MIN:
+            reasons.append(
+                f"Gate CS RESCUED (SOL): composite_p_up={composite_p_up:.3f} < {COMPOSITE_YES_P_UP_MIN} but "
+                f"offset={offset_pct*100:+.3f}%<=0.62% and composite_trend={composite_trend:.1f}<=1 — "
+                f"real-price-resolved backtest shows this sub-population is edge=+7.8%, P=0.001, "
+                f"4/4 months positive, not the -10% originally assumed."
+            )
+        elif offset_pct > 0:
             reasons.append(
                 f"Gate CS PASSED: composite_p_up={composite_p_up:.3f} ≥ {COMPOSITE_YES_P_UP_MIN} — "
                 f"calibration confirms directional lean for OTM YES (offset={offset_pct:+.3f})."
@@ -483,9 +514,13 @@ def evaluate_trade(
     # In the composite drift model, p_up is already embedded in p_model via
     # score_to_p_model() — a neutral composite already produces near-zero edge
     # naturally, which Gate R:R and Gate 3 catch without needing this extra layer.
-    # Applies to all assets (BTC, ETH, SOL).
+    # Applies to BTC/ETH only. SOL exempted 07-16: swept every threshold 0.30-0.60
+    # against the real ITM-YES SOL population (n=1,224) — composite_p_up carries no
+    # rank information there (edge stayed +4.6% to +6.5% on BOTH sides of every cut,
+    # stable across Apr-Jul), so any threshold only removes real, still-positive-edge
+    # trades. Gate R:R and Gate 3 still apply for SOL.
     COMPOSITE_ITM_BEARISH_MAX = 0.45
-    if composite_active and side == "yes" and offset_pct <= 0:
+    if composite_active and side == "yes" and offset_pct <= 0 and asset != "SOL":
         if composite_p_up < COMPOSITE_ITM_BEARISH_MAX:
             reasons.append(
                 f"Gate CI FAILED: ITM YES with bearish composite "
@@ -503,6 +538,11 @@ def evaluate_trade(
         reasons.append(
             f"Gate CI PASSED: ITM YES — composite_p_up={composite_p_up:.3f} ≥ {COMPOSITE_ITM_BEARISH_MAX} "
             f"(non-bearish). Gate R:R and Gate 3 apply."
+        )
+    elif composite_active and side == "yes" and offset_pct <= 0 and asset == "SOL":
+        reasons.append(
+            f"Gate CI SKIPPED (SOL): composite_p_up={composite_p_up:.3f} — no rank information "
+            f"in SOL's ITM-YES population at any threshold, exempted 07-16. Gate R:R and Gate 3 apply."
         )
 
     # --- Gate NS: directional confirmation for NO bets ---

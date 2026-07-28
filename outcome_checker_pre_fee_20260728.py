@@ -279,27 +279,9 @@ def main(csv_path: Path = None) -> None:
                 would_win = not resolved_yes
             row["would_win"] = str(would_win)
             row["would_pnl"] = str(compute_pnl(row, resolved_yes))
-            # [2026-07-28] Fee accounting: compute_pnl is GROSS (its "fees
-            # reflected in net_edge" note covers entry gating only, not the
-            # logged PnL). Kalshi charges 0.07*pm*(1-pm) per contract on
-            # every fill — backfill the estimate and net PnL here so all
-            # future hourly analyses run on would_pnl_net.
-            try:
-                _bet = float(row["bet_amount"])
-                _pm = float(row["p_market"])
-                _cost = _pm if side == "yes" else (1.0 - _pm)
-                _contracts = _bet / _cost if _cost > 0 else 0.0
-                _fee = round(_contracts * 0.07 * _pm * (1.0 - _pm), 2)
-                row["fee_est"] = str(_fee)
-                row["would_pnl_net"] = str(round(float(row["would_pnl"]) - _fee, 2))
-            except (TypeError, ValueError, KeyError):
-                row["fee_est"] = ""
-                row["would_pnl_net"] = ""
         else:
             row["would_win"] = ""
             row["would_pnl"] = ""
-            row["fee_est"] = ""
-            row["would_pnl_net"] = ""
 
         # Log expiry price if not already present
         if not (row.get("spot_at_expiry") or "").strip() and close_ts_str:

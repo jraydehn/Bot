@@ -227,12 +227,4 @@ CSV_COLUMNS = [
     # 2026-07-10: state-conditioned variant (tables per pup_v3 intraday regime
     # state, models/pup15m_sc_tables_btc.pkl). Drives wait_15m_agreement_gate.
     "pup15m_sc",
-    # [2026-07-28] Kalshi fee accounting (hourly fee audit: entry gating was
-    # already fee-aware via pricing_comparison.evaluate_edge, but logged
-    # would_pnl was GROSS — ETH hourly's lifetime "+$1,052" was net −$71).
-    # fee_est = contracts x 0.07*pm*(1-pm); would_pnl_net = would_pnl - fee_est.
-    # Both backfilled at settlement by outcome_checker.py. Analyses/sweeps on
-    # hourly books must use would_pnl_net.
-    "fee_est",
-    "would_pnl_net",
 ]

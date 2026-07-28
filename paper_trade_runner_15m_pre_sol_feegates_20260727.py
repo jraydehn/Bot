@@ -448,19 +448,6 @@ ASSET_CONFIG = {
 MIN_TAU_MIN      = 2.0    # skip contract if fewer than 2 minutes remain
 MAX_TAU_MIN      = 14.0   # skip contract if more than 14 minutes remain (not opened yet)
 EDGE_THRESHOLD   = 0.04   # minimum model-vs-market edge to bet
-
-
-def kalshi_fee_per_contract(p_market: float) -> float:
-    """Kalshi trading fee per contract: 0.07 * P * (1-P), P = execution price.
-
-    [2026-07-27 fee audit] Fees were modeled nowhere -- not in would_pnl, not
-    in Kelly. Full-period SOL 15m paper book: +$1,733 gross -> -$788 NET
-    ($2,521 fees). At pm=0.5 the fee (1.75c) eats 44% of EDGE_THRESHOLD.
-    NOTE: deliberately NOT added to the edge gate itself -- a fee-adjusted
-    edge>=0.04 entry filter simulated WORSE (-$1,135 vs -$788 baseline);
-    fees belong in PnL accounting (would_pnl_net) and SOL Kelly sizing only.
-    """
-    return 0.07 * p_market * (1.0 - p_market)
 # [2026-07-21, v2] ETH regime drift, superseding the original narrow
 # Bull_Building_HighVol version (0.08 z-drift): that version was sized from a
 # too-conservative starting guess and gated to a 3-way state intersection that
@@ -820,25 +807,6 @@ CSV_COLUMNS = [
     # p_model_15m is the EXPANDED value the decision used). SOL-only; blank
     # for BTC/ETH.
     "p_model_pre_expand",
-    # [2026-07-27] Kalshi fee modeling (fee audit: paper book was +$1,733 gross
-    # but -$788 NET of fees over 05-11->07-27; fees were modeled NOWHERE).
-    # fee_est = contracts x 0.07*pm*(1-pm), written at trade time (blank for
-    # pass rows); would_pnl_net = would_pnl - fee_est, backfilled at resolution
-    # alongside would_pnl. All assets. Analyses/sweeps must use would_pnl_net.
-    "fee_est", "would_pnl_net",
-    # [2026-07-27] SOL momentum-persistence slope features (signal-vs-price
-    # slopes from the runner's own scan history; see
-    # project_sol15m_yes_momentum_rescue_20260727.md). SOL-only; blank BTC/ETH.
-    # slopeNN_x = (x_now - x_at_t-NNmin) / (%spot change over NN min), clip +/-50;
-    # dNN_x = plain NN-minute change. Drive sol15m_yes_persistence_gate and
-    # sol15m_no_midband_gate below.
-    "d45_stoch_k_5m", "d45_vwap_dist",
-    "slope120_rsi_1h", "slope120_bb_pct_1h", "slope120_ema20_dist_1h",
-    "slope120_stoch_k_15m",
-    # 0-7 count of persistence conditions true (autocorr1_30>=0, hurst>=0.65,
-    # slope120_bb>=0.5, slope120_rsi>=20, slope120_ema20>=1.5, d45_vwap>=0.5,
-    # d45_stoch5m>=40). YES allowed only when >=3.
-    "sol_persist_score",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -1243,24 +1211,10 @@ def resolve_pending(auth: Optional[KalshiAuth], asset: str, is_live: bool = Fals
 
         would_pnl = round(bet_amt * payout if would_win else -bet_amt, 2)
 
-        # [2026-07-27] Net-of-fee PnL. Prefer the fee_est written at trade
-        # time; fall back to recomputing from bet/pm for rows logged before
-        # the fee columns existed. Pass rows (bet_amt=0) get fee 0.
-        try:
-            fee_est = float(row.get("fee_est"))
-            if fee_est != fee_est:  # NaN
-                raise ValueError
-        except (TypeError, ValueError):
-            cost = p_market if side == "yes" else (1.0 - p_market)
-            contracts = bet_amt / cost if cost > 0 else 0.0
-            fee_est = round(contracts * kalshi_fee_per_contract(p_market), 2)
-
         upd = {
-            "resolved_yes":  int(resolved_yes),
-            "would_win":     int(would_win),
-            "would_pnl":     would_pnl,
-            "fee_est":       fee_est,
-            "would_pnl_net": round(would_pnl - fee_est, 2),
+            "resolved_yes": int(resolved_yes),
+            "would_win":    int(would_win),
+            "would_pnl":    would_pnl,
         }
 
         # Log expiry price and move magnitude
@@ -2406,70 +2360,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     sig["z_drift_6h"] = _z_drift_6h if _z_drift_6h is not None else ""
     if _z_drift_6h is not None:
         print(f"  [z_drift_6h] {_z_drift_6h:+.4f}  (6h rolling mean actual_z)")
-
-    # [2026-07-27] SOL momentum-persistence slope features + score.
-    # Signal-vs-price slopes from the runner's OWN scan history (the _df_log
-    # read above): for each lookback (45min, 120min) take the last logged scan
-    # at/before now-minus-lookback (strictly prior data -- no lookahead; same
-    # searchsorted-on-logged_at join the validation used) and compute
-    #   dNN_x     = x_now - x_then
-    #   slopeNN_x = dNN_x / (% spot change over the window), clipped to +/-50,
-    #               undefined when the window price change is exactly 0.
-    # Missing history / NaN values leave a condition FALSE (matches how the
-    # validation scored NaN). Validation: project_sol15m_yes_momentum_rescue_
-    # 20260727.md -- YES score>=3 honest OOS +$2,515 permP=0.0006; NO mid-band
-    # rescue slope120_stoch_k_15m>=40 OOS +$1,327 permP=0.0000.
-    _sol_persist_score: "int | None" = None
-    if asset.upper() == "SOL":
-        _slope_cols = ["stoch_k_5m", "stoch_k_15m", "rsi_1h", "bb_pct_1h",
-                       "vwap_dist", "ema20_dist_1h"]
-        try:
-            if '_df_log' in dir() and len(_df_log):
-                _hist = _df_log[["logged_at", "spot"] + _slope_cols].copy()
-                _hist["ts"] = pd.to_datetime(_hist["logged_at"], errors="coerce", utc=True)
-                _hist = _hist.dropna(subset=["ts"]).sort_values("ts")
-                _now_ts = pd.Timestamp.now(tz="UTC")
-                for _tag, _mins in (("45", 45), ("120", 120)):
-                    _past = _hist[_hist["ts"] <= _now_ts - pd.Timedelta(minutes=_mins)]
-                    if _past.empty:
-                        continue
-                    _prev = _past.iloc[-1]
-                    _prev_spot = pd.to_numeric(_prev["spot"], errors="coerce")
-                    if pd.isna(_prev_spot) or _prev_spot <= 0 or spot <= 0:
-                        continue
-                    _dprice = (spot / float(_prev_spot) - 1.0) * 100.0
-                    for _col in _slope_cols:
-                        _cur = sig.get(_col)
-                        _prv = pd.to_numeric(_prev[_col], errors="coerce")
-                        try:
-                            _cur = float(_cur)
-                        except (TypeError, ValueError):
-                            continue
-                        if pd.isna(_prv):
-                            continue
-                        _d = _cur - float(_prv)
-                        sig[f"d{_tag}_{_col}"] = _d
-                        if _dprice != 0.0:
-                            sig[f"slope{_tag}_{_col}"] = max(-50.0, min(50.0, _d / _dprice))
-        except Exception as _spe:
-            print(f"  [sol_slopes] compute failed (conditions default false): {_spe}")
-
-        def _sc(key, thr):
-            v = sig.get(key)
-            try:
-                return 1 if float(v) >= thr else 0
-            except (TypeError, ValueError):
-                return 0
-        _sol_persist_score = (
-            _sc("autocorr1_30", 0.0) + _sc("hurst_exponent", 0.65)
-            + _sc("slope120_bb_pct_1h", 0.5) + _sc("slope120_rsi_1h", 20.0)
-            + _sc("slope120_ema20_dist_1h", 1.5) + _sc("d45_vwap_dist", 0.5)
-            + _sc("d45_stoch_k_5m", 40.0)
-        )
-        sig["sol_persist_score"] = _sol_persist_score
-        _sl15 = sig.get("slope120_stoch_k_15m")
-        print(f"  [sol_persist] score={_sol_persist_score}/7  slope120_stoch15m="
-              + (f"{_sl15:+.1f}" if isinstance(_sl15, float) else "n/a"))
 
     # [2026-07-21] ETH BOS/CHoCH structural regime + vol-tier state, feeding the
     # eth_bull_building_highvol_drift below. See project_eth15m_streak_analysis_
@@ -3722,70 +3612,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             evaluated.append((best_edge, best_side, c, p_model, offset_pct))
             continue
 
-        # ── [2026-07-27 fee-audit gate package] Three SOL gates from the
-        # net-of-fees profitability deep-dive (project_sol15m_fee_audit_
-        # 20260727.md + project_sol15m_yes_momentum_rescue_20260727.md).
-        # Validated on 2,328 resolved trades, actual sizing, NET of Kalshi
-        # fees; combined package flips the book -$788 -> +$5,470 with every
-        # month >= +$1,000, post-retrain slice +$673 -> +$2,101. Placed LAST
-        # among side gates (flip-chain bypass lesson). Paper-first.
-        # Backup: paper_trade_runner_15m_pre_sol_feegates_20260727.py
-
-        # [sol15m_yes_persistence_gate] SOL mean-reverts by default, so YES
-        # (continuation) only pays when trend persistence is measurably
-        # present. Allow YES only when >= 3 of 7 independent persistence
-        # conditions agree (score computed once per scan above; conditions:
-        # autocorr1_30>=0, hurst>=0.65, slope120_bb>=0.5, slope120_rsi>=20,
-        # slope120_ema20>=1.5, d45_vwap>=0.5, d45_stoch5m>=40). Monotone
-        # dose-response (score 0: -$5.3k .. 4: +$1.4k flat); kept YES book
-        # n=120 +$812 actual, WR 72% vs BE 59%, all 3 months positive;
-        # honest OOS (H1-fit thresholds, H2 eval) +$2,515 permP=0.0006.
-        # Complement (score<3): -$7.9k flat. score>=2 NOT robust to threshold
-        # perturbation -- do not loosen without revalidation.
-        if (asset.upper() == "SOL" and best_side == "yes"
-                and (_sol_persist_score or 0) < 3):
-            print(f"    [sol15m_yes_persistence_gate] BLOCK YES {ticker} — "
-                  f"persist_score={_sol_persist_score}/7 < 3 (YES only pays in "
-                  f"persistent-trend regimes; complement -$7.9k flat)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
-        # [sol15m_no_deep_pm_gate] Deep-contrarian NO (pm>0.80, cost<0.20 crash
-        # lottos): -$999 net full period, 0/20 wins in July, 0/7 post-retrain.
-        # Rescue search incl. slope features found only bp_1h>=0.70 -- REJECTED
-        # (flat +$2,706 but actual-sizing only +$344 and July negative, n=27).
-        # Pure block. NOTE: uses p_market as a calibration-by-price-region
-        # correction (model edge systematically wrong net of fees here), a
-        # deliberate, user-approved exception to feedback_market_pricing_logic.
-        if asset.upper() == "SOL" and best_side == "no" and p_market > 0.80:
-            print(f"    [sol15m_no_deep_pm_gate] BLOCK NO {ticker} — "
-                  f"pm={p_market:.3f}>0.80 (deep-contrarian NO: 0/20 July, "
-                  f"-$999 net; no rescue survived actual-sizing)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
-        # [sol15m_no_midband_gate] Coin-flip-zone NO (pm 0.50-0.65): -$1,192
-        # net, worst leak in July (-$1,134); fees+noise eat the thin margin.
-        # RESCUE (same slope family as the YES gate): slope120_stoch_k_15m>=40
-        # (15m stoch 2h-change per 1% spot move) -- rescued n=139 +$1,559
-        # actual, all months positive, robust thr 30-50, honest OOS +$1,327
-        # permP=0.0000, post-retrain +$491/28tk; blocked remainder -$2,751.
-        # Missing slope history -> rescue false -> block (matches validation).
-        if (asset.upper() == "SOL" and best_side == "no"
-                and 0.50 <= p_market <= 0.65):
-            _sl15_gate = sig.get("slope120_stoch_k_15m")
-            _rescued = isinstance(_sl15_gate, float) and _sl15_gate >= 40.0
-            if not _rescued:
-                _sl_str = f"{_sl15_gate:+.1f}" if isinstance(_sl15_gate, float) else "n/a"
-                print(f"    [sol15m_no_midband_gate] BLOCK NO {ticker} — "
-                      f"pm={p_market:.3f}∈[0.50,0.65], slope120_stoch15m={_sl_str}<40 "
-                      f"(coin-flip-zone NO -$1,192 net; rescue needs steep stoch slope)")
-                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                continue
-            print(f"    [sol15m_no_midband_gate] RESCUE NO {ticker} — "
-                  f"slope120_stoch15m={_sl15_gate:+.1f}>=40 (rescued bucket "
-                  f"+$1,559 actual, OOS permP=0.0000)")
-
         # P_MARKET VOLATILITY GATE: skip deep-OTM contracts on either side.
         # Sim (347 resolved trades): 0W/26L blocked at 0.12/0.88 → +$538 PnL delta.
         if p_market < P_MARKET_VOL_MIN or p_market > P_MARKET_VOL_MAX:
@@ -3865,23 +3691,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # this recovers the same value and is a no-op.
     p_model_for_kelly = (1.0 - p_model) if (side == "no" and asset == "BTC") else p_model
 
-    # [2026-07-27 fee audit] SOL-only fee-aware Kelly: shift the effective
-    # contract price by the Kalshi fee so sizing sees the true cost. YES pays
-    # pm+fee per contract; NO pays (1-pm)+fee, i.e. pm_eff = pm - fee. Sizing
-    # only -- the edge gate stays on raw p_market (fee-adjusted ENTRY filter
-    # simulated worse, see kalshi_fee_per_contract docstring). Scoped to SOL
-    # per feedback_scope_15m_changes; extend to BTC/ETH only after their own
-    # fee audits.
-    _pm_for_kelly = p_market
-    if asset.upper() == "SOL":
-        _fee_pc = kalshi_fee_per_contract(p_market)
-        _pm_for_kelly = p_market + _fee_pc if side == "yes" else p_market - _fee_pc
-        _pm_for_kelly = min(max(_pm_for_kelly, 0.01), 0.99)
-
     _kelly_cap = MAX_BET_FRAC
     try:
         kelly = compute_kelly_size(
-            p_model=p_model_for_kelly, p_market=_pm_for_kelly, bankroll=bankroll,
+            p_model=p_model_for_kelly, p_market=p_market, bankroll=bankroll,
             kelly_multiplier=KELLY_MULT, side=side, max_bet_fraction=_kelly_cap,
         )
     except ValueError as e:
@@ -4097,13 +3910,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     n_contracts = max(1, round(kelly.bet_amount / p_market)) if side == "yes" \
                   else max(1, round(kelly.bet_amount / (1 - p_market)))
     cost = round(n_contracts * (p_market if side == "yes" else 1 - p_market), 2)
-    # [2026-07-27] Estimated Kalshi fee for this order (logged; would_pnl_net
-    # = would_pnl - fee_est is backfilled at resolution).
-    _fee_est = round(n_contracts * kalshi_fee_per_contract(p_market), 2)
 
     print(f"    [TRADE] {side.upper()}  {n_contracts} contracts @ ${p_market:.3f}")
     print(f"    Kelly: frac={kelly.kelly_fraction:.4f}  bet_frac={kelly.bet_fraction:.4f}  "
-          f"amount=${kelly.bet_amount:.2f}  cost=${cost:.2f}  fee≈${_fee_est:.2f}")
+          f"amount=${kelly.bet_amount:.2f}  cost=${cost:.2f}")
 
     sig["p_gbdt"] = _lgbm_shadows.get(ticker, "")
     row = _build_row(
@@ -4114,7 +3924,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         sig=sig, kelly_fraction=kelly.kelly_fraction,
         bet_fraction=kelly.bet_fraction, bet_amount=cost, bankroll=bankroll,
         liq_signal=_liq_signal, cg=_cg, spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
-        is_live=is_live, fee_est=_fee_est,
+        is_live=is_live,
     )
     append_row(row, asset=asset)
     if already_bet is not None:
@@ -4195,7 +4005,6 @@ def _build_row(
     tau_min, p_market, p_model, raw_edge, side, decision, sig,
     kelly_fraction, bet_fraction, bet_amount, bankroll,
     liq_signal=None, cg=None, spread=0.0, cvd_4h=None, is_live=False,
-    fee_est="",
 ) -> dict:
     def _f(v, d=4):
         try:
@@ -4374,16 +4183,6 @@ def _build_row(
         "eth_bos_streak":       sig.get("eth_bos_streak", ""),
         "eth_regime_state":     sig.get("eth_regime_state", ""),
         "eth_regime_drift":     _f(sig.get("eth_regime_drift"), 4),
-        # [2026-07-27] fee modeling + SOL persistence/slope features
-        "fee_est":              fee_est,
-        "would_pnl_net":        "",
-        "d45_stoch_k_5m":       _f(sig.get("d45_stoch_k_5m"), 2),
-        "d45_vwap_dist":        _f(sig.get("d45_vwap_dist"), 4),
-        "slope120_rsi_1h":      _f(sig.get("slope120_rsi_1h"), 2),
-        "slope120_bb_pct_1h":   _f(sig.get("slope120_bb_pct_1h"), 4),
-        "slope120_ema20_dist_1h": _f(sig.get("slope120_ema20_dist_1h"), 4),
-        "slope120_stoch_k_15m": _f(sig.get("slope120_stoch_k_15m"), 2),
-        "sol_persist_score":    sig.get("sol_persist_score", ""),
     }
 
 

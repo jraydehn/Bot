@@ -839,25 +839,6 @@ CSV_COLUMNS = [
     # slope120_bb>=0.5, slope120_rsi>=20, slope120_ema20>=1.5, d45_vwap>=0.5,
     # d45_stoch5m>=40). YES allowed only when >=3.
     "sol_persist_score",
-    # [2026-07-28] BTC/ETH fee-audit slope composites (see project_btc_eth15m_
-    # fee_audit_20260728.md). Same dNN/slopeNN construction as the SOL features
-    # above, from the runner's own scan history — scan-level signals ONLY
-    # (contract-level columns like p_market/tau produce contract-mixing
-    # artifacts and must never be slope bases).
-    # BTC thrust (YES allowed when >=2 of 5): d15_stoch_k_5m>=20,
-    #   d15_kc_pct_5m>=0, d15_bp_15m>=0.25, slope45_bp_5m>=-0.4,
-    #   d15_vol_ratio>=-0.97. BTC-only; blank ETH/SOL.
-    "d15_stoch_k_5m", "d15_kc_pct_5m", "d15_bp_15m", "slope45_bp_5m",
-    "d15_vol_ratio", "btc_thrust_score",
-    # ETH dip+volume (YES allowed when >=2 of 5): d45_vol_ratio>=0.32,
-    #   d45_chg_5m<=-0.037, d120_rsi_1h<=-4.7, dprice_120<=-0.79,
-    #   d120_kc_pct_5m<=0. ETH-only; blank BTC/SOL.
-    "d45_vol_ratio", "d45_chg_5m", "d120_rsi_1h", "dprice_120",
-    "d120_kc_pct_5m", "eth_dipvol_score",
-    # ETH NO slope (NO allowed when >=1 of 3): slope120_stoch_k_5m<=-33,
-    #   d15_oi_chg_pct<=0.054, slope45_vol_ratio<=0. ETH-only.
-    "slope120_stoch_k_5m", "d15_oi_chg_pct", "slope45_vol_ratio",
-    "eth_no_slope_score",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -2675,86 +2656,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
               f"  F&G={_cg.fg_value:.0f}({_cg.fg_regime})"
               f"  composite={_cg.composite_score:+d}")
 
-    # [2026-07-28] BTC/ETH slope composites — same own-scan-history dNN/slopeNN
-    # construction as the SOL persistence block above (no lookahead; last scan
-    # at/before t-NNmin; slope clipped ±50, undefined on zero price change;
-    # NaN/missing history leaves conditions FALSE, matching validation).
-    # Placed here (not next to the SOL block) because d15_oi_chg_pct needs
-    # _liq_signal, fetched just above. Scan-level signal bases ONLY — deltas
-    # of contract-level columns (p_market/tau/z_score/...) mix contracts
-    # across scans and produce artifact signals.
-    # Validation: project_btc_eth15m_fee_audit_20260728.md — honest OOS
-    # (H1-refit thresholds -> H2): BTC thrust permP=0.0000, ETH dip+vol
-    # permP=0.0016, ETH NO slope permP=0.0054; all threshold-perturbation-
-    # robust and post-07-22-aligned.
-    _btc_thrust_score: "int | None" = None
-    _eth_dipvol_score: "int | None" = None
-    _eth_no_slope_score: "int | None" = None
-    if asset.upper() in ("BTC", "ETH"):
-        _slope_bases = ["stoch_k_5m", "kc_pct_5m", "bp_15m", "bp_5m", "vol_ratio",
-                        "chg_5m", "rsi_1h", "oi_chg_pct"]
-        try:
-            if '_df_log' in dir() and len(_df_log):
-                _avail = [c for c in _slope_bases if c in _df_log.columns]
-                _hist2 = _df_log[["logged_at", "spot"] + _avail].copy()
-                _hist2["ts"] = pd.to_datetime(_hist2["logged_at"], errors="coerce", utc=True)
-                _hist2 = _hist2.dropna(subset=["ts"]).sort_values("ts")
-                _now_ts2 = pd.Timestamp.now(tz="UTC")
-                _cur_vals = {c: sig.get(c) for c in _slope_bases}
-                _cur_vals["oi_chg_pct"] = (_liq_signal.oi_chg_pct
-                                           if _liq_signal is not None else None)
-                for _tag, _mins in (("15", 15), ("45", 45), ("120", 120)):
-                    _past = _hist2[_hist2["ts"] <= _now_ts2 - pd.Timedelta(minutes=_mins)]
-                    if _past.empty:
-                        continue
-                    _prev = _past.iloc[-1]
-                    _prev_spot = pd.to_numeric(_prev["spot"], errors="coerce")
-                    if pd.isna(_prev_spot) or _prev_spot <= 0 or spot <= 0:
-                        continue
-                    _dprice = (spot / float(_prev_spot) - 1.0) * 100.0
-                    sig[f"dprice_{_tag}"] = _dprice
-                    for _col in _avail:
-                        _cur = _cur_vals.get(_col)
-                        _prv = pd.to_numeric(_prev[_col], errors="coerce")
-                        try:
-                            _cur = float(_cur)
-                        except (TypeError, ValueError):
-                            continue
-                        if pd.isna(_prv):
-                            continue
-                        _d = _cur - float(_prv)
-                        sig[f"d{_tag}_{_col}"] = _d
-                        if _dprice != 0.0:
-                            sig[f"slope{_tag}_{_col}"] = max(-50.0, min(50.0, _d / _dprice))
-        except Exception as _spe2:
-            print(f"  [slope_feats] compute failed (conditions default false): {_spe2}")
-
-        def _ck(key, thr, ge):
-            v = sig.get(key)
-            try:
-                return 1 if (float(v) >= thr if ge else float(v) <= thr) else 0
-            except (TypeError, ValueError):
-                return 0
-        if asset.upper() == "BTC":
-            _btc_thrust_score = (
-                _ck("d15_stoch_k_5m", 20.0, True) + _ck("d15_kc_pct_5m", 0.0, True)
-                + _ck("d15_bp_15m", 0.25, True) + _ck("slope45_bp_5m", -0.4, True)
-                + _ck("d15_vol_ratio", -0.97, True))
-            sig["btc_thrust_score"] = _btc_thrust_score
-            print(f"  [btc_thrust] score={_btc_thrust_score}/5 (YES needs >=2)")
-        else:
-            _eth_dipvol_score = (
-                _ck("d45_vol_ratio", 0.32, True) + _ck("d45_chg_5m", -0.037, False)
-                + _ck("d120_rsi_1h", -4.7, False) + _ck("dprice_120", -0.79, False)
-                + _ck("d120_kc_pct_5m", 0.0, False))
-            _eth_no_slope_score = (
-                _ck("slope120_stoch_k_5m", -33.0, False) + _ck("d15_oi_chg_pct", 0.054, False)
-                + _ck("slope45_vol_ratio", 0.0, False))
-            sig["eth_dipvol_score"] = _eth_dipvol_score
-            sig["eth_no_slope_score"] = _eth_no_slope_score
-            print(f"  [eth_slopes] dipvol={_eth_dipvol_score}/5 (YES needs >=2)  "
-                  f"no_slope={_eth_no_slope_score}/3 (NO needs >=1)")
-
     if auth is None:
         print("  [warn] No Kalshi auth — contract scan skipped.")
         return
@@ -3885,118 +3786,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                   f"slope120_stoch15m={_sl15_gate:+.1f}>=40 (rescued bucket "
                   f"+$1,559 actual, OOS permP=0.0000)")
 
-        # ── [2026-07-28 BTC/ETH fee-audit gate packages] Net-of-fees deep-dive
-        # (project_btc_eth15m_fee_audit_20260728.md): BTC book −$714 net →
-        # +$4,306 with package (all months green, post-07-22 −$160 → +$211);
-        # ETH −$996 → +$5,307 (post-07-22 −$942 → +$426). Asset-scoped,
-        # paper-first, placed LAST among side gates (flip-chain lesson).
-        # Backup: paper_trade_runner_15m_pre_btc_eth_feegates_20260728.py
-
-        # [btc15m_no_midhigh_pm_gate] NO pm 0.65-0.80: −$1,721 net, negative
-        # ALL 3 months. Coherent-looking "drop underway" rescues ALL failed
-        # honest OOS (permP 0.36-0.56) → pure block. (NO pm 0.5-0.65 is BTC's
-        # earner +$716 all months — deliberately untouched.)
-        if (asset.upper() == "BTC" and best_side == "no"
-                and 0.65 <= p_market <= 0.80):
-            print(f"    [btc15m_no_midhigh_pm_gate] BLOCK NO {ticker} — "
-                  f"pm={p_market:.3f}∈[0.65,0.80] (−$1,721 net, neg all months, "
-                  f"no rescue survived OOS)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
-        # [btc15m_no_deep_pm_gate] NO pm>0.80 crash lottos: block unless
-        # lower_wick_15m>=0.16 (rejection wick). Rescue passed honest OOS
-        # (H2 +$526 act, permP=0.005), threshold-robust 0.10-0.22; kept
-        # +$1,786 vs blocked −$1,869. Support is May/June-era — band rarely
-        # fires in the July YES-dominated book; cheap insurance either way.
-        if asset.upper() == "BTC" and best_side == "no" and p_market > 0.80:
-            _lw_gate = sig.get("lower_wick_15m")
-            try:
-                _lw_ok = float(_lw_gate) >= 0.16
-            except (TypeError, ValueError):
-                _lw_ok = False
-            if not _lw_ok:
-                print(f"    [btc15m_no_deep_pm_gate] BLOCK NO {ticker} — "
-                      f"pm={p_market:.3f}>0.80, lower_wick_15m={_lw_gate} < 0.16 "
-                      f"(blocked bucket −$1,869)")
-                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                continue
-            print(f"    [btc15m_no_deep_pm_gate] RESCUE NO {ticker} — "
-                  f"lower_wick_15m={float(_lw_gate):.3f}>=0.16 (kept +$1,786, "
-                  f"OOS permP=0.005)")
-
-        # [btc15m_yes_thrust_gate] YES allowed only when >=2 of 5 fifteen-min
-        # thrust conditions agree (score computed per scan above): on a 15m
-        # expiry, only buy continuation when the immediate tape is thrusting.
-        # Honest OOS permP=0.0000 (H2 keep +$1,155 vs all +$305); drops
-        # −$1,453; perturbation-robust; post-07-22 aligned (+114/−163).
-        if (asset.upper() == "BTC" and best_side == "yes"
-                and (_btc_thrust_score or 0) < 2):
-            print(f"    [btc15m_yes_thrust_gate] BLOCK YES {ticker} — "
-                  f"thrust_score={_btc_thrust_score}/5 < 2 (no 15-min thrust; "
-                  f"complement −$1,453)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
-        # [eth15m_no_deep_pm_gate] NO pm>0.80: negative every month, −$577
-        # post-07-22 alone; d120_vwap rescue failed OOS (H2 act −131) →
-        # pure block.
-        if asset.upper() == "ETH" and best_side == "no" and p_market > 0.80:
-            print(f"    [eth15m_no_deep_pm_gate] BLOCK NO {ticker} — "
-                  f"pm={p_market:.3f}>0.80 (−$799 net, −$577 post-retrain, "
-                  f"no rescue survived OOS)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
-        # [eth15m_yes_otm_gate] Deep-OTM YES longshots pm<=0.20: negative
-        # every month (−$509); exhaustive rescue search found nothing → pure
-        # block.
-        if asset.upper() == "ETH" and best_side == "yes" and p_market <= 0.20:
-            print(f"    [eth15m_yes_otm_gate] BLOCK YES {ticker} — "
-                  f"pm={p_market:.3f}<=0.20 (OTM longshots −$509, neg all "
-                  f"months, no rescue)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
-        # [eth15m_no_midband_gate] NO pm 0.40-0.50: the July collapse zone
-        # (−$1,634 in July). Kept lower half 0.35-0.40 positive all months at
-        # every boundary tested; no conditional rescue survived OOS; round
-        # conservative boundary 0.40. Band was healthy pre-July — re-review
-        # if the ETH model changes.
-        if (asset.upper() == "ETH" and best_side == "no"
-                and 0.40 <= p_market <= 0.50):
-            print(f"    [eth15m_no_midband_gate] BLOCK NO {ticker} — "
-                  f"pm={p_market:.3f}∈[0.40,0.50] (July collapse zone −$2,366; "
-                  f"no rescue survived OOS)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
-        # [eth15m_yes_dipvol_gate] ETH YES pays on dip+participation entries,
-        # not chases: allow YES only when >=2 of 5 dip+volume conditions agree
-        # (score per scan above). Honest OOS permP=0.0016; all months green
-        # (+487/+187/+792); post-07-22 +299/−301; converges with the
-        # independent universe-scan contrarian-dip finding.
-        if (asset.upper() == "ETH" and best_side == "yes"
-                and (_eth_dipvol_score or 0) < 2):
-            print(f"    [eth15m_yes_dipvol_gate] BLOCK YES {ticker} — "
-                  f"dipvol_score={_eth_dipvol_score}/5 < 2 (chase entry; "
-                  f"complement −$1,371)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
-        # [eth15m_no_slope_gate] NO allowed only when >=1 of 3 slope
-        # conditions agree. Honest OOS permP=0.0054 (>=2: 0.0000). Lenient
-        # >=1 cut chosen — this filters an already-positive book; score is
-        # logged for a possible >=2 tightening on forward data. Mechanism
-        # least interpretable of the three composites — stats carry it.
-        if (asset.upper() == "ETH" and best_side == "no"
-                and (_eth_no_slope_score or 0) < 1):
-            print(f"    [eth15m_no_slope_gate] BLOCK NO {ticker} — "
-                  f"no_slope_score={_eth_no_slope_score}/3 < 1 "
-                  f"(complement −$1,259)")
-            evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-            continue
-
         # P_MARKET VOLATILITY GATE: skip deep-OTM contracts on either side.
         # Sim (347 resolved trades): 0W/26L blocked at 0.12/0.88 → +$538 PnL delta.
         if p_market < P_MARKET_VOL_MIN or p_market > P_MARKET_VOL_MAX:
@@ -4076,15 +3865,18 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # this recovers the same value and is a no-op.
     p_model_for_kelly = (1.0 - p_model) if (side == "no" and asset == "BTC") else p_model
 
-    # [2026-07-27 fee audit; extended to BTC/ETH 2026-07-28 after their own
-    # audits] Fee-aware Kelly: shift the effective contract price by the
-    # Kalshi fee so sizing sees the true cost. YES pays pm+fee per contract;
-    # NO pays (1-pm)+fee, i.e. pm_eff = pm - fee. Sizing only -- the edge
-    # gate stays on raw p_market (fee-adjusted ENTRY filter simulated worse,
-    # see kalshi_fee_per_contract docstring).
-    _fee_pc = kalshi_fee_per_contract(p_market)
-    _pm_for_kelly = p_market + _fee_pc if side == "yes" else p_market - _fee_pc
-    _pm_for_kelly = min(max(_pm_for_kelly, 0.01), 0.99)
+    # [2026-07-27 fee audit] SOL-only fee-aware Kelly: shift the effective
+    # contract price by the Kalshi fee so sizing sees the true cost. YES pays
+    # pm+fee per contract; NO pays (1-pm)+fee, i.e. pm_eff = pm - fee. Sizing
+    # only -- the edge gate stays on raw p_market (fee-adjusted ENTRY filter
+    # simulated worse, see kalshi_fee_per_contract docstring). Scoped to SOL
+    # per feedback_scope_15m_changes; extend to BTC/ETH only after their own
+    # fee audits.
+    _pm_for_kelly = p_market
+    if asset.upper() == "SOL":
+        _fee_pc = kalshi_fee_per_contract(p_market)
+        _pm_for_kelly = p_market + _fee_pc if side == "yes" else p_market - _fee_pc
+        _pm_for_kelly = min(max(_pm_for_kelly, 0.01), 0.99)
 
     _kelly_cap = MAX_BET_FRAC
     try:
@@ -4592,23 +4384,6 @@ def _build_row(
         "slope120_ema20_dist_1h": _f(sig.get("slope120_ema20_dist_1h"), 4),
         "slope120_stoch_k_15m": _f(sig.get("slope120_stoch_k_15m"), 2),
         "sol_persist_score":    sig.get("sol_persist_score", ""),
-        # [2026-07-28] BTC/ETH slope composites
-        "d15_stoch_k_5m":       _f(sig.get("d15_stoch_k_5m"), 2),
-        "d15_kc_pct_5m":        _f(sig.get("d15_kc_pct_5m"), 4),
-        "d15_bp_15m":           _f(sig.get("d15_bp_15m"), 4),
-        "slope45_bp_5m":        _f(sig.get("slope45_bp_5m"), 4),
-        "d15_vol_ratio":        _f(sig.get("d15_vol_ratio"), 4),
-        "btc_thrust_score":     sig.get("btc_thrust_score", ""),
-        "d45_vol_ratio":        _f(sig.get("d45_vol_ratio"), 4),
-        "d45_chg_5m":           _f(sig.get("d45_chg_5m"), 4),
-        "d120_rsi_1h":          _f(sig.get("d120_rsi_1h"), 2),
-        "dprice_120":           _f(sig.get("dprice_120"), 4),
-        "d120_kc_pct_5m":       _f(sig.get("d120_kc_pct_5m"), 4),
-        "eth_dipvol_score":     sig.get("eth_dipvol_score", ""),
-        "slope120_stoch_k_5m":  _f(sig.get("slope120_stoch_k_5m"), 2),
-        "d15_oi_chg_pct":       _f(sig.get("d15_oi_chg_pct"), 4),
-        "slope45_vol_ratio":    _f(sig.get("slope45_vol_ratio"), 4),
-        "eth_no_slope_score":   sig.get("eth_no_slope_score", ""),
     }
 
 

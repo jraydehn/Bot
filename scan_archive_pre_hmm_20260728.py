@@ -106,20 +106,6 @@ COLUMNS = [
     "macro_regime_bear",   # P(Bear)
     # 15m directional p_up (BTC only, shadow 2026-07-10 — no consumer)
     "pup15m",              # P(next 15m bar up), (trend15, rev5) calibration tables
-    # [2026-07-28] Live HMM/regime states — computed every scan by the hourly
-    # runner since their respective go-lives but never recorded here, which
-    # left the training-grade dataset regime-blind (the niche LGBMs could not
-    # see them). Prospective logging only; historical rows stay blank —
-    # deliberately NO backfill (state reconstruction is the lookahead-bug
-    # minefield: Viterbi lookahead, containing-bar joins).
-    "hmm_smc_state",       # SMC 4-state (BTC; -1/blank = unavailable)
-    "pup_v3_hmm_state",    # rising / neutral / crashing (BTC)
-    "hmm_mtf_state",       # multi-timeframe 8-state (BTC; -1 = unavailable)
-    "hmm_pnl_state",       # gate-density / PnL-regime HMM state
-    "markov_daily_regime", # daily Markov label (Bull/Bear/Sideways)
-    "hmm_ms_state",        # microstructure HMM state (sequence-decoded)
-    "hmm_of_state",        # orderflow HMM state
-    "hmm_vd_state",        # vol-dynamics HMM state
     # Outcome (backfilled)
     "resolved_yes",
     "spot_at_expiry", "price_move_pct", "miss_pct",

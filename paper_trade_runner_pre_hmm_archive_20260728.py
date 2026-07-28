@@ -3916,26 +3916,10 @@ def main() -> None:
                     _gbdt_feats_c["pup15m"] = _pup15m
                 try:
                     import scan_archive as _sa
-                    # [2026-07-28] Record the live HMM/regime states with every
-                    # scan row — they were computed each cycle but never reached
-                    # the scan archive, leaving the training-grade dataset
-                    # regime-blind (found when the niche LGBMs had zero HMM
-                    # visibility). Merged copy so _gbdt_feats_c stays untouched.
-                    _hmm_state_cols = {
-                        "hmm_smc_state":       _hmm_smc_state if _hmm_smc_state >= 0 else "",
-                        "pup_v3_hmm_state":    _pup_v3_hmm_state_label or "",
-                        "hmm_mtf_state":       _hmm_mtf_state if _hmm_mtf_state >= 0 else "",
-                        "hmm_pnl_state":       _hmm_pnl_state if _hmm_pnl_state is not None else "",
-                        "markov_daily_regime": _markov_regime or "",
-                        "hmm_ms_state":        _hmm_ms_result[0] if _hmm_ms_result is not None else "",
-                        "hmm_of_state":        _hmm_of_result[0] if _hmm_of_result is not None else "",
-                        "hmm_vd_state":        _hmm_vd_result[0] if _hmm_vd_result is not None else "",
-                    }
                     _sa.log_scan_row(
                         ticker=c["ticker"], close_ts=c["close_time"],
                         spot=spot, strike=s_k, p_market=pm, tau_minutes=tau_c,
-                        features={**_gbdt_feats_c, **_hmm_state_cols},
-                        p_gbdt=_p_gbdt_c,
+                        features=_gbdt_feats_c, p_gbdt=_p_gbdt_c,
                         asset=args.asset, now_utc=now_utc,
                         p_up_v2=_p_up_v2_scanlog,
                     )
@@ -4037,24 +4021,10 @@ def main() -> None:
                         pass
                 try:
                     import scan_archive as _sa
-                    # [2026-07-28] Same HMM/regime state recording as the BTC
-                    # call site above (states are computed per scan for every
-                    # asset; BTC-only models leave blanks for ETH/SOL).
-                    _hmm_state_cols = {
-                        "hmm_smc_state":       _hmm_smc_state if _hmm_smc_state >= 0 else "",
-                        "pup_v3_hmm_state":    _pup_v3_hmm_state_label or "",
-                        "hmm_mtf_state":       _hmm_mtf_state if _hmm_mtf_state >= 0 else "",
-                        "hmm_pnl_state":       _hmm_pnl_state if _hmm_pnl_state is not None else "",
-                        "markov_daily_regime": _markov_regime or "",
-                        "hmm_ms_state":        _hmm_ms_result[0] if _hmm_ms_result is not None else "",
-                        "hmm_of_state":        _hmm_of_result[0] if _hmm_of_result is not None else "",
-                        "hmm_vd_state":        _hmm_vd_result[0] if _hmm_vd_result is not None else "",
-                    }
                     _sa.log_scan_row(
                         ticker=c["ticker"], close_ts=c["close_time"],
                         spot=spot, strike=s_k, p_market=pm, tau_minutes=tau_c,
-                        features={**_scan_feats_c, **_hmm_state_cols},
-                        p_gbdt=_p_gbdt_c,
+                        features=_scan_feats_c, p_gbdt=_p_gbdt_c,
                         asset=args.asset, now_utc=now_utc,
                         p_up_v2=_p_up_v2_c,
                     )

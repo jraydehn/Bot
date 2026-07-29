@@ -163,7 +163,7 @@ def _fetch_exchange_flows(asset: str) -> tuple:
 
     data = _get("/api/exchange/balance/list", {"symbol": asset.upper()})
     if not data:
-        return (float("nan"), float("nan"), float("nan"), 0, "exchange flow unavailable")
+        return (0.0, 0.0, 0.0, 0, "exchange flow unavailable")
 
     total_balance = sum(x.get("total_balance", 0) for x in data)
     flow_1d = sum(x.get("balance_change_1d", 0) for x in data)
@@ -196,12 +196,12 @@ def _fetch_options(asset: str) -> tuple:
 
     data = _get("/api/option/info", {"symbol": asset.upper()})
     if not data:
-        return (float("nan"), float("nan"), float("nan"), 0)
+        return (0.0, 0.0, 0.0, 0)
 
     # Find the "All" aggregate row
     agg = next((x for x in data if x.get("exchange_name") == "All"), data[0] if data else None)
     if agg is None:
-        return (float("nan"), float("nan"), float("nan"), 0)
+        return (0.0, 0.0, 0.0, 0)
 
     oi_usd        = float(agg.get("open_interest_usd", 0))
     oi_change_24h = float(agg.get("open_interest_change_24h", 0))
@@ -231,7 +231,7 @@ def _fetch_spot_taker(asset: str) -> tuple:
         "symbol": asset.upper(), "interval": "1d", "limit": 2, "exchange_list": _SPOT_EXCHANGES
     })
     if not data or not isinstance(data, list) or not data:
-        return (float("nan"), float("nan"), float("nan"))
+        return (0.0, 0.0, 1.0)
 
     latest = data[-1]
     buy  = float(latest.get("aggregated_buy_volume_usd",  0))
@@ -250,30 +250,19 @@ def _fetch_fear_greed() -> tuple:
     if cache_key in _CACHE and now - _CACHE[cache_key][1] < _FG_CACHE_TTL:
         return _CACHE[cache_key][0]
 
-    # Fear & Greed is on v3 base URL. [2026-07-29] CoinGlass subscription
-    # lapsed 07-27 -> fall back to alternative.me, which serves the SAME
-    # underlying index for free (verified: last real CG value 29 on 07-27
-    # matches alternative.me's 29). Neutral-default only if BOTH fail.
-    values = None
+    # Fear & Greed is on v3 base URL
     try:
         r = requests.get(
             "https://open-api-v3.coinglass.com/api/index/fear-greed-history",
             headers=_HEADERS, timeout=6,
         )
         body = r.json()
-        if body.get("code") == "0" and len(body["data"]["values"]) >= 8:
-            values = body["data"]["values"]
+        if body.get("code") != "0":
+            return (50.0, "flat", "neutral", 0)
+        values = body["data"]["values"]
+        if len(values) < 8:
+            return (50.0, "flat", "neutral", 0)
     except Exception:
-        pass
-    if values is None:
-        try:
-            r = requests.get("https://api.alternative.me/fng/?limit=8", timeout=6)
-            rows = r.json().get("data") or []
-            if len(rows) >= 8:
-                values = [float(x["value"]) for x in reversed(rows)]  # oldest->newest
-        except Exception:
-            pass
-    if values is None:
         return (50.0, "flat", "neutral", 0)
 
     current  = float(values[-1])
@@ -359,37 +348,9 @@ def _fetch_stablecoin_oi_pct_change_4h(asset: str) -> float:
             c = float(bar.get("close", 0) or 0)
             pct = (c - o) / o * 100 if o != 0 else 0.0
         else:
-            pct = None
+            pct = 0.0
     except Exception:
-        pct = None
-
-    # [2026-07-29] CoinGlass lapsed -> Coinalyze open-interest-history fallback
-    # (Binance perp OI, last completed 4h window from 1h bars). PROXY: the CG
-    # original was multi-exchange stablecoin-margin aggregated OI — same
-    # economic quantity, different aggregation; cg_oi_stable_no_gate now runs
-    # on this proxy (was fully dormant on the 0.0 default since 07-27).
-    if pct is None:
-        try:
-            import coinalyze_liq as _cz
-            sym = {"BTC": "BTCUSDT_PERP.A", "ETH": "ETHUSDT_PERP.A",
-                   "SOL": "SOLUSDT_PERP.A"}.get(asset.upper())
-            if sym:
-                import time as _t
-                r = requests.get(f"{_cz._BASE}/open-interest-history",
-                                 params={"api_key": _cz._API_KEY, "symbols": sym,
-                                         "interval": "1hour",
-                                         "from": int(_t.time()) - 6 * 3600,
-                                         "to": int(_t.time())},
-                                 timeout=6)
-                hist = r.json()
-                rows = hist[0]["history"] if hist else []
-                if len(rows) >= 5:
-                    o = float(rows[-5]["o"]); cse = float(rows[-1]["o"])
-                    pct = (cse - o) / o * 100 if o != 0 else 0.0
-        except Exception:
-            pct = None
-    if pct is None:
-        pct = float("nan")   # honest missing — gate comparisons go dormant, logs blank-ish
+        pct = 0.0
 
     _CACHE[cache_key] = (pct, now)
     return pct
@@ -419,9 +380,9 @@ def _fetch_taker_ratio_4h(asset: str) -> float:
             sell = float(bar.get("aggregated_sell_volume_usd", 0))
             val  = buy / sell if sell > 0 else 1.0
         else:
-            val = float("nan")
+            val = 1.0
     except Exception:
-        val = float("nan")
+        val = 1.0
 
     _CACHE[cache_key] = (val, now)
     return val
@@ -447,7 +408,7 @@ def _fetch_futures_taker_4h(asset: str) -> tuple:
         data = r.json().get("data") or []
         # data[-1] = current (possibly incomplete) bar; data[-2] = last completed bar
         if len(data) < 2:
-            result = (float("nan"), float("nan"), float("nan"))
+            result = (0.0, 1.0, 0.0)
         else:
             completed = data[:-1]   # exclude current incomplete bar
             last  = completed[-1]
@@ -465,7 +426,7 @@ def _fetch_futures_taker_4h(asset: str) -> tuple:
             )
             result = (round(delta_4h, 2), round(ratio_4h, 6), round(cvd_12h, 2))
     except Exception:
-        result = (float("nan"), float("nan"), float("nan"))
+        result = (0.0, 1.0, 0.0)
 
     _CACHE[cache_key] = (result, now)
     return result
@@ -572,7 +533,7 @@ def _fetch_exchange_liq_signals(asset: str) -> tuple:
     def _liq_ratio(rows: list, exchange: str) -> float:
         row = next((r for r in rows if r.get("exchange") == exchange), None)
         if not row:
-            return float("nan")
+            return 1.0
         long_l = float(row.get("longLiquidation_usd", 0))
         shrt_l = float(row.get("shortLiquidation_usd", 0))
         return round(long_l / shrt_l if shrt_l > 0 else 1.0, 4)
@@ -662,9 +623,9 @@ def _fetch_spot_cb_ratio_4h(asset: str) -> float:
             sell = float(bar.get("aggregated_sell_volume_usd", 0))
             val  = buy / sell if sell > 0 else 1.0
         else:
-            val = float("nan")
+            val = 1.0
     except Exception:
-        val = float("nan")
+        val = 1.0
 
     _CACHE[cache_key] = (val, now)
     return val

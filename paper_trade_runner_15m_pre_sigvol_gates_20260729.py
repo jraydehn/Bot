@@ -858,10 +858,6 @@ CSV_COLUMNS = [
     #   d15_oi_chg_pct<=0.054, slope45_vol_ratio<=0. ETH-only.
     "slope120_stoch_k_5m", "d15_oi_chg_pct", "slope45_vol_ratio",
     "eth_no_slope_score",
-    # [2026-07-29] concept-family gates: sigma-normalized ema20 slope (BTC NO
-    # gate) and 15m vol-price slope (ETH NO gate) + their delta inputs.
-    "d45_ema20_dist_1h", "d15_realized_vol_annual",
-    "z45_ema20_dist_1h", "volslope_15",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -2695,11 +2691,8 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     _eth_dipvol_score: "int | None" = None
     _eth_no_slope_score: "int | None" = None
     if asset.upper() in ("BTC", "ETH"):
-        # [2026-07-29] ema20_dist_1h + realized_vol_annual added as slope bases
-        # for the sigma-normalized / vol-price-plane gates below.
         _slope_bases = ["stoch_k_5m", "kc_pct_5m", "bp_15m", "bp_5m", "vol_ratio",
-                        "chg_5m", "rsi_1h", "oi_chg_pct", "ema20_dist_1h",
-                        "realized_vol_annual"]
+                        "chg_5m", "rsi_1h", "oi_chg_pct"]
         try:
             if '_df_log' in dir() and len(_df_log):
                 _avail = [c for c in _slope_bases if c in _df_log.columns]
@@ -2735,32 +2728,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                             sig[f"slope{_tag}_{_col}"] = max(-50.0, min(50.0, _d / _dprice))
         except Exception as _spe2:
             print(f"  [slope_feats] compute failed (conditions default false): {_spe2}")
-
-        # [2026-07-29] Concept-family derived features (15m concept sweep,
-        # project_btc_eth15m_fee_audit_20260728.md):
-        #   z45_ema20_dist_1h = d45_ema20 / (dprice_45 / sigma_45) — the
-        #     SIGMA-NORMALIZED 45m ema20 slope (price change measured in vol
-        #     units). The raw slope45_ema20 failed honest OOS; this passes
-        #     (permP=0.0010) — the coordinate change is what generalizes.
-        #   volslope_15 = d15_realized_vol / dprice_15 — vol-price plane.
-        try:
-            _d45_ema = sig.get("d45_ema20_dist_1h")
-            _dp45 = sig.get("dprice_45")
-            _rv_now = float(sig.get("realized_vol_annual") or 0)
-            if _d45_ema is not None and _dp45 and _rv_now > 0:
-                _sig45 = _rv_now * 100.0 * (45.0 / 525600.0) ** 0.5
-                _dps45 = float(_dp45) / _sig45
-                if _dps45 != 0.0:
-                    sig["z45_ema20_dist_1h"] = max(-50.0, min(50.0, float(_d45_ema) / _dps45))
-        except (TypeError, ValueError):
-            pass
-        try:
-            _d15_rv = sig.get("d15_realized_vol_annual")
-            _dp15 = sig.get("dprice_15")
-            if _d15_rv is not None and _dp15:
-                sig["volslope_15"] = max(-50.0, min(50.0, float(_d15_rv) / float(_dp15)))
-        except (TypeError, ValueError):
-            pass
 
         def _ck(key, thr, ge):
             v = sig.get(key)
@@ -4030,48 +3997,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             evaluated.append((best_edge, best_side, c, p_model, offset_pct))
             continue
 
-        # ── [2026-07-29 concept-family gates] From the 15m concept sweep
-        # (sigma-normalized slopes + vol-price plane; strict gauntlet + honest
-        # OOS + perturbation; project_btc_eth15m_fee_audit_20260728.md).
-        # Defensive NO-filters on already-positive residual books.
-        # Backup: paper_trade_runner_15m_pre_sigvol_gates_20260729.py
-
-        # [btc15m_no_sigslope_gate] Block BTC NO unless the sigma-normalized
-        # 45m ema20 slope is >= 0 (ema20-dist moving WITH the vol-scaled price
-        # move). OOS permP=0.0010, plateau-robust thr 0.0-0.1, keeps all
-        # months green, drops −$1,159, p22-aligned. Raw slope45_ema20 FAILED
-        # OOS — vol-normalized coordinate is what generalizes. Missing
-        # history -> condition false -> block (matches validation).
-        if asset.upper() == "BTC" and best_side == "no":
-            _z45e = sig.get("z45_ema20_dist_1h")
-            try:
-                _z45_ok = float(_z45e) >= 0.0
-            except (TypeError, ValueError):
-                _z45_ok = False
-            if not _z45_ok:
-                print(f"    [btc15m_no_sigslope_gate] BLOCK NO {ticker} — "
-                      f"z45_ema20={_z45e} < 0 (sigma-normalized ema20 slope "
-                      f"against the move; dropped bucket −$1,159)")
-                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                continue
-
-        # [eth15m_no_volslope_gate] Block ETH NO when vol is expanding faster
-        # than the 15m price move explains (volslope_15 > 0.52 — jump risk
-        # brewing; don't sell stability). OOS permP=0.0058, robust thr
-        # 0.4-0.65, drops −$646, p22-aligned. Missing history -> block.
-        if asset.upper() == "ETH" and best_side == "no":
-            _vs15 = sig.get("volslope_15")
-            try:
-                _vs_ok = float(_vs15) <= 0.52
-            except (TypeError, ValueError):
-                _vs_ok = False
-            if not _vs_ok:
-                print(f"    [eth15m_no_volslope_gate] BLOCK NO {ticker} — "
-                      f"volslope_15={_vs15} > 0.52 (vol expanding vs price "
-                      f"move; dropped bucket −$646)")
-                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                continue
-
         # P_MARKET VOLATILITY GATE: skip deep-OTM contracts on either side.
         # Sim (347 resolved trades): 0W/26L blocked at 0.12/0.88 → +$538 PnL delta.
         if p_market < P_MARKET_VOL_MIN or p_market > P_MARKET_VOL_MAX:
@@ -4684,11 +4609,6 @@ def _build_row(
         "d15_oi_chg_pct":       _f(sig.get("d15_oi_chg_pct"), 4),
         "slope45_vol_ratio":    _f(sig.get("slope45_vol_ratio"), 4),
         "eth_no_slope_score":   sig.get("eth_no_slope_score", ""),
-        # [2026-07-29] concept-family gate inputs
-        "d45_ema20_dist_1h":    _f(sig.get("d45_ema20_dist_1h"), 4),
-        "d15_realized_vol_annual": _f(sig.get("d15_realized_vol_annual"), 5),
-        "z45_ema20_dist_1h":    _f(sig.get("z45_ema20_dist_1h"), 4),
-        "volslope_15":          _f(sig.get("volslope_15"), 4),
     }
 
 

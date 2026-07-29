@@ -862,9 +862,6 @@ CSV_COLUMNS = [
     # gate) and 15m vol-price slope (ETH NO gate) + their delta inputs.
     "d45_ema20_dist_1h", "d15_realized_vol_annual",
     "z45_ema20_dist_1h", "volslope_15",
-    # [2026-07-29] coordinate-pairing gates
-    "zd15_lower_wick_15m", "d15_z_drift_6h",
-    "v120_vwap_dist", "v45_hurst_exponent",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -2447,10 +2444,8 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # rescue slope120_stoch_k_15m>=40 OOS +$1,327 permP=0.0000.
     _sol_persist_score: "int | None" = None
     if asset.upper() == "SOL":
-        # [2026-07-29] hurst + realized_vol added for the vol-coordinate gate.
         _slope_cols = ["stoch_k_5m", "stoch_k_15m", "rsi_1h", "bb_pct_1h",
-                       "vwap_dist", "ema20_dist_1h", "hurst_exponent",
-                       "realized_vol_annual"]
+                       "vwap_dist", "ema20_dist_1h"]
         try:
             if '_df_log' in dir() and len(_df_log):
                 _hist = _df_log[["logged_at", "spot"] + _slope_cols].copy()
@@ -2466,7 +2461,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     if pd.isna(_prev_spot) or _prev_spot <= 0 or spot <= 0:
                         continue
                     _dprice = (spot / float(_prev_spot) - 1.0) * 100.0
-                    sig[f"dprice_{_tag}"] = _dprice
                     for _col in _slope_cols:
                         _cur = sig.get(_col)
                         _prv = pd.to_numeric(_prev[_col], errors="coerce")
@@ -2489,16 +2483,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 return 1 if float(v) >= thr else 0
             except (TypeError, ValueError):
                 return 0
-        # [2026-07-29] vol-coordinate feature for sol15m_no_vhurst_gate:
-        # v45_hurst = d45_hurst / d45_realized_vol (Δsignal per Δvol).
-        try:
-            _d45h = float(sig.get("d45_hurst_exponent"))
-            _d45rv = float(sig.get("d45_realized_vol_annual"))
-            if _d45rv != 0.0:
-                sig["v45_hurst_exponent"] = max(-50.0, min(50.0, _d45h / _d45rv))
-        except (TypeError, ValueError):
-            pass
-
         _sol_persist_score = (
             _sc("autocorr1_30", 0.0) + _sc("hurst_exponent", 0.65)
             + _sc("slope120_bb_pct_1h", 0.5) + _sc("slope120_rsi_1h", 20.0)
@@ -2715,9 +2699,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # for the sigma-normalized / vol-price-plane gates below.
         _slope_bases = ["stoch_k_5m", "kc_pct_5m", "bp_15m", "bp_5m", "vol_ratio",
                         "chg_5m", "rsi_1h", "oi_chg_pct", "ema20_dist_1h",
-                        "realized_vol_annual",
-                        # [2026-07-29] coordinate-gate bases
-                        "lower_wick_15m", "z_drift_6h", "vwap_dist"]
+                        "realized_vol_annual"]
         try:
             if '_df_log' in dir() and len(_df_log):
                 _avail = [c for c in _slope_bases if c in _df_log.columns]
@@ -2761,23 +2743,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         #     units). The raw slope45_ema20 failed honest OOS; this passes
         #     (permP=0.0010) — the coordinate change is what generalizes.
         #   volslope_15 = d15_realized_vol / dprice_15 — vol-price plane.
-        #   [2026-07-29] zd15_lower_wick_15m (BTC, z-drift coordinate) and
-        #   v120_vwap_dist (ETH, vol coordinate) — exhaustive pairing matrix,
-        #   honest OOS permP 0.0060 / 0.0032.
-        try:
-            _d15lw = float(sig.get("d15_lower_wick_15m"))
-            _d15zd = float(sig.get("d15_z_drift_6h"))
-            if _d15zd != 0.0:
-                sig["zd15_lower_wick_15m"] = max(-50.0, min(50.0, _d15lw / _d15zd))
-        except (TypeError, ValueError):
-            pass
-        try:
-            _d120vw = float(sig.get("d120_vwap_dist"))
-            _d120rv = float(sig.get("d120_realized_vol_annual"))
-            if _d120rv != 0.0:
-                sig["v120_vwap_dist"] = max(-50.0, min(50.0, _d120vw / _d120rv))
-        except (TypeError, ValueError):
-            pass
         try:
             _d45_ema = sig.get("d45_ema20_dist_1h")
             _dp45 = sig.get("dprice_45")
@@ -4107,57 +4072,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 evaluated.append((best_edge, best_side, c, p_model, offset_pct))
                 continue
 
-        # ── [2026-07-29 coordinate-pairing gates] From the exhaustive
-        # signal×coordinate matrix (all raw signals × {Δvol, Δz_drift,
-        # sigma-price} × 3 lookbacks; strict gauntlet + honest OOS).
-        # Backup: paper_trade_runner_15m_pre_coordgates_20260729.py
-
-        # [btc15m_yes_zdwick_gate] Z-DRIFT coordinate's first validated gate:
-        # keep BTC YES only when zd15_lower_wick (Δlower_wick per Δz_drift,
-        # 15m) <= 10.4. OOS permP=0.0060, H2 drop −$560, p22 +306/−260.
-        # Missing/zero-denominator -> blocked (matches validation).
-        if asset.upper() == "BTC" and best_side == "yes":
-            _zdw = sig.get("zd15_lower_wick_15m")
-            try:
-                _zdw_ok = float(_zdw) <= 10.4
-            except (TypeError, ValueError):
-                _zdw_ok = False
-            if not _zdw_ok:
-                print(f"    [btc15m_yes_zdwick_gate] BLOCK YES {ticker} — "
-                      f"zd15_lower_wick={_zdw} (needs <=10.4; z-drift coordinate)")
-                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                continue
-
-        # [eth15m_no_vvwap_gate] Vol coordinate: keep ETH NO only when
-        # v120_vwap (Δvwap_dist per Δrealized_vol, 2h) <= 1.54. OOS
-        # permP=0.0032, H2 drop −$639. Missing -> blocked.
-        if asset.upper() == "ETH" and best_side == "no":
-            _vvw = sig.get("v120_vwap_dist")
-            try:
-                _vvw_ok = float(_vvw) <= 1.54
-            except (TypeError, ValueError):
-                _vvw_ok = False
-            if not _vvw_ok:
-                print(f"    [eth15m_no_vvwap_gate] BLOCK NO {ticker} — "
-                      f"v120_vwap={_vvw} (needs <=1.54; vol coordinate)")
-                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                continue
-
-        # [sol15m_no_vhurst_gate] Vol coordinate: keep SOL NO only when
-        # v45_hurst (Δhurst per Δrealized_vol, 45m) <= 0. OOS permP=0.0028,
-        # H2 drop −$497. Missing -> blocked.
-        if asset.upper() == "SOL" and best_side == "no":
-            _vh = sig.get("v45_hurst_exponent")
-            try:
-                _vh_ok = float(_vh) <= 0.0
-            except (TypeError, ValueError):
-                _vh_ok = False
-            if not _vh_ok:
-                print(f"    [sol15m_no_vhurst_gate] BLOCK NO {ticker} — "
-                      f"v45_hurst={_vh} (needs <=0; vol coordinate)")
-                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
-                continue
-
         # P_MARKET VOLATILITY GATE: skip deep-OTM contracts on either side.
         # Sim (347 resolved trades): 0W/26L blocked at 0.12/0.88 → +$538 PnL delta.
         if p_market < P_MARKET_VOL_MIN or p_market > P_MARKET_VOL_MAX:
@@ -4775,10 +4689,6 @@ def _build_row(
         "d15_realized_vol_annual": _f(sig.get("d15_realized_vol_annual"), 5),
         "z45_ema20_dist_1h":    _f(sig.get("z45_ema20_dist_1h"), 4),
         "volslope_15":          _f(sig.get("volslope_15"), 4),
-        "zd15_lower_wick_15m":  _f(sig.get("zd15_lower_wick_15m"), 4),
-        "d15_z_drift_6h":       _f(sig.get("d15_z_drift_6h"), 5),
-        "v120_vwap_dist":       _f(sig.get("v120_vwap_dist"), 4),
-        "v45_hurst_exponent":   _f(sig.get("v45_hurst_exponent"), 4),
     }
 
 

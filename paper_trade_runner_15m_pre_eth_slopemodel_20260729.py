@@ -688,13 +688,7 @@ def _load_15m_lgbm(asset: str) -> object:
     try:
         with open(path, "rb") as f:
             model = pickle.load(f)
-        # [2026-07-29] ETH slope-model artifact is a dict {model, features,
-        # slope_bases} (162 feats incl d/S slope features); legacy assets are
-        # bare sklearn models.
-        if isinstance(model, dict):
-            print(f"  [{asset.lower()}_15m_lgbm] Loaded slope-model ({len(model['features'])} features)")
-        else:
-            print(f"  [{asset.lower()}_15m_lgbm] Loaded ({model.n_features_in_} features)")
+        print(f"  [{asset.lower()}_15m_lgbm] Loaded ({model.n_features_in_} features)")
         return model
     except Exception as e:
         print(f"  [{asset.lower()}_15m_lgbm] Failed to load: {e}")
@@ -2160,47 +2154,7 @@ def compute_p_model_15m(spot: float, floor_strike: float,
 
     # ── LightGBM primary path ─────────────────────────────────────────────────
     lgbm_model = _LGBM_MODELS.get(asset.upper())
-    # [2026-07-29] Slope-model path (dict artifact; ETH first). Assembles the
-    # trained feature list from sig + contract params using the scan-archive
-    # naming. d/S slope features map to the runner's own d{tag}_/slope{tag}_
-    # sig keys (identical construction). Missing/unmapped features -> NaN
-    # (LGBM-native). Replaces the inverted 07-22-retrain+blend chain — see
-    # era A/B: claimed 21.4pp/realized -0.8pp vs this model's +2.8pp realized
-    # on the same failing 07-22+ window (Brier 0.1778 vs blend 0.2330).
-    if isinstance(lgbm_model, dict):
-        try:
-            offset_pct = (floor_strike / spot - 1.0) * 100.0
-            _fvals = {}
-            for _fn in lgbm_model["features"]:
-                if _fn == "p_market":
-                    v = p_market
-                elif _fn == "tau_minutes":
-                    v = tau_min
-                elif _fn == "offset_pct":
-                    v = offset_pct
-                elif _fn == "z_score":
-                    v = z_strike
-                elif _fn == "z_moneyness":
-                    v = math.log(floor_strike / spot) / math.sqrt(max(tau_min, 1.0))
-                elif _fn.startswith(("D15_", "D45_", "D120_")):
-                    _tag, _base = _fn[1:].split("_", 1)
-                    v = sig.get(f"d{_tag}_{_base}")
-                elif _fn.startswith(("S15_", "S45_", "S120_")):
-                    _tag, _base = _fn[1:].split("_", 1)
-                    v = sig.get(f"slope{_tag}_{_base}")
-                else:
-                    v = sig.get(_fn)
-                try:
-                    _fvals[_fn] = float(v)
-                except (TypeError, ValueError):
-                    _fvals[_fn] = float("nan")
-            p_lgbm = float(lgbm_model["model"].predict_proba(
-                pd.DataFrame([_fvals]))[0, 1])
-            return min(max(p_lgbm, 0.01), 0.99)
-        except Exception as _sme:
-            print(f"  [slope_model] predict failed ({_sme}) — falling back")
-
-    if lgbm_model is not None and not isinstance(lgbm_model, dict):
+    if lgbm_model is not None:
         try:
             offset_pct = (floor_strike / spot - 1.0) * 100.0
             feat = pd.DataFrame([{
@@ -2763,10 +2717,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                         "chg_5m", "rsi_1h", "oi_chg_pct", "ema20_dist_1h",
                         "realized_vol_annual",
                         # [2026-07-29] coordinate-gate bases
-                        "lower_wick_15m", "z_drift_6h", "vwap_dist",
-                        # [2026-07-29b] ETH slope-model bases
-                        "stoch_k_15m", "bb_pct_1h", "vol_ratio_5m", "kc_pct_1h",
-                        "hurst_exponent", "ls_long_pct"]
+                        "lower_wick_15m", "z_drift_6h", "vwap_dist"]
         try:
             if '_df_log' in dir() and len(_df_log):
                 _avail = [c for c in _slope_bases if c in _df_log.columns]
@@ -2777,14 +2728,6 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 _cur_vals = {c: sig.get(c) for c in _slope_bases}
                 _cur_vals["oi_chg_pct"] = (_liq_signal.oi_chg_pct
                                            if _liq_signal is not None else None)
-                _cur_vals["ls_long_pct"] = (_liq_signal.ls_long_pct
-                                            if _liq_signal is not None else None)
-                # statics for the ETH slope model's feature assembly
-                if _liq_signal is not None:
-                    sig["oi_chg_pct"] = _liq_signal.oi_chg_pct
-                    sig["ls_long_pct"] = _liq_signal.ls_long_pct
-                    sig["liq_score"] = _liq_signal.liq_score
-                    sig["liq_bias"] = _liq_signal.liq_bias
                 for _tag, _mins in (("15", 15), ("45", 45), ("120", 120)):
                     _past = _hist2[_hist2["ts"] <= _now_ts2 - pd.Timedelta(minutes=_mins)]
                     if _past.empty:

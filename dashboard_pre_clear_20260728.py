@@ -23,12 +23,11 @@ RESULTS_DIR     = Path(__file__).parent / "results"
 REFRESH_SECONDS = 60
 DISPLAY_FROM    = "2026-05-16 06:56:42"   # hide trades before this UTC time (dashboard cleared May 15 11:56 PM PDT — ETH 15m z_drift sim complete, BTC 15m branched model live)
 ASSET_DISPLAY_FROM = {
-    # [cleared 2026-07-28 per user request — fresh read from the last hourly
-    # runner restart (fee-true accounting + HMM-state archive logging live;
-    # decision logic unchanged). Prior cutoff was 2026-06-18 06:18:28.]
-    "BTC": "2026-07-28 22:15:13",
-    "ETH": "2026-07-28 22:15:13",
-    "SOL": "2026-07-28 22:15:13",
+    "BTC": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 300)
+    "ETH": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 240)
+    "SOL": "2026-06-18 06:18:28",  # cleared 2026-06-18 — bankroll bumped to $2000 (loss limit 240)
+                                    # [restored 2026-07-17 per user request — the 07-12 clear was
+                                    # never instructed. See feedback_dashboard_clear_only_when_asked.md]
     "BTC_OLD": "2026-07-21 17:27:13",  # cleared 2026-07-21 — ported 9 structural/infra bug
                                     # fixes (schema drift, degenerate ms/vd/of HMM decode,
                                     # per-runner stop-loss isolation, markov_yf NameError,
@@ -39,22 +38,15 @@ ASSET_DISPLAY_FROM = {
                                     # isolated from the pre-fix period's HMM-decode etc. noise.
 }
 ASSET_DISPLAY_FROM_15M = {
-    "BTC": "2026-07-28 06:53:02",  # cleared 2026-07-28 per user request — fee-audit gate
-                                    # package live (no_midhigh/no_deep/yes_thrust gates +
-                                    # fee-aware Kelly). Prior: 2026-06-29 23:31:53.
-    "ETH": "2026-07-28 06:53:02",  # cleared 2026-07-28 per user request — fee-audit gate
-                                    # package live (3 band blocks + yes_dipvol + no_slope
-                                    # gates + fee-aware Kelly). Prior: 2026-07-14 22:01:15.
-                                    # [older note: 2026-07-14 retrained lgbm_15m_eth.pkl deployed
+    "BTC": "2026-06-29 23:31:53",  # cleared 2026-06-29 — 5m stoch zone gates live
+    "ETH": "2026-07-14 22:01:15",  # cleared 2026-07-14 — retrained lgbm_15m_eth.pkl deployed
                                     # (train split extended thru 2025-07, val thru 2026-01);
                                     # want a clean read isolated from the pre-retrain model
                                     # [restored 2026-07-17 per user request after an
                                     # unprompted clear for the eth_yes_kelly_damp removal —
                                     # see project_eth15m_yes_kelly_undamp_20260717.md and
                                     # feedback_dashboard_clear_only_when_asked.md]
-    "SOL": "2026-07-28 06:18:03",  # cleared 2026-07-28 per user request — persistence YES
-                                    # gate + NO band gates + fee-aware Kelly live (restart
-                                    # 07-28 06:18 UTC). Prior: 2026-06-18 06:18:28.
+    "SOL": "2026-06-18 06:18:28",  # unaffected by the 07-07 hourly-only clear — restores prior cutoff
                                     # (15m falls back to ASSET_DISPLAY_FROM when absent here, which
                                     # would otherwise incorrectly inherit the hourly-only 07-07 clear)
 }

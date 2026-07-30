@@ -1890,6 +1890,23 @@ def compute_signals(live_1m: pd.DataFrame, asset: str = "BTC",
     ).dropna()
     df4h_c = df4h.iloc[:-1] if len(df4h) >= 2 else df4h
 
+    # [2026-07-30] Override with 4h bars resampled from the direct 1h fetch.
+    # Resampling 1m→4h tops out at ~4 completed bars (Binance 1m limit=1000
+    # ≈ 16.7h): the len>=5 guard below almost never passed, and when it did,
+    # 5 bars < period+1 sent _stoch_k/_rsi to their 50.0 fallback — so
+    # stoch_k_4h and rsi_4h were constant 50.0 for their entire logged
+    # history, all assets. The 400-bar live_1h fetch resamples to ~99
+    # completed 4h bars, enabling the real period=14 path. Same fix pattern
+    # as the live_1h override in the 1h block above.
+    if live_1h is not None and len(live_1h) >= 5:
+        _df4h_d = live_1h.resample("4h").agg(
+            {"open": "first", "high": "max", "low": "min",
+             "close": "last", "volume": "sum"}
+        ).dropna()
+        _df4h_d_c = _df4h_d.iloc[:-1] if len(_df4h_d) >= 2 else _df4h_d
+        if len(_df4h_d_c) > len(df4h_c):
+            df4h_c = _df4h_d_c
+
     if len(df4h_c) >= 2:
         h4  = df4h_c.iloc[-1]
         r4h = float(h4["high"]) - float(h4["low"])

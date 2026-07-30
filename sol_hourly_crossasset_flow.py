@@ -36,11 +36,16 @@ import train_sol_hourly_niche_v3 as v3
 BASE = Path(__file__).parent
 
 
-def build_book_series(asset: str) -> pd.DataFrame:
-    """Loop-level strike-free book summaries for one asset's hourly archive."""
-    df = pd.read_csv(BASE / "results" / f"{asset}_scan_archive.csv",
-                     usecols=["logged_at", "contract_ticker", "p_market",
-                              "spot", "strike"], low_memory=False)
+def build_book_series(asset: str, df: pd.DataFrame = None) -> pd.DataFrame:
+    """Loop-level strike-free book summaries for one asset's hourly archive.
+    Pass `df` (logged_at/contract_ticker/p_market/spot/strike) to build from
+    a pre-loaded tail instead of reading the full CSV (runner path)."""
+    if df is None:
+        df = pd.read_csv(BASE / "results" / f"{asset}_scan_archive.csv",
+                         usecols=["logged_at", "contract_ticker", "p_market",
+                                  "spot", "strike"], low_memory=False)
+    else:
+        df = df[["logged_at", "contract_ticker", "p_market", "spot", "strike"]].copy()
     df["dt"] = pd.to_datetime(df["logged_at"].astype(str).str.replace(
         r"\+00:00$", "", regex=True), errors="coerce", utc=True, format="mixed")
     df = df.dropna(subset=["dt"]).sort_values("dt").reset_index(drop=True)

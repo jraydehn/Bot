@@ -893,9 +893,8 @@ st.markdown("<hr style='margin:12px 0 16px 0;'>", unsafe_allow_html=True)
 # Outer asset tabs
 # ---------------------------------------------------------------------------
 
-tab_btc, tab_eth, tab_sol, tab_sol_shadow, tab_sol_hourly_ab, tab_cmp = st.tabs(
-    ["₿  BTC", "Ξ  ETH", "◎  SOL", "👥  SOL SHADOW A/B", "🥊  SOL HOURLY A/B",
-     "📊  Compare"]
+tab_btc, tab_eth, tab_sol, tab_sol_shadow, tab_cmp = st.tabs(
+    ["₿  BTC", "Ξ  ETH", "◎  SOL", "👥  SOL SHADOW A/B", "📊  Compare"]
 )
 
 with tab_btc:
@@ -976,80 +975,6 @@ with tab_sol_shadow:
                            f"settled correct {_shadow_right:.0%} of the time.")
     except Exception as _shex:
         st.warning(f"shadow tab error: {_shex}")
-
-with tab_sol_hourly_ab:
-    # [2026-07-30] Three-way SOL HOURLY forward A/B: production analytic model
-    # vs v7 (350-feat quantile) vs v8 (41-feat survivor-core quantile).
-    # v7/v8 books are real standalone runner CSVs (flat $100, net of fees,
-    # pre-registered YES pm[.20,.80] edge>=.05 primary; NO side secondary).
-    # Production hourly trades are normalized to the same flat-$100 stake for
-    # comparability. Clock starts 2026-07-30; first read ~08-13, replacement
-    # decision late-Aug. The 07-09..07-30 window is burned — never scored.
-    st.markdown(
-        "<div style='color:#f0a500;font-size:0.78rem;margin-bottom:16px;'>"
-        "SOL hourly three-way forward A/B since 2026-07-30 — production (frozen "
-        "analytic) vs v7 (quantile, full stack) vs v8 (quantile, 41 survivor-core "
-        "features). Flat $100/contract, net of fees. Challenger PRIMARY = YES side "
-        "only (pre-registered); NO side shown separately below. Decision late-Aug."
-        "</div>", unsafe_allow_html=True)
-    _AB_START = pd.Timestamp("2026-07-30 00:00", tz="UTC")
-    try:
-        _books = {}
-        for _lbl, _path in [("v7", "results/paper_trades_sol_hourly_v7.csv"),
-                            ("v8", "results/paper_trades_sol_hourly_v8.csv")]:
-            _b = pd.read_csv(_path, low_memory=False)
-            _b["dt"] = pd.to_datetime(_b["logged_at"], errors="coerce", utc=True)
-            for _c in ["p_market", "would_pnl_net", "resolved_yes"]:
-                _b[_c] = pd.to_numeric(_b[_c], errors="coerce")
-            _books[_lbl] = _b[_b["dt"] >= _AB_START]
-        _pr = pd.read_csv("results/paper_trades_sol.csv", low_memory=False)
-        _pr["dt"] = pd.to_datetime(_pr["logged_at"], errors="coerce", utc=True)
-        _pr = _pr[(_pr["decision"] == "trade") & (_pr["dt"] >= _AB_START)].copy()
-        for _c in ["p_market"]:
-            _pr[_c] = pd.to_numeric(_pr[_c], errors="coerce")
-        _pr = _pr.dropna(subset=["p_market", "would_win"])
-        _prc = np.where(_pr["side"] == "yes", _pr["p_market"], 1 - _pr["p_market"])
-        _prw = _pr["would_win"].astype(str).str.lower().isin(["true", "1", "1.0"])
-        _prf = 0.07 * _pr["p_market"] * (1 - _pr["p_market"])
-        _pr["pnl100"] = np.where(_prw, 100 * (1 - _prc) / _prc, -100.0) - (100 / _prc) * _prf
-
-        _figab = go.Figure()
-        _cols = st.columns(3)
-        for _i, (_lbl, _clr) in enumerate([("production", "#4f8bf9"),
-                                           ("v7", "#f0a500"), ("v8", "#00c076")]):
-            if _lbl == "production":
-                _q = _pr.rename(columns={"pnl100": "pnl"})[["dt", "pnl"]].dropna()
-                _wr = float(_prw.mean()) if len(_pr) else float("nan")
-                _be = float(np.mean(_prc)) if len(_pr) else float("nan")
-            else:
-                _bb = _books[_lbl]
-                _res = _bb[(_bb["side"] == "yes") & _bb["would_pnl_net"].notna()]
-                _q = _res.rename(columns={"would_pnl_net": "pnl"})[["dt", "pnl"]]
-                _wr = float(pd.to_numeric(_res["would_win"], errors="coerce").mean()) \
-                    if len(_res) else float("nan")
-                _be = float(_res["p_market"].mean()) if len(_res) else float("nan")
-            if len(_q):
-                _q = _q.sort_values("dt")
-                _figab.add_trace(go.Scatter(x=_q["dt"], y=_q["pnl"].cumsum(),
-                                            name=_lbl, line=dict(color=_clr, width=2)))
-            _cols[_i].metric(f"{_lbl}: net (flat $100)",
-                             f"${_q['pnl'].sum():+,.0f}" if len(_q) else "—",
-                             f"{len(_q)} resolved · WR {_wr:.0%} vs BE {_be:.0%}"
-                             if len(_q) else "collecting…")
-        _figab.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
-                             legend=dict(orientation="h"))
-        st.plotly_chart(_figab, use_container_width=True)
-
-        _sec = []
-        for _lbl in ["v7", "v8"]:
-            _nb = _books[_lbl]
-            _nr = _nb[(_nb["side"] == "no") & _nb["would_pnl_net"].notna()]
-            _pend = int(_nb["would_pnl_net"].isna().sum())
-            _sec.append(f"{_lbl}: NO-side (secondary) n={len(_nr)} "
-                        f"net=${_nr['would_pnl_net'].sum():+,.0f} · {_pend} pending")
-        st.caption("  |  ".join(_sec))
-    except Exception as _abex:
-        st.warning(f"hourly A/B tab error: {_abex}")
 
 with tab_cmp:
     st.markdown(

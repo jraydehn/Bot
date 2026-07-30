@@ -13,7 +13,6 @@ from zoneinfo import ZoneInfo
 PST = ZoneInfo("America/Los_Angeles")
 
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 import requests
 import streamlit as st
@@ -893,8 +892,8 @@ st.markdown("<hr style='margin:12px 0 16px 0;'>", unsafe_allow_html=True)
 # Outer asset tabs
 # ---------------------------------------------------------------------------
 
-tab_btc, tab_eth, tab_sol, tab_sol_shadow, tab_cmp = st.tabs(
-    ["₿  BTC", "Ξ  ETH", "◎  SOL", "👥  SOL SHADOW A/B", "📊  Compare"]
+tab_btc, tab_eth, tab_sol, tab_btc_old, tab_cmp = st.tabs(
+    ["₿  BTC", "Ξ  ETH", "◎  SOL", "🕰️  BTC (OLD MODEL TEST)", "📊  Compare"]
 )
 
 with tab_btc:
@@ -906,75 +905,16 @@ with tab_eth:
 with tab_sol:
     render_asset("SOL")
 
-with tab_sol_shadow:
-    # [2026-07-30] Replaced the BTC (OLD MODEL TEST) tab per user request —
-    # that experiment ended 07-28 (runner stopped; verdict in memory; its CSV
-    # is preserved untouched). This tab shows the SOL slope-shadow candidate
-    # (p_gbdt column since 2026-07-30 01:00 UTC) vs the production model
-    # (p_model_15m) as hypothetical flat-$100 books on identical live scans.
-    # Promotion decision at the 08-11 review.
+with tab_btc_old:
     st.markdown(
         "<div style='color:#f0a500;font-size:0.78rem;margin-bottom:16px;'>"
-        "SOL 15m model A/B — production (iso+z-expansion) vs slope-shadow candidate, "
-        "scored as hypothetical flat-$100 books (fee-adjusted edge ≥ 0.04, one bet per "
-        "contract, net of fees) on identical live scans since 2026-07-30 01:00 UTC. "
-        "Shadow logs to the p_gbdt column; decisions remain production-only."
+        "Standalone pre-July-1 BTC hourly model (commit 09df1d9), run in isolation to test "
+        "whether reverting fixes the post-audit degradation. Paper-only, own dedicated CSV — "
+        "does not share data with the BTC tab above."
         "</div>",
         unsafe_allow_html=True,
     )
-    _SH_START = pd.Timestamp("2026-07-30 01:00", tz="UTC")
-    try:
-        _shp = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False)
-        _shp["dt"] = pd.to_datetime(_shp["logged_at"], errors="coerce", utc=True)
-        for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes"]:
-            _shp[_c] = pd.to_numeric(_shp[_c], errors="coerce")
-        _sh = _shp[(_shp["dt"] >= _SH_START)
-                   & _shp["resolved_yes"].notna()
-                   & _shp["p_market"].between(0.03, 0.97)].copy()
-        if len(_sh) < 3:
-            st.info(f"Collecting… {len(_sh)} resolved scans since shadow go-live "
-                    f"(unresolved scans settle within ~15 min of expiry).")
-        else:
-            _figsh = go.Figure()
-            _summary = []
-            for _lbl, _col, _clr in [("production", "p_model_15m", "#4f8bf9"),
-                                     ("shadow", "p_gbdt", "#f0a500")]:
-                _s = _sh.dropna(subset=[_col]).copy()
-                _fee = 0.07 * _s["p_market"] * (1 - _s["p_market"])
-                _ey = _s[_col] - _s["p_market"] - _fee
-                _en = _s["p_market"] - _s[_col] - _fee
-                _s["side"] = np.where(_ey >= _en, "yes", "no")
-                _s["edge"] = np.maximum(_ey, _en)
-                _q = _s[_s["edge"] >= 0.04].sort_values("dt").drop_duplicates(
-                    "contract_ticker", keep="first")
-                _cost = np.where(_q["side"] == "yes", _q["p_market"], 1 - _q["p_market"])
-                _win = np.where(_q["side"] == "yes", _q["resolved_yes"] == 1,
-                                _q["resolved_yes"] == 0)
-                _feeq = 0.07 * _q["p_market"] * (1 - _q["p_market"])
-                _pnl = pd.Series(np.where(_win, 100 * (1 - _cost) / _cost, -100)
-                                 - (100 / _cost) * _feeq, index=_q.index)
-                _figsh.add_trace(go.Scatter(x=_q["dt"], y=_pnl.cumsum(),
-                                            name=_lbl, line=dict(color=_clr, width=2)))
-                _summary.append((_lbl, len(_q), float(_pnl.sum()),
-                                 float(np.mean(_win)) if len(_q) else float("nan"),
-                                 float(np.mean(_cost)) if len(_q) else float("nan")))
-            _figsh.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
-                                 legend=dict(orientation="h"))
-            st.plotly_chart(_figsh, use_container_width=True)
-            _c1, _c2 = st.columns(2)
-            for _colm, (_lbl, _n, _net, _wr, _be) in zip((_c1, _c2), _summary):
-                _colm.metric(f"{_lbl}: net (hypothetical $100 flat)", f"${_net:+,.0f}",
-                             f"{_n} trades · WR {_wr:.0%} vs BE {_be:.0%}")
-            _dis = _sh.dropna(subset=["p_gbdt", "p_model_15m"])
-            _dis = _dis[(_dis["p_gbdt"] - _dis["p_model_15m"]).abs() >= 0.05]
-            if len(_dis):
-                _shadow_right = np.mean(
-                    np.where(_dis["p_gbdt"] > _dis["p_model_15m"],
-                             _dis["resolved_yes"] == 1, _dis["resolved_yes"] == 0))
-                st.caption(f"Model disagreements ≥5pp: {len(_dis)} scans — shadow's side "
-                           f"settled correct {_shadow_right:.0%} of the time.")
-    except Exception as _shex:
-        st.warning(f"shadow tab error: {_shex}")
+    render_asset("BTC_OLD", csv_key="BTC_OLD", spot_asset="BTC", label="BTC (OLD)")
 
 with tab_cmp:
     st.markdown(

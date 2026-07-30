@@ -2130,8 +2130,7 @@ def _compute_1h_drift(sig: dict, tau_min: float) -> float:
 def compute_p_model_15m(spot: float, floor_strike: float,
                          tau_min: float, sig: dict,
                          asset: str = "BTC",
-                         p_market: float = 0.5,
-                         model_override: "dict | None" = None) -> float:
+                         p_market: float = 0.5) -> float:
     """
     Probability that price ends above floor_strike at expiry.
 
@@ -2160,11 +2159,7 @@ def compute_p_model_15m(spot: float, floor_strike: float,
     z_strike  = math.log(floor_strike / spot) / sigma_tau
 
     # ── LightGBM primary path ─────────────────────────────────────────────────
-    lgbm_model = model_override if model_override is not None \
-        else _LGBM_MODELS.get(asset.upper())
-    # model_override: used by the SOL slope SHADOW — returns the raw
-    # dict-model probability, bypassing iso / z-expansion recalibration
-    # (correct: shadow logs the candidate model unadorned).
+    lgbm_model = _LGBM_MODELS.get(asset.upper())
     # [2026-07-29] Slope-model path (dict artifact; ETH first). Assembles the
     # trained feature list from sig + contract params using the scan-archive
     # naming. d/S slope features map to the runner's own d{tag}_/slope{tag}_
@@ -2761,12 +2756,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     _btc_thrust_score: "int | None" = None
     _eth_dipvol_score: "int | None" = None
     _eth_no_slope_score: "int | None" = None
-    if asset.upper() in ("BTC", "ETH", "SOL"):
-        # [2026-07-29c] SOL added: the slope-shadow candidate model needs the
-        # full base list incl the 15-min tag and liq-family deltas (ls_long
-        # rank-4 / D15_oi rank-5 in its importances) — SOL's own persistence
-        # block (above) only computes 45/120 for 8 bases. Recomputation of
-        # overlapping keys is identical-formula, harmless.
+    if asset.upper() in ("BTC", "ETH"):
         # [2026-07-29] ema20_dist_1h + realized_vol_annual added as slope bases
         # for the sigma-normalized / vol-price-plane gates below.
         _slope_bases = ["stoch_k_5m", "kc_pct_5m", "bp_15m", "bp_5m", "vol_ratio",
@@ -2870,9 +2860,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 return 1 if (float(v) >= thr if ge else float(v) <= thr) else 0
             except (TypeError, ValueError):
                 return 0
-        if asset.upper() == "SOL":
-            pass  # SOL: features only — scores/gates handled by its own blocks
-        elif asset.upper() == "BTC":
+        if asset.upper() == "BTC":
             _btc_thrust_score = (
                 _ck("d15_stoch_k_5m", 20.0, True) + _ck("d15_kc_pct_5m", 0.0, True)
                 + _ck("d15_bp_15m", 0.25, True) + _ck("slope45_bp_5m", -0.4, True)
@@ -2984,17 +2972,9 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 best_side_v2, best_edge_v2 = "no", edge_no_v2
 
         # Shadow LGBM: always run lgbm_15m_{asset}.pkl regardless of primary model path.
-        # For BTC this is separate from p_up_v2; for ETH it equals p_model (same model).
-        # [2026-07-29] SOL: p_gbdt now carries the slope-shadow CANDIDATE
-        # (was byte-identical to p_model_15m — redundancy reclaimed).
-        _sol_sh = globals().get("_SOL_SHADOW")
-        if asset.upper() == "SOL" and _sol_sh is not None:
-            _lgbm_shadows[ticker] = compute_p_model_15m(
-                spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
-                model_override=_sol_sh)
-        else:
-            _lgbm_shadows[ticker] = compute_p_model_15m(
-                spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
+        # For BTC this is separate from p_up_v2; for ETH/SOL it equals p_model_no (same model).
+        _lgbm_shadows[ticker] = compute_p_model_15m(
+            spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
 
         # Scan archive: log all evaluated contracts before any skips.
         try:
@@ -4929,20 +4909,6 @@ def main() -> None:
         print("  Kalshi auth: loaded.")
 
     _LGBM_MODELS[asset] = _load_15m_lgbm(asset)
-    # [2026-07-29] SOL slope-shadow candidate (159-feat, no-HMM variant;
-    # holdout replay +$4,847 / realized +2.4pp). Logged to p_gbdt on SOL
-    # rows (which was byte-identical to p_model_15m = pure redundancy);
-    # decisions untouched. Promotion decision at the 08-11 review.
-    global _SOL_SHADOW
-    _SOL_SHADOW = None
-    if asset == "SOL":
-        try:
-            _shp = Path(__file__).parent / "models" / "lgbm_15m_sol_slope_shadow_20260729.pkl"
-            with open(_shp, "rb") as _f:
-                _SOL_SHADOW = pickle.load(_f)
-            print(f"  [sol_slope_shadow] Loaded ({len(_SOL_SHADOW['features'])} features) → p_gbdt column")
-        except Exception as _she:
-            print(f"  [sol_slope_shadow] load failed: {_she}")
 
     if _is_live_or_dual:
         _live_csv = live_trading.get_live_csv_path(asset)

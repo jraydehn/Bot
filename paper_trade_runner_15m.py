@@ -871,6 +871,13 @@ CSV_COLUMNS = [
     # [2026-07-29] coordinate-pairing gates
     "zd15_lower_wick_15m", "d15_z_drift_6h",
     "v120_vwap_dist", "v45_hurst_exponent",
+    # [2026-07-31] live per-contract pm-momentum capture — LOG-ONLY, no
+    # decision path reads these. Validated on 60d of backfilled Kalshi 1-min
+    # candles (BTC): pm_chg_5m partial-IC +0.038 (halves +.038/+.040) vs
+    # outcome, and +0.047 controlling BOTH pm and p_model_15m — the model
+    # is blind to book momentum. Standalone chasing loses to the spread;
+    # value = model feature at next retrain (btc15m_pm_momentum_value_test).
+    "pm_chg_5m", "pm_chg_10m", "pm_n_obs",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -4653,6 +4660,51 @@ def _v3_agree_val(p_v3, side) -> "int | str":
         return ""
 
 
+# [2026-07-31] Live per-contract pm-history capture → pm-momentum features.
+# LOG-ONLY: nothing in any decision path reads these. Persisted per asset to
+# results/.pm_history_15m_{ASSET}.json so restarts keep trajectory context.
+_PM_HIST: dict = {}
+_PM_HIST_LOADED: set = set()
+
+
+def _pm_traj_feats(asset: str, ticker: str, pm: float) -> dict:
+    import json as _json
+    import time as _time
+    a = asset.upper()
+    path = Path(__file__).parent / "results" / f".pm_history_15m_{a}.json"
+    if a not in _PM_HIST_LOADED:
+        try:
+            _PM_HIST[a] = _json.loads(path.read_text())
+        except Exception:
+            _PM_HIST[a] = {}
+        _PM_HIST_LOADED.add(a)
+    h = _PM_HIST[a]
+    now_ts = _time.time()
+    hist = h.get(ticker, [])
+
+    def _at(sec):
+        prior = [p for t, p in hist if t <= now_ts - sec]
+        return prior[-1] if prior else None
+
+    p5, p10 = _at(240), _at(540)
+    out = {
+        "pm_chg_5m": round(pm - p5, 4) if p5 is not None else "",
+        "pm_chg_10m": round(pm - p10, 4) if p10 is not None else "",
+        "pm_n_obs": len(hist),
+    }
+    hist.append([now_ts, round(float(pm), 4)])
+    h[ticker] = hist[-30:]
+    if len(h) > 300:  # prune tickers with no observation in 45 min
+        _PM_HIST[a] = {k: v for k, v in h.items()
+                       if v and v[-1][0] > now_ts - 2700}
+        h = _PM_HIST[a]
+    try:
+        path.write_text(_json.dumps(h))
+    except Exception:
+        pass
+    return out
+
+
 def _build_row(
     asset, decision_time, ticker, close_time, spot, floor_s, offset_pct,
     tau_min, p_market, p_model, raw_edge, side, decision, sig,
@@ -4671,7 +4723,12 @@ def _build_row(
                        sig.get("realized_vol_annual", 0.3) / math.sqrt(MINS_PER_YEAR))
     _sigma_tau = max(_vol_pm * math.sqrt(tau_min), 1e-6)
     _z_score   = round(math.log(floor_s / spot) / _sigma_tau, 4) if spot > 0 else ""
+    try:
+        _pmtraj = _pm_traj_feats(asset, ticker, float(p_market))
+    except Exception:
+        _pmtraj = {"pm_chg_5m": "", "pm_chg_10m": "", "pm_n_obs": ""}
     return {
+        **_pmtraj,
         "logged_at":            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00:00"),
         "decision_time":        decision_time,
         "asset":                asset.upper(),

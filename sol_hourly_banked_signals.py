@@ -54,15 +54,18 @@ def fetch_liq_bars() -> pd.DataFrame:
 _LIVE_CACHE: dict = {}
 
 
-def fetch_liq_bars_live(hours: int = 240, ttl: int = 1800) -> pd.DataFrame:
-    """Fresh 1h liq bars for the runner: enough history for the 168h rank
-    window, cached in-process for `ttl` seconds, CSV-backfill fallback."""
+def fetch_liq_bars_live(hours: int = 240, ttl: int = 1800,
+                        asset: str = "SOL") -> pd.DataFrame:
+    """Fresh 1h liq bars for a runner: enough history for the 168h rank
+    window, cached in-process per asset for `ttl` seconds; SOL falls back
+    to the backfill CSV on error."""
     now = time.time()
-    if "d" in _LIVE_CACHE and now - _LIVE_CACHE["t"] < ttl:
-        return _LIVE_CACHE["d"]
+    key = asset.upper()
+    if key in _LIVE_CACHE and now - _LIVE_CACHE[key]["t"] < ttl:
+        return _LIVE_CACHE[key]["d"]
     try:
         r = requests.get(f"{cl._BASE}/liquidation-history", params={
-            "symbols": cl._SYMBOLS["SOL"], "interval": "1hour",
+            "symbols": cl._SYMBOLS[key], "interval": "1hour",
             "from": int(now) - hours * 3600, "to": int(now),
             "api_key": cl._API_KEY}, timeout=20)
         r.raise_for_status()
@@ -71,11 +74,13 @@ def fetch_liq_bars_live(hours: int = 240, ttl: int = 1800) -> pd.DataFrame:
         d["known_at"] = pd.to_datetime(d["t"], unit="s", utc=True) + pd.Timedelta(hours=1)
         d = d.rename(columns={"l": "liq_long", "s": "liq_short"}).sort_values("known_at")
         d = d[["known_at", "liq_long", "liq_short"]].reset_index(drop=True)
-        _LIVE_CACHE.update(d=d, t=now)
+        _LIVE_CACHE[key] = {"d": d, "t": now}
         return d
     except Exception as e:
-        print(f"  [liq_live] fetch failed ({e}); falling back to backfill CSV")
-        return fetch_liq_bars()
+        print(f"  [liq_live:{key}] fetch failed ({e})")
+        if key == "SOL":
+            return fetch_liq_bars()
+        raise
 
 
 def build_liq_features(d: pd.DataFrame) -> pd.DataFrame:

@@ -53,3 +53,32 @@ def ctx_gate_fails(side: str, p_market: float, offset_pct: float,
         if pm > 0.5 and not (ls == ls and ls >= 71.65):
             fails.append("LS")
     return "+".join(fails)
+
+
+def ctx_gate_fails_btc(side: str, p_market: float, offset_pct: float,
+                       composite_p_up: float, edge: float) -> str:
+    """BTC variant of the transferable context gates (decision.py as of
+    07-31): CS OTM YES needs composite_p_up>=0.55 (no SOL rescue); CI ITM
+    YES blocked if composite_p_up<0.45 (live for BTC — only SOL removed
+    it); NS OTM NO needs composite_p_up<=0.50 (BTC threshold); R:R YES
+    pm>0.75 blocked, NO out-of-bounds unless edge>=0.055 (BTC NO
+    exception). No contrarian-LS gate (SOL-only)."""
+    fails = []
+    pm = float(p_market)
+    off = float(offset_pct) if offset_pct == offset_pct else np.nan
+    cpu = float(composite_p_up) if composite_p_up == composite_p_up else np.nan
+
+    if side == "yes":
+        if off == off and off > 0 and cpu == cpu and cpu < 0.55:
+            fails.append("CS")
+        if off == off and off < 0 and cpu == cpu and cpu < 0.45:
+            fails.append("CI")
+        if pm > 0.75:
+            fails.append("RR")
+    else:
+        if off == off and off < 0 and cpu == cpu and cpu > 0.50:
+            fails.append("NS")
+        rr = (1 - pm) / pm
+        if (rr < 0.33 or rr > 4.0) and edge < 0.055:
+            fails.append("RR")
+    return "+".join(fails)

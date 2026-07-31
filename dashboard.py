@@ -894,7 +894,7 @@ st.markdown("<hr style='margin:12px 0 16px 0;'>", unsafe_allow_html=True)
 # ---------------------------------------------------------------------------
 
 tab_btc, tab_eth, tab_sol, tab_sol_shadow, tab_sol_hourly_ab, tab_cmp = st.tabs(
-    ["₿  BTC", "Ξ  ETH", "◎  SOL", "👥  SOL SHADOW A/B", "🥊  SOL HOURLY A/B",
+    ["₿  BTC", "Ξ  ETH", "◎  SOL", "👥  SOL SHADOW A/B", "🥊  HOURLY A/B",
      "📊  Compare"]
 )
 
@@ -1007,97 +1007,99 @@ with tab_sol_shadow:
         st.warning(f"shadow tab error: {_shex}")
 
 with tab_sol_hourly_ab:
-    # [2026-07-30] Three-way SOL HOURLY forward A/B: production analytic model
-    # vs v7 (350-feat quantile) vs v8 (41-feat survivor-core quantile).
-    # v7/v8 books are real standalone runner CSVs (flat $100, net of fees,
-    # pre-registered YES pm[.20,.80] edge>=.05 primary; NO side secondary).
-    # Production hourly trades are normalized to the same flat-$100 stake for
-    # comparability. Clock starts 2026-07-30; first read ~08-13, replacement
-    # decision late-Aug. The 07-09..07-30 window is burned — never scored.
+    # [2026-07-31] HOURLY model-challenger A/B, all three assets. Challenger
+    # books are real standalone runner CSVs (flat $100 net of fees,
+    # pre-registered YES pm[.20,.80] edge>=.05 primary; NO secondary;
+    # ctx_gates tagged at booking). Production hourly trades flat-$100-
+    # normalized for comparability. Dashed = challenger behind transferable
+    # production context gates. First reads ~08-13/14; decisions late-Aug.
     st.markdown(
         "<div style='color:#f0a500;font-size:0.78rem;margin-bottom:16px;'>"
-        "SOL hourly three-way forward A/B since 2026-07-30 — production (frozen "
-        "analytic) vs v7 (quantile, full stack) vs v8 (quantile, 41 survivor-core "
-        "features). Flat $100/contract, net of fees. Challenger PRIMARY = YES side "
-        "only (pre-registered); NO side shown separately below. Dashed lines = "
-        "challenger books behind the transferable production context gates "
-        "(CS/NS/R:R/contrarian-LS) for apples-to-apples vs the gated production "
-        "book. Decision late-Aug."
+        "Hourly model challengers vs production, per asset — flat $100/contract, "
+        "net of fees, challenger PRIMARY = YES side (pre-registered). Dashed "
+        "lines = challenger trades passing the transferable production context "
+        "gates. SOL clock starts 07-30; BTC/ETH 07-31. Decisions late-Aug."
         "</div>", unsafe_allow_html=True)
-    _AB_START = pd.Timestamp("2026-07-30 00:00", tz="UTC")
-    try:
-        _books = {}
-        for _lbl, _path in [("v7", "results/paper_trades_sol_hourly_v7.csv"),
-                            ("v8", "results/paper_trades_sol_hourly_v8.csv")]:
-            _b = pd.read_csv(_path, low_memory=False)
-            _b["dt"] = pd.to_datetime(_b["logged_at"], errors="coerce", utc=True)
-            for _c in ["p_market", "would_pnl_net", "resolved_yes"]:
-                _b[_c] = pd.to_numeric(_b[_c], errors="coerce")
-            _books[_lbl] = _b[_b["dt"] >= _AB_START]
-        _pr = pd.read_csv("results/paper_trades_sol.csv", low_memory=False)
-        _pr["dt"] = pd.to_datetime(_pr["logged_at"], errors="coerce", utc=True)
-        _pr = _pr[(_pr["decision"] == "trade") & (_pr["dt"] >= _AB_START)].copy()
-        for _c in ["p_market"]:
-            _pr[_c] = pd.to_numeric(_pr[_c], errors="coerce")
-        _pr = _pr.dropna(subset=["p_market", "would_win"])
-        _prc = np.where(_pr["side"] == "yes", _pr["p_market"], 1 - _pr["p_market"])
-        _prw = _pr["would_win"].astype(str).str.lower().isin(["true", "1", "1.0"])
-        _prf = 0.07 * _pr["p_market"] * (1 - _pr["p_market"])
-        _pr["pnl100"] = np.where(_prw, 100 * (1 - _prc) / _prc, -100.0) - (100 / _prc) * _prf
-
-        _figab = go.Figure()
-        _cols = st.columns(3)
-        for _i, (_lbl, _clr) in enumerate([("production", "#4f8bf9"),
-                                           ("v7", "#f0a500"), ("v8", "#00c076")]):
-            if _lbl == "production":
-                _q = _pr.rename(columns={"pnl100": "pnl"})[["dt", "pnl"]].dropna()
-                _wr = float(_prw.mean()) if len(_pr) else float("nan")
-                _be = float(np.mean(_prc)) if len(_pr) else float("nan")
+    _AB_CFG = [
+        ("SOL", "2026-07-30", RESULTS_DIR / "paper_trades_sol.csv",
+         [("v7", RESULTS_DIR / "paper_trades_sol_hourly_v7.csv", "#f0a500"),
+          ("v8", RESULTS_DIR / "paper_trades_sol_hourly_v8.csv", "#00c076")]),
+        ("BTC", "2026-07-31", RESULTS_DIR / "paper_trades.csv",
+         [("bookdyn", RESULTS_DIR / "paper_trades_btc_hourly_bookdyn.csv",
+           "#f0a500")]),
+        ("ETH", "2026-07-31", RESULTS_DIR / "paper_trades_eth.csv",
+         [("bookdyn", RESULTS_DIR / "paper_trades_eth_hourly_bookdyn.csv",
+           "#f0a500")]),
+    ]
+    for _aname, _astart, _prod_csv, _chals in _AB_CFG:
+        st.markdown(f"<div style='font-size:1.0rem;font-weight:700;color:#fff;"
+                    f"margin:14px 0 6px 0;'>{_aname} hourly — since {_astart}"
+                    "</div>", unsafe_allow_html=True)
+        try:
+            _abst = pd.Timestamp(_astart, tz="UTC")
+            _figab = go.Figure()
+            _cols = st.columns(1 + len(_chals))
+            _pr = pd.read_csv(_prod_csv, low_memory=False)
+            _pr["dt"] = pd.to_datetime(_pr["logged_at"], errors="coerce", utc=True)
+            _pr = _pr[(_pr["decision"] == "trade") & (_pr["dt"] >= _abst)].copy()
+            _pr["p_market"] = pd.to_numeric(_pr["p_market"], errors="coerce")
+            _pr = _pr.dropna(subset=["p_market", "would_win"])
+            if len(_pr):
+                _prc = np.where(_pr["side"] == "yes", _pr["p_market"],
+                                1 - _pr["p_market"])
+                _prw = _pr["would_win"].astype(str).str.lower().isin(
+                    ["true", "1", "1.0"])
+                _prf = 0.07 * _pr["p_market"] * (1 - _pr["p_market"])
+                _pr["pnl"] = np.where(_prw, 100 * (1 - _prc) / _prc, -100.0) \
+                    - (100 / _prc) * _prf
+                _pq = _pr.sort_values("dt")
+                _figab.add_trace(go.Scatter(x=_pq["dt"], y=_pq["pnl"].cumsum(),
+                                            name="production",
+                                            line=dict(color="#4f8bf9", width=2)))
+                _cols[0].metric("production: net (flat $100)",
+                                f"${_pq['pnl'].sum():+,.0f}",
+                                f"{len(_pq)} resolved · WR {_prw.mean():.0%} "
+                                f"vs BE {np.mean(_prc):.0%}")
             else:
-                _bb = _books[_lbl]
-                _res = _bb[(_bb["side"] == "yes") & _bb["would_pnl_net"].notna()]
-                _q = _res.rename(columns={"would_pnl_net": "pnl"})[["dt", "pnl"]]
-                _wr = float(pd.to_numeric(_res["would_win"], errors="coerce").mean()) \
-                    if len(_res) else float("nan")
-                _be = float(_res["p_market"].mean()) if len(_res) else float("nan")
-                # gated view: transferable production context gates (CS/NS/RR/LS,
-                # sol_hourly_ctx_gates.py) — trades tagged at booking, filtered here
-                if "ctx_gates" in _res.columns:
-                    _gt = _res[_res["ctx_gates"].fillna("") == ""]
-                    if len(_gt):
-                        _gq = _gt.sort_values("dt")
-                        _figab.add_trace(go.Scatter(
-                            x=_gq["dt"], y=_gq["would_pnl_net"].cumsum(),
-                            name=f"{_lbl} gated", line=dict(color=_clr, width=1.5,
-                                                           dash="dash")))
-            if len(_q):
-                _q = _q.sort_values("dt")
-                _figab.add_trace(go.Scatter(x=_q["dt"], y=_q["pnl"].cumsum(),
-                                            name=_lbl, line=dict(color=_clr, width=2)))
-            _gtxt = ""
-            if _lbl != "production" and "ctx_gates" in _books[_lbl].columns:
-                _gr = _books[_lbl]
-                _gr = _gr[(_gr["side"] == "yes") & _gr["would_pnl_net"].notna()
-                          & (_gr["ctx_gates"].fillna("") == "")]
-                _gtxt = f" · gated: ${_gr['would_pnl_net'].sum():+,.0f} (n={len(_gr)})"
-            _cols[_i].metric(f"{_lbl}: net (flat $100)",
-                             f"${_q['pnl'].sum():+,.0f}" if len(_q) else "—",
-                             (f"{len(_q)} resolved · WR {_wr:.0%} vs BE {_be:.0%}" + _gtxt)
-                             if len(_q) else "collecting…")
-        _figab.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
-                             legend=dict(orientation="h"))
-        st.plotly_chart(_figab, use_container_width=True)
-
-        _sec = []
-        for _lbl in ["v7", "v8"]:
-            _nb = _books[_lbl]
-            _nr = _nb[(_nb["side"] == "no") & _nb["would_pnl_net"].notna()]
-            _pend = int(_nb["would_pnl_net"].isna().sum())
-            _sec.append(f"{_lbl}: NO-side (secondary) n={len(_nr)} "
-                        f"net=${_nr['would_pnl_net'].sum():+,.0f} · {_pend} pending")
-        st.caption("  |  ".join(_sec))
-    except Exception as _abex:
-        st.warning(f"hourly A/B tab error: {_abex}")
+                _cols[0].metric("production: net (flat $100)", "—", "collecting…")
+            for _ci, (_lbl, _path, _clr) in enumerate(_chals, start=1):
+                _b = pd.read_csv(_path, low_memory=False)
+                _b["dt"] = pd.to_datetime(_b["logged_at"], errors="coerce", utc=True)
+                for _c in ["p_market", "would_pnl_net"]:
+                    _b[_c] = pd.to_numeric(_b[_c], errors="coerce")
+                _b = _b[_b["dt"] >= _abst]
+                _res = _b[(_b["side"] == "yes") & _b["would_pnl_net"].notna()]
+                _pend = int(_b["would_pnl_net"].isna().sum())
+                if len(_res):
+                    _rq = _res.sort_values("dt")
+                    _figab.add_trace(go.Scatter(
+                        x=_rq["dt"], y=_rq["would_pnl_net"].cumsum(), name=_lbl,
+                        line=dict(color=_clr, width=2)))
+                    _wr = float(pd.to_numeric(_rq["would_win"],
+                                              errors="coerce").mean())
+                    _be = float(_rq["p_market"].mean())
+                    _gtxt = ""
+                    if "ctx_gates" in _rq.columns:
+                        _gt = _rq[_rq["ctx_gates"].fillna("") == ""]
+                        if len(_gt):
+                            _figab.add_trace(go.Scatter(
+                                x=_gt["dt"], y=_gt["would_pnl_net"].cumsum(),
+                                name=f"{_lbl} gated",
+                                line=dict(color=_clr, width=1.5, dash="dash")))
+                        _gtxt = (f" · gated ${_gt['would_pnl_net'].sum():+,.0f} "
+                                 f"(n={len(_gt)})")
+                    _cols[_ci].metric(f"{_lbl}: net (flat $100)",
+                                      f"${_rq['would_pnl_net'].sum():+,.0f}",
+                                      f"{len(_rq)} resolved · WR {_wr:.0%} vs "
+                                      f"BE {_be:.0%}{_gtxt} · {_pend} pending")
+                else:
+                    _cols[_ci].metric(f"{_lbl}: net (flat $100)", "—",
+                                      f"collecting… ({_pend} pending)")
+            _figab.update_layout(height=260, margin=dict(l=0, r=0, t=8, b=0),
+                                 legend=dict(orientation="h"))
+            st.plotly_chart(_figab, use_container_width=True)
+        except Exception as _abex:
+            st.warning(f"{_aname} hourly A/B error: {_abex}")
 
 with tab_cmp:
     st.markdown(

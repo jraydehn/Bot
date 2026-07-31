@@ -927,7 +927,8 @@ with tab_sol_shadow:
     try:
         _shp = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False)
         _shp["dt"] = pd.to_datetime(_shp["logged_at"], errors="coerce", utc=True)
-        for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes"]:
+        for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes",
+                   "sol_persist_score", "slope120_stoch_k_15m"]:
             _shp[_c] = pd.to_numeric(_shp[_c], errors="coerce")
         _sh = _shp[(_shp["dt"] >= _SH_START)
                    & _shp["resolved_yes"].notna()
@@ -959,13 +960,41 @@ with tab_sol_shadow:
                 _summary.append((_lbl, len(_q), float(_pnl.sum()),
                                  float(np.mean(_win)) if len(_q) else float("nan"),
                                  float(np.mean(_cost)) if len(_q) else float("nan")))
+                # [2026-07-31] gated+kelly variant: v2-package gates (YES needs
+                # persist>=3; NO blocked pm>0.8 and pm .5-.65 w/o stoch rescue)
+                # + fee-aware Kelly stake on flat $2500 bankroll, frac cap 10%.
+                _gk = _q[np.where(_q["side"] == "yes",
+                                  _q["sol_persist_score"] >= 3,
+                                  ~((_q["p_market"] > 0.8) |
+                                    (_q["p_market"].between(0.5, 0.65)
+                                     & ~(_q["slope120_stoch_k_15m"] >= 40))))].copy()
+                if len(_gk):
+                    _gcost = np.where(_gk["side"] == "yes", _gk["p_market"],
+                                      1 - _gk["p_market"])
+                    _gwin = np.where(_gk["side"] == "yes", _gk["resolved_yes"] == 1,
+                                     _gk["resolved_yes"] == 0)
+                    _gfee = 0.07 * _gk["p_market"] * (1 - _gk["p_market"])
+                    _gf = np.where(_gk["side"] == "yes",
+                                   (_gk[_col] - _gk["p_market"] - _gfee) / (1 - _gk["p_market"]),
+                                   (_gk["p_market"] - _gk[_col] - _gfee) / _gk["p_market"])
+                    _gstake = 2500.0 * np.clip(_gf, 0, 0.10)
+                    _gpnl = pd.Series(np.where(_gwin, _gstake * (1 - _gcost) / _gcost,
+                                               -_gstake) - (_gstake / _gcost) * _gfee,
+                                      index=_gk.index)
+                    _figsh.add_trace(go.Scatter(
+                        x=_gk["dt"], y=_gpnl.cumsum(), name=f"{_lbl} gated+kelly",
+                        line=dict(color=_clr, width=1.5, dash="dash")))
+                    _summary[-1] = _summary[-1] + (len(_gk), float(_gpnl.sum()))
             _figsh.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                                  legend=dict(orientation="h"))
             st.plotly_chart(_figsh, use_container_width=True)
             _c1, _c2 = st.columns(2)
-            for _colm, (_lbl, _n, _net, _wr, _be) in zip((_c1, _c2), _summary):
+            for _colm, _row in zip((_c1, _c2), _summary):
+                _lbl, _n, _net, _wr, _be = _row[:5]
+                _gk_txt = (f" · gated+kelly ${_row[6]:+,.0f} (n={_row[5]})"
+                           if len(_row) > 5 else "")
                 _colm.metric(f"{_lbl}: net (hypothetical $100 flat)", f"${_net:+,.0f}",
-                             f"{_n} trades · WR {_wr:.0%} vs BE {_be:.0%}")
+                             f"{_n} trades · WR {_wr:.0%} vs BE {_be:.0%}{_gk_txt}")
             _dis = _sh.dropna(subset=["p_gbdt", "p_model_15m"])
             _dis = _dis[(_dis["p_gbdt"] - _dis["p_model_15m"]).abs() >= 0.05]
             if len(_dis):

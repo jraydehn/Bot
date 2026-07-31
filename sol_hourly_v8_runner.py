@@ -20,6 +20,7 @@ import pandas as pd
 import sol_hourly_banked_signals as bank
 import sol_hourly_crossasset_flow as xa
 from train_sol_hourly_v7_quantile import derive_p, QUANTILES
+from sol_hourly_ctx_gates import ctx_gate_fails
 from train_sol_hourly_v8 import assemble, FEATS
 
 BASE = Path(__file__).parent
@@ -37,7 +38,7 @@ LOOP_SEC = 120
 BOOK_COLS = ["logged_at", "side", "contract_ticker", "close_ts", "spot",
              "strike", "p_market", "p_model", "fee_adj_edge", "tau_minutes",
              "stake", "resolved_yes", "would_win", "would_pnl", "fee_est",
-             "would_pnl_net"]
+             "would_pnl_net", "ctx_gates"]
 
 
 def read_tail(asset: str, nbytes: int) -> pd.DataFrame:
@@ -120,6 +121,13 @@ def main() -> None:
                                     "fee_adj_edge": round(float(r["edge_v"]), 4),
                                     "tau_minutes": r["tau_minutes"],
                                     "stake": STAKE,
+                                    "ctx_gates": ctx_gate_fails(
+                                        side, float(r["p_market"]),
+                                        r.get("offset_pct", float("nan")),
+                                        r.get("composite_p_up", float("nan")),
+                                        r.get("composite_trend", float("nan")),
+                                        r.get("ls_long_pct", float("nan")),
+                                        float(r["edge_v"])),
                                 })
                             traded.add(r["contract_ticker"])
                             print(f"  [TRADE:{side}] {r['contract_ticker']} "

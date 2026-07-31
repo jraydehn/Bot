@@ -990,7 +990,10 @@ with tab_sol_hourly_ab:
         "SOL hourly three-way forward A/B since 2026-07-30 — production (frozen "
         "analytic) vs v7 (quantile, full stack) vs v8 (quantile, 41 survivor-core "
         "features). Flat $100/contract, net of fees. Challenger PRIMARY = YES side "
-        "only (pre-registered); NO side shown separately below. Decision late-Aug."
+        "only (pre-registered); NO side shown separately below. Dashed lines = "
+        "challenger books behind the transferable production context gates "
+        "(CS/NS/R:R/contrarian-LS) for apples-to-apples vs the gated production "
+        "book. Decision late-Aug."
         "</div>", unsafe_allow_html=True)
     _AB_START = pd.Timestamp("2026-07-30 00:00", tz="UTC")
     try:
@@ -1028,13 +1031,29 @@ with tab_sol_hourly_ab:
                 _wr = float(pd.to_numeric(_res["would_win"], errors="coerce").mean()) \
                     if len(_res) else float("nan")
                 _be = float(_res["p_market"].mean()) if len(_res) else float("nan")
+                # gated view: transferable production context gates (CS/NS/RR/LS,
+                # sol_hourly_ctx_gates.py) — trades tagged at booking, filtered here
+                if "ctx_gates" in _res.columns:
+                    _gt = _res[_res["ctx_gates"].fillna("") == ""]
+                    if len(_gt):
+                        _gq = _gt.sort_values("dt")
+                        _figab.add_trace(go.Scatter(
+                            x=_gq["dt"], y=_gq["would_pnl_net"].cumsum(),
+                            name=f"{_lbl} gated", line=dict(color=_clr, width=1.5,
+                                                           dash="dash")))
             if len(_q):
                 _q = _q.sort_values("dt")
                 _figab.add_trace(go.Scatter(x=_q["dt"], y=_q["pnl"].cumsum(),
                                             name=_lbl, line=dict(color=_clr, width=2)))
+            _gtxt = ""
+            if _lbl != "production" and "ctx_gates" in _books[_lbl].columns:
+                _gr = _books[_lbl]
+                _gr = _gr[(_gr["side"] == "yes") & _gr["would_pnl_net"].notna()
+                          & (_gr["ctx_gates"].fillna("") == "")]
+                _gtxt = f" · gated: ${_gr['would_pnl_net'].sum():+,.0f} (n={len(_gr)})"
             _cols[_i].metric(f"{_lbl}: net (flat $100)",
                              f"${_q['pnl'].sum():+,.0f}" if len(_q) else "—",
-                             f"{len(_q)} resolved · WR {_wr:.0%} vs BE {_be:.0%}"
+                             (f"{len(_q)} resolved · WR {_wr:.0%} vs BE {_be:.0%}" + _gtxt)
                              if len(_q) else "collecting…")
         _figab.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                              legend=dict(orientation="h"))

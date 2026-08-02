@@ -257,7 +257,7 @@ def load_trades(asset: str) -> pd.DataFrame:
         # forward (older rows still merge, just without a live/paper preference).
         _key_cols = [c for c in ["contract_ticker", "decision", "side"] if c in df_15m.columns]
         if _key_cols:
-            _ts = pd.to_datetime(df_15m["logged_at"], errors="coerce", utc=True)
+            _ts = pd.to_datetime(df_15m["logged_at"], errors="coerce", utc=True, format="mixed")
             _is_live_col = df_15m["is_live"] if "is_live" in df_15m.columns \
                 else pd.Series(0, index=df_15m.index)
             _live_num = pd.to_numeric(_is_live_col, errors="coerce").fillna(0)
@@ -926,7 +926,7 @@ with tab_sol_shadow:
     _SH_START = pd.Timestamp("2026-07-30 01:00", tz="UTC")
     try:
         _shp = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False)
-        _shp["dt"] = pd.to_datetime(_shp["logged_at"], errors="coerce", utc=True)
+        _shp["dt"] = pd.to_datetime(_shp["logged_at"], errors="coerce", utc=True, format="mixed")
         for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes",
                    "sol_persist_score", "slope120_stoch_k_15m"]:
             _shp[_c] = pd.to_numeric(_shp[_c], errors="coerce")
@@ -1040,7 +1040,8 @@ with tab_sol_hourly_ab:
             _figab = go.Figure()
             _cols = st.columns(1 + len(_chals))
             _pr = pd.read_csv(_prod_csv, low_memory=False)
-            _pr["dt"] = pd.to_datetime(_pr["logged_at"], errors="coerce", utc=True)
+            _pr["dt"] = pd.to_datetime(_pr["logged_at"], errors="coerce", utc=True,
+                                       format="mixed")
             _pr = _pr[(_pr["decision"] == "trade") & (_pr["dt"] >= _abst)].copy()
             _pr["p_market"] = pd.to_numeric(_pr["p_market"], errors="coerce")
             _pr = _pr.dropna(subset=["p_market", "would_win"])
@@ -1064,7 +1065,7 @@ with tab_sol_hourly_ab:
                 _cols[0].metric("production: net (flat $100)", "—", "collecting…")
             for _ci, (_lbl, _path, _clr) in enumerate(_chals, start=1):
                 _b = pd.read_csv(_path, low_memory=False)
-                _b["dt"] = pd.to_datetime(_b["logged_at"], errors="coerce", utc=True)
+                _b["dt"] = pd.to_datetime(_b["logged_at"], errors="coerce", utc=True, format="mixed")
                 for _c in ["p_market", "would_pnl_net"]:
                     _b[_c] = pd.to_numeric(_b[_c], errors="coerce")
                 _b = _b[_b["dt"] >= _abst]

@@ -45,7 +45,8 @@ import update_data
 import live_trading
 import gate_audit_logger
 from kelly_sizing import compute_kelly_size
-from drawdown_risk import kelly_dampener_multiplier, cascading_daily_loss_limit
+from drawdown_risk import (kelly_dampener_multiplier, cascading_daily_loss_limit,
+                            realized_edge_dampener_multiplier)
 from price_extension_risk import donchian_dampener_multiplier
 from composite_scorer import compute_current_scores, compute_current_scores_30m, compute_current_scores_90m, score_to_p_model, score_to_p_no_model, composite_to_confirmation, lookup_p_up, lookup_p_up_blended, lookup_p_up_regime, K_DRIFT_NO_BTC, K_DRIFT_NO_ETH
 import direct_p_model
@@ -8567,6 +8568,26 @@ def main() -> None:
             _undamped_pe = dec.bet_amount
             dec.bet_amount = round(dec.bet_amount * _pe_mult, 2)
             print(f"  [price_extension_dampener] {_pe_reason} (${_undamped_pe:.2f} → ${dec.bet_amount:.2f})")
+
+        # [2026-08-02] Realized-edge dampener, ported from the 15m runner
+        # (2026-07-25) -- a faster, trade-count-windowed (not calendar-day)
+        # sibling to the drawdown dampener above. Independent of both prior
+        # dampeners. Validated net-positive for BTC/ETH specifically (SOL's
+        # realized edge showed the opposite autocorrelation in backtest --
+        # dampening would have cut into real recoveries -- so the function
+        # itself refuses to dampen SOL by design; this call is asset-
+        # agnostic and safe to make unconditionally). Not yet independently
+        # re-validated on hourly data specifically -- ported on the strength
+        # of its 15m validation and its fail-open, size-only-ever-shrinks
+        # design; revisit if hourly's trade cadence (~1/hour vs 15m's much
+        # higher rate) makes the 20-trade window too slow to matter, or too
+        # noisy. See drawdown_risk.py docstring point 3.
+        _re_mult, _re_reason = realized_edge_dampener_multiplier(
+            get_csv_path(args.asset), args.asset)
+        if _re_mult < 1.0:
+            _undamped_re = dec.bet_amount
+            dec.bet_amount = round(dec.bet_amount * _re_mult, 2)
+            print(f"  [realized_edge_dampener] {_re_reason} (${_undamped_re:.2f} → ${dec.bet_amount:.2f})")
 
     # Minimum meaningful bet: skip if Kelly sizes below $3.
     # Prevents 1-contract $0.99 trades on deep ITM/OTM contracts where payoff is near-zero.

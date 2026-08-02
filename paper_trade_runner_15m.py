@@ -3012,10 +3012,18 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # [2026-07-29] SOL: p_gbdt now carries the slope-shadow CANDIDATE
         # (was byte-identical to p_model_15m — redundancy reclaimed).
         _sol_sh = globals().get("_SOL_SHADOW")
+        _btc_sh = globals().get("_BTC_SHADOW")
         if asset.upper() == "SOL" and _sol_sh is not None:
             _lgbm_shadows[ticker] = compute_p_model_15m(
                 spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
                 model_override=_sol_sh)
+        elif asset.upper() == "BTC" and _btc_sh is not None:
+            # [2026-08-02] BTC refresh shadow (see loader comment) — dict-
+            # artifact path returns the raw ensemble probability unadorned
+            # (no KC shift), same convention as the SOL slope shadow.
+            _lgbm_shadows[ticker] = compute_p_model_15m(
+                spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
+                model_override=_btc_sh)
         else:
             _lgbm_shadows[ticker] = compute_p_model_15m(
                 spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
@@ -5017,6 +5025,27 @@ def main() -> None:
             print(f"  [sol_slope_shadow] Loaded ({len(_SOL_SHADOW['features'])} features) → p_gbdt column")
         except Exception as _she:
             print(f"  [sol_slope_shadow] load failed: {_she}")
+    # [2026-08-02] BTC refresh shadow: routine retrain of the production
+    # 20-feat architecture on data thru 08-02, justified by the multi-seed
+    # walk-forward staleness test (abba68e: fresh beat live in 2/2 usable
+    # origins, all 5 seeds on the recent one). 5-seed SeedEnsemble (see
+    # btc15m_refresh_ensemble.py) — no seed selection. Logged to p_gbdt on
+    # BTC rows, DISPLACING the stale production LGBM's raw stream that
+    # previously occupied the column (that stream is exactly what this
+    # refresh replaces). Decisions untouched; reviewed with the other
+    # shadow books ~08-11+.
+    global _BTC_SHADOW
+    _BTC_SHADOW = None
+    if asset == "BTC":
+        try:
+            import btc15m_refresh_ensemble  # noqa: F401 — pickle class resolution
+            _shp = Path(__file__).parent / "models" / "lgbm_15m_btc_refresh_20260802.pkl"
+            with open(_shp, "rb") as _f:
+                _BTC_SHADOW = pickle.load(_f)
+            print(f"  [btc_refresh_shadow] Loaded ({len(_BTC_SHADOW['features'])} features, "
+                  f"5-seed ensemble) → p_gbdt column")
+        except Exception as _bre:
+            print(f"  [btc_refresh_shadow] load failed: {_bre}")
 
     if _is_live_or_dual:
         _live_csv = live_trading.get_live_csv_path(asset)

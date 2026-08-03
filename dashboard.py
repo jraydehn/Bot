@@ -939,8 +939,13 @@ with tab_sol_shadow:
         else:
             _figsh = go.Figure()
             _summary = []
+            # [2026-08-03] fixed 50/50 blend tracked as a third book — weights
+            # are NEVER fitted (5-day window = noise); pre-registered candidate
+            # for the 08-11 review only if it leads or matches with lower DD.
+            _sh["p_blend"] = (_sh["p_model_15m"] + _sh["p_gbdt"]) / 2
             for _lbl, _col, _clr in [("production", "p_model_15m", "#4f8bf9"),
-                                     ("shadow", "p_gbdt", "#f0a500")]:
+                                     ("shadow", "p_gbdt", "#f0a500"),
+                                     ("blend 50/50", "p_blend", "#b57edc")]:
                 _s = _sh.dropna(subset=[_col]).copy()
                 _fee = 0.07 * _s["p_market"] * (1 - _s["p_market"])
                 _ey = _s[_col] - _s["p_market"] - _fee
@@ -988,8 +993,8 @@ with tab_sol_shadow:
             _figsh.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                                  legend=dict(orientation="h"))
             st.plotly_chart(_figsh, use_container_width=True)
-            _c1, _c2 = st.columns(2)
-            for _colm, _row in zip((_c1, _c2), _summary):
+            _c1, _c2, _c3 = st.columns(3)
+            for _colm, _row in zip((_c1, _c2, _c3), _summary):
                 _lbl, _n, _net, _wr, _be = _row[:5]
                 _gk_txt = (f" · gated+kelly ${_row[6]:+,.0f} (n={_row[5]})"
                            if len(_row) > 5 else "")

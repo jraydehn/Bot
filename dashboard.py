@@ -989,15 +989,17 @@ with tab_sol_shadow:
                     _figsh.add_trace(go.Scatter(
                         x=_gk["dt"], y=_gpnl.cumsum(), name=f"{_lbl} gated+kelly",
                         line=dict(color=_clr, width=1.5, dash="dash")))
-                    _summary[-1] = _summary[-1] + (len(_gk), float(_gpnl.sum()))
+                    _gcum = _gpnl.cumsum()
+                    _gdd = float((_gcum.cummax() - _gcum).max())
+                    _summary[-1] = _summary[-1] + (len(_gk), float(_gpnl.sum()), _gdd)
             _figsh.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                                  legend=dict(orientation="h"))
             st.plotly_chart(_figsh, use_container_width=True)
             _c1, _c2, _c3 = st.columns(3)
             for _colm, _row in zip((_c1, _c2, _c3), _summary):
                 _lbl, _n, _net, _wr, _be = _row[:5]
-                _gk_txt = (f" · gated+kelly ${_row[6]:+,.0f} (n={_row[5]})"
-                           if len(_row) > 5 else "")
+                _gk_txt = (f" · gated+kelly ${_row[6]:+,.0f} (n={_row[5]}, "
+                           f"maxDD ${_row[7]:,.0f})" if len(_row) > 5 else "")
                 _colm.metric(f"{_lbl}: net (hypothetical $100 flat)", f"${_net:+,.0f}",
                              f"{_n} trades · WR {_wr:.0%} vs BE {_be:.0%}{_gk_txt}")
             _dis = _sh.dropna(subset=["p_gbdt", "p_model_15m"])

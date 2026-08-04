@@ -1055,16 +1055,21 @@ with tab_sol_hourly_ab:
         "lines = challenger trades passing the transferable production context "
         "gates. SOL clock starts 07-30; BTC/ETH 07-31. Decisions late-Aug."
         "</div>", unsafe_allow_html=True)
+    # [2026-08-04] BTC/ETH challengers switched bookdyn -> vol-tail books
+    # (user decision; bookdyn rides to its 08-13/14 read off-dashboard, CSVs
+    # keep accruing). 4th tuple field = book kind: "dir" (YES-primary
+    # directional w/ ctx gates) or "tail" (two-sided vol-tail legs, ask
+    # fills, no gates — cumulative over ALL legs, events counted).
     _AB_CFG = [
         ("SOL", "2026-07-30", RESULTS_DIR / "paper_trades_sol.csv",
-         [("v7", RESULTS_DIR / "paper_trades_sol_hourly_v7.csv", "#f0a500"),
-          ("v8", RESULTS_DIR / "paper_trades_sol_hourly_v8.csv", "#00c076")]),
-        ("BTC", "2026-07-31", RESULTS_DIR / "paper_trades.csv",
-         [("bookdyn", RESULTS_DIR / "paper_trades_btc_hourly_bookdyn.csv",
-           "#f0a500")]),
-        ("ETH", "2026-07-31", RESULTS_DIR / "paper_trades_eth.csv",
-         [("bookdyn", RESULTS_DIR / "paper_trades_eth_hourly_bookdyn.csv",
-           "#f0a500")]),
+         [("v7", RESULTS_DIR / "paper_trades_sol_hourly_v7.csv", "#f0a500", "dir"),
+          ("v8", RESULTS_DIR / "paper_trades_sol_hourly_v8.csv", "#00c076", "dir")]),
+        ("BTC", "2026-08-04", RESULTS_DIR / "paper_trades.csv",
+         [("vol-tail", RESULTS_DIR / "paper_trades_btc_hourly_voltail.csv",
+           "#b57edc", "tail")]),
+        ("ETH", "2026-08-04", RESULTS_DIR / "paper_trades_eth.csv",
+         [("vol-tail", RESULTS_DIR / "paper_trades_eth_hourly_voltail.csv",
+           "#b57edc", "tail")]),
     ]
     for _aname, _astart, _prod_csv, _chals in _AB_CFG:
         st.markdown(f"<div style='font-size:1.0rem;font-weight:700;color:#fff;"
@@ -1098,13 +1103,19 @@ with tab_sol_hourly_ab:
                                 f"vs BE {np.mean(_prc):.0%}")
             else:
                 _cols[0].metric("production: net (flat $100)", "—", "collecting…")
-            for _ci, (_lbl, _path, _clr) in enumerate(_chals, start=1):
+            for _ci, (_lbl, _path, _clr, _kind) in enumerate(_chals, start=1):
                 _b = pd.read_csv(_path, low_memory=False)
                 _b["dt"] = pd.to_datetime(_b["logged_at"], errors="coerce", utc=True, format="mixed")
                 for _c in ["p_market", "would_pnl_net"]:
-                    _b[_c] = pd.to_numeric(_b[_c], errors="coerce")
+                    if _c in _b.columns:
+                        _b[_c] = pd.to_numeric(_b[_c], errors="coerce")
+                    else:
+                        _b[_c] = np.nan
                 _b = _b[_b["dt"] >= _abst]
-                _res = _b[(_b["side"] == "yes") & _b["would_pnl_net"].notna()]
+                if _kind == "tail":
+                    _res = _b[_b["would_pnl_net"].notna()]
+                else:
+                    _res = _b[(_b["side"] == "yes") & _b["would_pnl_net"].notna()]
                 _pend = int(_b["would_pnl_net"].isna().sum())
                 if len(_res):
                     _rq = _res.sort_values("dt")
@@ -1113,9 +1124,15 @@ with tab_sol_hourly_ab:
                         line=dict(color=_clr, width=2)))
                     _wr = float(pd.to_numeric(_rq["would_win"],
                                               errors="coerce").mean())
-                    _be = float(_rq["p_market"].mean())
+                    _be = (float(_rq["p_market"].mean())
+                           if _rq["p_market"].notna().any()
+                           else float(pd.to_numeric(_rq.get("cost_ask"),
+                                                    errors="coerce").mean()))
                     _gtxt = ""
-                    if "ctx_gates" in _rq.columns:
+                    if _kind == "tail":
+                        _gtxt = (f" · {_rq['event'].nunique()} events "
+                                 f"(both-tail legs @ask)")
+                    elif "ctx_gates" in _rq.columns:
                         _gt = _rq[_rq["ctx_gates"].fillna("") == ""]
                         if len(_gt):
                             _figab.add_trace(go.Scatter(

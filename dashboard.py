@@ -919,7 +919,7 @@ with tab_sol_shadow:
         "SOL 15m model A/B — production (iso+z-expansion) vs slope-shadow candidate, "
         "scored as hypothetical flat-$100 books (fee-adjusted edge ≥ 0.04, one bet per "
         "contract, net of fees) on identical live scans since 2026-07-30 01:00 UTC. "
-        "Shadow logs to the p_gbdt column; decisions remain production-only."
+        "Shadow logs to the p_gbdt column; decisions remain production-only. Dashed (gated+kelly) books apply the v2 band/persistence gates PLUS the live regime gates (sol_markov + zdrift) as of 08-03."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -928,7 +928,9 @@ with tab_sol_shadow:
         _shp = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False)
         _shp["dt"] = pd.to_datetime(_shp["logged_at"], errors="coerce", utc=True, format="mixed")
         for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes",
-                   "sol_persist_score", "slope120_stoch_k_15m"]:
+                   "sol_persist_score", "slope120_stoch_k_15m",
+                   "stoch_cross_1h", "stoch_k_1h", "oi_chg_pct",
+                   "offset_pct", "z_drift_6h"]:
             _shp[_c] = pd.to_numeric(_shp[_c], errors="coerce")
         _sh = _shp[(_shp["dt"] >= _SH_START)
                    & _shp["resolved_yes"].notna()
@@ -968,11 +970,37 @@ with tab_sol_shadow:
                 # [2026-07-31] gated+kelly variant: v2-package gates (YES needs
                 # persist>=3; NO blocked pm>0.8 and pm .5-.65 w/o stoch rescue)
                 # + fee-aware Kelly stake on flat $2500 bankroll, frac cap 10%.
-                _gk = _q[np.where(_q["side"] == "yes",
+                # [2026-08-03] + the live REGIME gates (exact port from the
+                # runner): sol_markov_gate (block-unless-rescued, 6h/4h/1h
+                # states, stoch/oi/offset rescues) and sol_15m_no_zdrift_gate
+                # (block NO when z_drift_6h<0.55) — the protections that kept
+                # the real book out of the 07-31/08-01 regime flip.
+                _m6 = _q["markov_sol_6h"].astype(str)
+                _m4 = _q["markov_sol_4h"].astype(str)
+                _m1 = _q["markov_sol_1h"].astype(str)
+                _sc1 = pd.to_numeric(_q["stoch_cross_1h"], errors="coerce").fillna(0.0)
+                _sk1 = pd.to_numeric(_q["stoch_k_1h"], errors="coerce").fillna(50.0)
+                _oiq = pd.to_numeric(_q["oi_chg_pct"], errors="coerce").fillna(0.0)
+                _off = pd.to_numeric(_q["offset_pct"], errors="coerce").fillna(0.0)
+                _zd6 = pd.to_numeric(_q["z_drift_6h"], errors="coerce")
+                _gy = (((_m6 == "Bull") & (_sc1 != 0)) | (_m4 == "Sideways")
+                       | ((_m1 == "Sideways") & (_oiq < 0.0535)))
+                _ry = (((_m6 == "Bull") & (_sc1 == 0))
+                       | ((_m1 == "Sideways") & (_oiq >= 0.0535)))
+                _gn = (((_m6 == "Bull") & (_off > -0.006))
+                       | ((_m4 == "Sideways") & (_sk1 < 90.0)))
+                _rn = (((_m6 == "Bull") & (_off <= -0.006))
+                       | ((_m4 == "Sideways") & (_sk1 >= 90.0)))
+                _mkv_ok = np.where(_q["side"] == "yes",
+                                   ~(_gy & ~_ry), ~(_gn & ~_rn))
+                _zd_ok = np.where(_q["side"] == "no",
+                                  ~(_zd6 < 0.55).fillna(False), True)
+                _v2_ok = np.where(_q["side"] == "yes",
                                   _q["sol_persist_score"] >= 3,
                                   ~((_q["p_market"] > 0.8) |
                                     (_q["p_market"].between(0.5, 0.65)
-                                     & ~(_q["slope120_stoch_k_15m"] >= 40))))].copy()
+                                     & ~(_q["slope120_stoch_k_15m"] >= 40))))
+                _gk = _q[_v2_ok & _mkv_ok & _zd_ok].copy()
                 if len(_gk):
                     _gcost = np.where(_gk["side"] == "yes", _gk["p_market"],
                                       1 - _gk["p_market"])

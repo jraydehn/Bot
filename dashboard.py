@@ -919,7 +919,7 @@ with tab_sol_shadow:
         "SOL 15m model A/B — production (iso+z-expansion) vs slope-shadow candidate, "
         "scored as hypothetical flat-$100 books (fee-adjusted edge ≥ 0.04, one bet per "
         "contract, net of fees) on identical live scans since 2026-07-30 01:00 UTC. "
-        "Shadow logs to the p_gbdt column; decisions remain production-only. Dashed (gated+kelly) books apply the v2 band/persistence gates PLUS the live regime gates (sol_markov + zdrift) as of 08-03."
+        "Shadow logs to the p_gbdt column; decisions remain production-only. Dashed (gated+kelly) books apply the v2 band/persistence gates PLUS the live regime gates (sol_markov + zdrift, 08-03) and the YES offset gate (08-04 — the one extra YES gate that tested non-redundant)."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -995,12 +995,25 @@ with tab_sol_shadow:
                                    ~(_gy & ~_ry), ~(_gn & ~_rn))
                 _zd_ok = np.where(_q["side"] == "no",
                                   ~(_zd6 < 0.55).fillna(False), True)
+                # [2026-08-04] + sol_15m_yes_offset_gate ONLY (of the real
+                # chain's 4 extra YES gates): marginal-contribution test
+                # showed it alone captures the full benefit (+$2,859 full-
+                # history production, = ALL-4 combined; other 3 redundant
+                # within this stack, one even net-negative for shadow).
+                # Blocks barely-OTM YES (offset in [-10%,0)) unless the
+                # validated flip-chain rescue holds (1h=Sideways +
+                # oi>=0.0535 + z_drift<0.55). Exact runner port.
+                _flip_rescue = ((_m1 == "Sideways") & (_oiq >= 0.0535)
+                                & (_zd6 < 0.55).fillna(False))
+                _off_ok = np.where(_q["side"] == "yes",
+                                   ~((_off >= -10.0) & (_off < 0.0)
+                                     & ~_flip_rescue), True)
                 _v2_ok = np.where(_q["side"] == "yes",
                                   _q["sol_persist_score"] >= 3,
                                   ~((_q["p_market"] > 0.8) |
                                     (_q["p_market"].between(0.5, 0.65)
                                      & ~(_q["slope120_stoch_k_15m"] >= 40))))
-                _gk = _q[_v2_ok & _mkv_ok & _zd_ok].copy()
+                _gk = _q[_v2_ok & _mkv_ok & _zd_ok & _off_ok].copy()
                 if len(_gk):
                     _gcost = np.where(_gk["side"] == "yes", _gk["p_market"],
                                       1 - _gk["p_market"])

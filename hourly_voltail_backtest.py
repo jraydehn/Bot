@@ -48,7 +48,7 @@ def predicted_width(asset, df):
         d = assemble(df, liq)
         with open(BASE / "models" / "btc_hourly_bookdyn_20260731.pkl", "rb") as f:
             art = pickle.load(f)
-    else:
+    elif asset == "ETH":
         from train_eth_hourly_bookdyn import assemble, FEATS
         liq_cache = BASE / "results" / "coinalyze_liq_1h_eth_backfill_20260731.csv"
         liq = pd.read_csv(liq_cache); liq["known_at"] = pd.to_datetime(liq["known_at"], utc=True)
@@ -56,6 +56,21 @@ def predicted_width(asset, df):
         eth_s = pd.read_parquet(BASE / "results" / "eth_hourly_book_series_20260730.parquet")
         d = assemble(df, liq, btc_s, eth_s)
         with open(BASE / "models" / "eth_hourly_bookdyn_20260731.pkl", "rb") as f:
+            art = pickle.load(f)
+    else:  # SOL — v8 compact model (its tails trained deepest: q05=110 iters)
+        from train_sol_hourly_v8 import assemble, FEATS
+        import sol_hourly_banked_signals as bank
+        import sol_hourly_crossasset_flow as xa
+        import train_sol_hourly_niche_v3 as v3
+        # v8's assembly needs the FULL-column archive (slope-construction
+        # bases), not the slim loader frame passed in — load its own.
+        full = v3.load_archive()
+        full = full.dropna(subset=["resolved_yes"])
+        btc_s = pd.read_parquet(BASE / "results" / "btc_hourly_book_series_20260730.parquet")
+        eth_s = pd.read_parquet(BASE / "results" / "eth_hourly_book_series_20260730.parquet")
+        sol_s = xa.build_book_series("sol")
+        d = assemble(full, btc_s, eth_s, sol_s, bank.fetch_liq_bars())
+        with open(BASE / "models" / "sol_hourly_v8_20260730.pkl", "rb") as f:
             art = pickle.load(f)
     models = art["models"]
     lo = models[Q_LO].predict(d[FEATS])

@@ -919,7 +919,7 @@ with tab_sol_shadow:
         "SOL 15m model A/B — production (iso+z-expansion) vs slope-shadow candidate, "
         "scored as hypothetical flat-$100 books (fee-adjusted edge ≥ 0.04, one bet per "
         "contract, net of fees) on identical live scans since 2026-07-30 01:00 UTC. "
-        "Shadow logs to the p_gbdt column; decisions remain production-only. Dashed (gated+kelly) books apply the v2 band/persistence gates PLUS the live regime gates (sol_markov + zdrift, 08-03) and the YES offset gate (08-04 — the one extra YES gate that tested non-redundant)."
+        "Shadow logs to the p_gbdt column; decisions remain production-only. Dashed (gated+kelly) books apply the v2 band/persistence gates PLUS the live regime gates (sol_markov + zdrift, 08-03) and the YES offset gate (08-04 — the one extra YES gate that tested non-redundant). Dotted (gk zd65) books are the same stack with the zdrift NO-block widened to 0.65 — monitoring only (threshold surfaced by the 08-04/05 NO-side dip; scored on 08-05+ trades at the 08-11 review)."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -995,6 +995,14 @@ with tab_sol_shadow:
                                    ~(_gy & ~_ry), ~(_gn & ~_rn))
                 _zd_ok = np.where(_q["side"] == "no",
                                   ~(_zd6 < 0.55).fillna(False), True)
+                # [2026-08-05] MONITORING variant: zdrift NO-block widened to
+                # 0.65 — surfaced by the 08-04/05 dip (losers sat at zd
+                # 0.58-0.63, just above 0.55; m4=Bull block tested as pure
+                # dip-fit and was rejected). Threshold was read off the dip
+                # losers, so trades BEFORE 08-05 are in-sample for it; the
+                # 08-11 read scores 08-05+ only. NOT in the live runner.
+                _zd_ok65 = np.where(_q["side"] == "no",
+                                    ~(_zd6 < 0.65).fillna(False), True)
                 # [2026-08-04] + sol_15m_yes_offset_gate ONLY (of the real
                 # chain's 4 extra YES gates): marginal-contribution test
                 # showed it alone captures the full benefit (+$2,859 full-
@@ -1033,6 +1041,26 @@ with tab_sol_shadow:
                     _gcum = _gpnl.cumsum()
                     _gdd = float((_gcum.cummax() - _gcum).max())
                     _summary[-1] = _summary[-1] + (len(_gk), float(_gpnl.sum()), _gdd)
+                _gk65 = _q[_v2_ok & _mkv_ok & _zd_ok65 & _off_ok].copy()
+                if len(_gk65):
+                    _gc65 = np.where(_gk65["side"] == "yes", _gk65["p_market"],
+                                     1 - _gk65["p_market"])
+                    _gw65 = np.where(_gk65["side"] == "yes",
+                                     _gk65["resolved_yes"] == 1,
+                                     _gk65["resolved_yes"] == 0)
+                    _gf65 = 0.07 * _gk65["p_market"] * (1 - _gk65["p_market"])
+                    _gfr65 = np.where(
+                        _gk65["side"] == "yes",
+                        (_gk65[_col] - _gk65["p_market"] - _gf65) / (1 - _gk65["p_market"]),
+                        (_gk65["p_market"] - _gk65[_col] - _gf65) / _gk65["p_market"])
+                    _gs65 = 2500.0 * np.clip(_gfr65, 0, 0.10)
+                    _gp65 = pd.Series(np.where(_gw65, _gs65 * (1 - _gc65) / _gc65,
+                                               -_gs65) - (_gs65 / _gc65) * _gf65,
+                                      index=_gk65.index)
+                    _figsh.add_trace(go.Scatter(
+                        x=_gk65["dt"], y=_gp65.cumsum(), name=f"{_lbl} gk zd65",
+                        line=dict(color=_clr, width=1, dash="dot")))
+                    _summary[-1] = _summary[-1] + (len(_gk65), float(_gp65.sum()))
             _figsh.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                                  legend=dict(orientation="h"))
             st.plotly_chart(_figsh, use_container_width=True)
@@ -1041,6 +1069,8 @@ with tab_sol_shadow:
                 _lbl, _n, _net, _wr, _be = _row[:5]
                 _gk_txt = (f" · gated+kelly ${_row[6]:+,.0f} (n={_row[5]}, "
                            f"maxDD ${_row[7]:,.0f})" if len(_row) > 5 else "")
+                if len(_row) > 8:
+                    _gk_txt += f" · zd65 ${_row[9]:+,.0f} (n={_row[8]})"
                 _colm.metric(f"{_lbl}: net (hypothetical $100 flat)", f"${_net:+,.0f}",
                              f"{_n} trades · WR {_wr:.0%} vs BE {_be:.0%}{_gk_txt}")
             _dis = _sh.dropna(subset=["p_gbdt", "p_model_15m"])

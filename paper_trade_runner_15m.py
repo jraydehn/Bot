@@ -3018,12 +3018,37 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
                 model_override=_sol_sh)
         elif asset.upper() == "BTC" and _btc_sh is not None:
-            # [2026-08-02] BTC refresh shadow (see loader comment) — dict-
-            # artifact path returns the raw ensemble probability unadorned
-            # (no KC shift), same convention as the SOL slope shadow.
-            _lgbm_shadows[ticker] = compute_p_model_15m(
-                spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
-                model_override=_btc_sh)
+            # [2026-08-05] BTC p_gbdt seat SWAPPED: market-anchored challenger
+            # (train_btc15m_mktanchor_20260805.py — predicts outcome from
+            # MARKET state: pm, pm_chg_5m, tau, offset, spread, vol) replaces
+            # the refresh ensemble, whose 20 shared features inherited the
+            # production model's anti-informative divergence (its 3-day
+            # record is frozen in the CSV). Custom feature build — the dict-
+            # artifact path can't source these from sig. Scans with no
+            # qualifying pm-history observation get NO shadow value (blank
+            # p_gbdt), matching the trained population.
+            _pmc5 = _pm_chg5_peek("BTC", ticker, float(p_market))
+            if _pmc5 is None:
+                _lgbm_shadows[ticker] = None
+            else:
+                try:
+                    _marow = pd.DataFrame([{
+                        "p_market": float(p_market),
+                        "pm_chg_5m": _pmc5,
+                        "tau_minutes": float(tau_min),
+                        "offset_pct": float(offset_pct),
+                        "spread": float(c["ask"] - c["bid"]),
+                        "realized_vol_annual": float(
+                            sig.get("realized_vol_annual", 0.3) or 0.3),
+                    }])[_btc_sh["features"]]
+                    _lgbm_shadows[ticker] = float(
+                        _btc_sh["model"].predict_proba(_marow)[:, 1][0])
+                    print(f"    [btc_mktanchor DEBUG] {ticker} "
+                          f"{_marow.iloc[0].to_dict()} -> "
+                          f"{_lgbm_shadows[ticker]:.4f}")
+                except Exception as _mae:
+                    print(f"    [btc_mktanchor] predict failed: {_mae}")
+                    _lgbm_shadows[ticker] = None
         elif asset.upper() == "ETH" and globals().get("_ETH_SHADOW") is not None:
             # [2026-08-05] ETH refresh shadow (see loader comment) — gives
             # the ETH 15m A/B a genuine challenger (p_gbdt previously
@@ -4682,6 +4707,32 @@ _PM_HIST: dict = {}
 _PM_HIST_LOADED: set = set()
 
 
+def _pm_chg5_peek(asset: str, ticker: str, pm: float):
+    """[2026-08-05] NON-MUTATING read of the pm-history buffer: pm minus the
+    last observation 3-10 min old (matches the market-anchored challenger's
+    training construction: prior scan 3-8 min back). Returns None when no
+    qualifying prior observation exists — the shadow skips that scan, keeping
+    the served population identical to the trained one. Must run BEFORE
+    _build_row appends the current scan to the buffer."""
+    import json as _json
+    import time as _time
+    a = asset.upper()
+    if a not in _PM_HIST_LOADED:
+        try:
+            _PM_HIST[a] = _json.loads(
+                (Path(__file__).parent / "results"
+                 / f".pm_history_15m_{a}.json").read_text())
+        except Exception:
+            _PM_HIST[a] = {}
+        _PM_HIST_LOADED.add(a)
+    hist = _PM_HIST[a].get(ticker, [])
+    now_ts = _time.time()
+    prior = [p for t, p in hist if now_ts - 600 <= t <= now_ts - 180]
+    if not prior:
+        return None
+    return float(pm) - prior[-1]
+
+
 def _pm_traj_feats(asset: str, ticker: str, pm: float) -> dict:
     import json as _json
     import time as _time
@@ -5041,18 +5092,26 @@ def main() -> None:
     # previously occupied the column (that stream is exactly what this
     # refresh replaces). Decisions untouched; reviewed with the other
     # shadow books ~08-11+.
+    # [2026-08-05] REPLACED the refresh ensemble (lgbm_15m_btc_refresh_
+    # 20260802.pkl — retired: same 20 features as production => inherited
+    # anti-informative divergence; 3-day A/B record frozen) with the
+    # MARKET-ANCHORED challenger. Disclosed evidence status in
+    # train_btc15m_mktanchor_20260805.py: pooled walk-forward FAILED but
+    # monotone learning curve, last origin all-5-seeds positive where
+    # production was sharply negative. Forward paper is the referee;
+    # 08-11 read descriptive only, decision ~08-18+.
     global _BTC_SHADOW
     _BTC_SHADOW = None
     if asset == "BTC":
         try:
             import btc15m_refresh_ensemble  # noqa: F401 — pickle class resolution
-            _shp = Path(__file__).parent / "models" / "lgbm_15m_btc_refresh_20260802.pkl"
+            _shp = Path(__file__).parent / "models" / "lgbm_15m_btc_mktanchor_20260805.pkl"
             with open(_shp, "rb") as _f:
                 _BTC_SHADOW = pickle.load(_f)
-            print(f"  [btc_refresh_shadow] Loaded ({len(_BTC_SHADOW['features'])} features, "
+            print(f"  [btc_mktanchor_shadow] Loaded ({len(_BTC_SHADOW['features'])} features, "
                   f"5-seed ensemble) → p_gbdt column")
         except Exception as _bre:
-            print(f"  [btc_refresh_shadow] load failed: {_bre}")
+            print(f"  [btc_mktanchor_shadow] load failed: {_bre}")
 
     # [2026-08-05] ETH refresh shadow: same recipe as the BTC refresh but a
     # DIFFERENT evidence status, disclosed — ETH's staleness test was NOT

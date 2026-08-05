@@ -1154,9 +1154,18 @@ with tab_15m_shadow:
     # (p_gbdt previously duplicated production on ETH) and is judged on
     # forward paper only.
     _AB15 = {
-        "BTC": {"start": pd.Timestamp("2026-08-02 22:00", tz="UTC"),
-                "note": "challenger = 5-seed refresh ensemble (staleness-test "
-                        "justified, 08-02); read at the 08-11 review."},
+        "BTC": {"start": pd.Timestamp("2026-08-05 22:00", tz="UTC"),
+                "note": "challenger = MARKET-ANCHORED model (08-05: pm + "
+                        "pm-trajectory + tau/offset/spread/vol — learns the "
+                        "market's residual biases; replaced the refresh "
+                        "ensemble, which shared production's 20 features and "
+                        "inherited its anti-informative divergence). Walk-"
+                        "forward: failed pooled BUT monotone learning curve, "
+                        "all 5 seeds positive at the last origin where "
+                        "production was sharply negative. 08-11 = descriptive "
+                        "peek only; decision ~08-18. Scans without a 3-10min "
+                        "prior pm observation get no shadow value (blank "
+                        "p_gbdt) by design."},
         "ETH": {"start": pd.Timestamp("2026-08-05 05:15", tz="UTC"),
                 "note": "challenger = 5-seed refresh ensemble (08-05) — "
                         "staleness NOT confirmed for ETH; unjustified-retrain "

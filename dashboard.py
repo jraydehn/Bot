@@ -946,7 +946,13 @@ with tab_sol_shadow:
             "only; 08-11 read scores 08-05+ trades only.\n"
             "- **gk vrM+zd65** (long-dash-dot): both modifications combined — "
             "the strongest replay (S 0.57/0.59/0.29, lowest DD) and the third "
-            "candidate stack racing forward. Same 08-05+ scoring rule.")
+            "candidate stack racing forward. Same 08-05+ scoring rule.\n"
+            "- **gk hurst** (long-dash): base stack + NO blocked when "
+            "hurst_exponent_5m ≥ 0.61 (trending tape kills mean-reversion "
+            "NO). Survived the full-column sweep AND the ex-drawdown test "
+            "(all 4 pre-drawdown weeks helped; long-window S 0.14→0.48, DD "
+            "halved). Races AS A COMPETING stack — it is redundant stacked "
+            "on vrM+zd65. Scored on trades after 08-05 15:20 UTC only.")
     _SH_START = pd.Timestamp("2026-07-30 01:00", tz="UTC")
     try:
         _shp = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False)
@@ -954,7 +960,8 @@ with tab_sol_shadow:
         for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes",
                    "sol_persist_score", "slope120_stoch_k_15m",
                    "stoch_cross_1h", "stoch_k_1h", "oi_chg_pct",
-                   "offset_pct", "z_drift_6h", "vol_ratio_1h"]:
+                   "offset_pct", "z_drift_6h", "vol_ratio_1h",
+                   "hurst_exponent_5m"]:
             _shp[_c] = pd.to_numeric(_shp[_c], errors="coerce")
         _sh = _shp[(_shp["dt"] >= _SH_START)
                    & _shp["resolved_yes"].notna()
@@ -972,8 +979,10 @@ with tab_sol_shadow:
             _sh["p_blend"] = (_sh["p_model_15m"] + _sh["p_gbdt"]) / 2
             _fams = st.multiselect(
                 "Lines on chart",
-                ["flat $100", "gated+kelly", "gk zd65", "gk vrM", "gk vrM+zd65"],
-                default=["gated+kelly", "gk vrM+zd65"], key="solsh_fams")
+                ["flat $100", "gated+kelly", "gk zd65", "gk vrM",
+                 "gk vrM+zd65", "gk hurst"],
+                default=["gated+kelly", "gk vrM+zd65", "gk hurst"],
+                key="solsh_fams")
             _figsh = go.Figure()
             _rows = []
 
@@ -1080,6 +1089,19 @@ with tab_sol_shadow:
                 # the 08-01 flip). Combo = vrM + the zd65 NO-block widen.
                 _vr1 = pd.to_numeric(_q["vol_ratio_1h"], errors="coerce")
                 _mkv_vr = np.where((_vr1 >= 1.0).fillna(False), True, _mkv_ok)
+                # [2026-08-05 pm] gk hurst: base stack + block NO when
+                # hurst_exponent_5m >= 0.6131 (trending micro-dynamics kill
+                # the mean-reversion NO book). Survived the full 162-column
+                # sweep AND the ex-drawdown test (-$3,568 removed over the 4
+                # weeks BEFORE 08-04, all weeks negative; long-window base
+                # stack S 0.14->0.48, DD halved). Redundant ON TOP of
+                # vrM+zd65 (slightly negative marginal) — so it races AS A
+                # COMPETING STACK, not stacked. Threshold from the sweep
+                # grid => in-sample through 08-05 15:20; forward read scores
+                # trades after that. m4Bull NO-block: TRIPLE-rejected.
+                _hu5 = pd.to_numeric(_q["hurst_exponent_5m"], errors="coerce")
+                _hu_ok = np.where(_q["side"] == "no",
+                                  ~(_hu5 >= 0.6131).fillna(False), True)
                 _r = {"book": _lbl,
                       "flat": f"${_pnl.sum():+,.0f} (n={len(_q)})",
                       "WR/BE": (f"{np.mean(_win):.0%}/{np.mean(_cost):.0%}"
@@ -1092,7 +1114,9 @@ with tab_sol_shadow:
                         ("gk vrM", _v2_ok & _mkv_vr & _zd_ok & _off_ok,
                          "dashdot", 1.0),
                         ("gk vrM+zd65", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
-                         "longdashdot", 1.0)]:
+                         "longdashdot", 1.0),
+                        ("gk hurst", _v2_ok & _mkv_ok & _zd_ok & _off_ok & _hu_ok,
+                         "longdash", 1.0)]:
                     _vq = _q[_vmask].copy()
                     _vp, _vdd = _kbook(_vq, _col)
                     if len(_vq) and _vn in _fams:

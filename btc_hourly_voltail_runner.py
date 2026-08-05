@@ -125,16 +125,22 @@ def main() -> None:
                 fires = ev_stats[(ev_stats["vratio"] >= VRATIO_MIN)
                                  & ~ev_stats.index.isin(traded)]
                 if len(fires):
-                    mk = kalshi_get("/markets", {"series_ticker": "KXBTCD",
-                                                 "status": "open", "limit": 200}, auth)
-                    quotes = {m["ticker"]: m for m in mk.get("markets", [])}
                     for ev, row in fires.iterrows():
-                        evq = [(t, q) for t, q in quotes.items() if t.startswith(ev + "-")]
+                        # [2026-08-05] per-event fetch (no pagination risk) +
+                        # DOLLAR fields: /markets returns yes_ask_dollars /
+                        # yes_bid_dollars, NOT yes_ask/yes_bid — the old keys
+                        # silently defaulted to 0 and no leg ever qualified
+                        # (the reason this book never traded).
+                        mk = kalshi_get("/markets", {"event_ticker": ev,
+                                                     "limit": 200}, auth)
+                        evq = [(m["ticker"], m) for m in mk.get("markets", [])]
                         ylegs, nlegs = [], []
                         for t, q in evq:
                             try:
-                                ask = scale_price(q.get("yes_ask", 0))
-                                bid = scale_price(q.get("yes_bid", 0))
+                                ask = scale_price(q.get("yes_ask_dollars")
+                                                  or q.get("yes_ask") or 0)
+                                bid = scale_price(q.get("yes_bid_dollars")
+                                                  or q.get("yes_bid") or 0)
                             except (TypeError, ValueError):
                                 continue
                             if 0.03 <= ask <= 0.15:
@@ -142,6 +148,9 @@ def main() -> None:
                             if 0.85 <= bid <= 0.97 and (1 - bid) >= 0.03:
                                 nlegs.append((ask, bid, t, q))
                         if not ylegs or not nlegs:
+                            print(f"  [no-legs] {ev} vratio={row['vratio']:.2f} "
+                                  f"markets={len(evq)} ylegs={len(ylegs)} "
+                                  f"nlegs={len(nlegs)} — straddle skipped")
                             continue
                         ylegs.sort(key=lambda x: x[0])          # cheapest YES ask
                         nlegs.sort(key=lambda x: -x[1])         # highest bid → cheapest NO

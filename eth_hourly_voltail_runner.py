@@ -130,17 +130,22 @@ def main() -> None:
                           f"impw_cov={recent['imp_width_pct'].notna().mean():.0%}")
                 fires = ev[(ev["vratio"] >= VRATIO_MIN) & ~ev.index.isin(traded)]
                 if len(fires):
-                    mk = kalshi_get("/markets", {"series_ticker": "KXETHD",
-                                                 "status": "open", "limit": 200}, auth)
-                    quotes = {m["ticker"]: m for m in mk.get("markets", [])}
                     for evname, row in fires.iterrows():
+                        # [2026-08-05] per-event fetch + DOLLAR quote fields
+                        # (yes_ask_dollars/yes_bid_dollars — the old yes_ask/
+                        # yes_bid keys don't exist in /markets responses and
+                        # silently defaulted to 0: no leg ever qualified).
+                        mk = kalshi_get("/markets", {"event_ticker": evname,
+                                                     "limit": 200}, auth)
                         legs = []
-                        for t, q in quotes.items():
-                            if not t.startswith(evname + "-"):
-                                continue
+                        n_mk = 0
+                        for m in mk.get("markets", []):
+                            t = m["ticker"]; q = m; n_mk += 1
                             try:
-                                ask = scale_price(q.get("yes_ask", 0))
-                                bid = scale_price(q.get("yes_bid", 0))
+                                ask = scale_price(q.get("yes_ask_dollars")
+                                                  or q.get("yes_ask") or 0)
+                                bid = scale_price(q.get("yes_bid_dollars")
+                                                  or q.get("yes_bid") or 0)
                             except (TypeError, ValueError):
                                 continue
                             if 0.03 <= ask <= 0.15:
@@ -148,6 +153,8 @@ def main() -> None:
                             if 0.85 <= bid <= 0.97 and (1 - bid) >= 0.03:
                                 legs.append(("no", 1 - bid, 1 - (ask + bid) / 2, t, q))
                         if not legs:
+                            print(f"  [no-legs] {evname} vratio={row['vratio']:.2f} "
+                                  f"markets={n_mk} — no qualifying tail rung")
                             continue
                         best = {}
                         for side, cost, mid, t, q in legs:

@@ -915,14 +915,28 @@ with tab_sol_shadow:
     # (p_model_15m) as hypothetical flat-$100 books on identical live scans.
     # Promotion decision at the 08-11 review.
     st.markdown(
-        "<div style='color:#f0a500;font-size:0.78rem;margin-bottom:16px;'>"
-        "SOL 15m model A/B — production (iso+z-expansion) vs slope-shadow candidate, "
-        "scored as hypothetical flat-$100 books (fee-adjusted edge ≥ 0.04, one bet per "
-        "contract, net of fees) on identical live scans since 2026-07-30 01:00 UTC. "
-        "Shadow logs to the p_gbdt column; decisions remain production-only. Dashed (gated+kelly) books apply the v2 band/persistence gates PLUS the live regime gates (sol_markov + zdrift, 08-03) and the YES offset gate (08-04 — the one extra YES gate that tested non-redundant). Dotted (gk zd65) books are the same stack with the zdrift NO-block widened to 0.65 — monitoring only (threshold surfaced by the 08-04/05 NO-side dip; scored on 08-05+ trades at the 08-11 review)."
+        "<div style='color:#f0a500;font-size:0.78rem;margin-bottom:8px;'>"
+        "SOL 15m model A/B on identical live scans since 2026-07-30 01:00 UTC — "
+        "production (iso+z-expansion, blue) vs slope-shadow (p_gbdt, orange) vs "
+        "fixed 50/50 blend (purple). Hypothetical books; decisions remain "
+        "production-only. Promotion decision at the 08-11 review."
         "</div>",
         unsafe_allow_html=True,
     )
+    with st.expander("Book definitions (3 variants per model)"):
+        st.markdown(
+            "- **flat $100** (solid): raw model — fee-adjusted edge ≥ 0.04, one "
+            "bet per contract, $100 flat, net of fees. No gates, no sizing.\n"
+            "- **gated+kelly** (dashed): + v2 band/persistence gates, the live "
+            "regime gates (sol_markov + zdrift <0.55 NO-block, 08-03) and the "
+            "YES offset gate (08-04 — the one extra YES gate that tested "
+            "non-redundant), fee-aware Kelly on $2,500 (frac cap 10%). The "
+            "08-11 promotion metric (daily Sharpe, ties by maxDD) is scored "
+            "on these books.\n"
+            "- **gk zd65** (dotted): same stack with the zdrift NO-block "
+            "widened to 0.65 — monitoring only, NOT in the live runner. "
+            "Threshold surfaced by the 08-04/05 NO-side dip, so its 08-11 "
+            "read scores 08-05+ trades only.")
     _SH_START = pd.Timestamp("2026-07-30 01:00", tz="UTC")
     try:
         _shp = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False)
@@ -939,12 +953,37 @@ with tab_sol_shadow:
             st.info(f"Collecting… {len(_sh)} resolved scans since shadow go-live "
                     f"(unresolved scans settle within ~15 min of expiry).")
         else:
-            _figsh = go.Figure()
-            _summary = []
+            # [2026-08-05] tab decluttered: line-family selector (default =
+            # the decision-relevant gated books) + summary TABLE below the
+            # chart instead of metric cards (whose delta text truncated).
             # [2026-08-03] fixed 50/50 blend tracked as a third book — weights
             # are NEVER fitted (5-day window = noise); pre-registered candidate
             # for the 08-11 review only if it leads or matches with lower DD.
             _sh["p_blend"] = (_sh["p_model_15m"] + _sh["p_gbdt"]) / 2
+            _fams = st.multiselect(
+                "Lines on chart", ["flat $100", "gated+kelly", "gk zd65"],
+                default=["gated+kelly", "gk zd65"], key="solsh_fams")
+            _figsh = go.Figure()
+            _rows = []
+
+            def _kbook(_qq, _col):
+                """Kelly-sized book: pnl series + maxDD ($2500 flat, cap 10%)."""
+                _c = np.where(_qq["side"] == "yes", _qq["p_market"],
+                              1 - _qq["p_market"])
+                _w = np.where(_qq["side"] == "yes", _qq["resolved_yes"] == 1,
+                              _qq["resolved_yes"] == 0)
+                _f = 0.07 * _qq["p_market"] * (1 - _qq["p_market"])
+                _fr = np.where(_qq["side"] == "yes",
+                               (_qq[_col] - _qq["p_market"] - _f)
+                               / (1 - _qq["p_market"]),
+                               (_qq["p_market"] - _qq[_col] - _f)
+                               / _qq["p_market"])
+                _stk = 2500.0 * np.clip(_fr, 0, 0.10)
+                _p = pd.Series(np.where(_w, _stk * (1 - _c) / _c, -_stk)
+                               - (_stk / _c) * _f, index=_qq.index)
+                _cum = _p.cumsum()
+                _dd = float((_cum.cummax() - _cum).max()) if len(_p) else 0.0
+                return _p, _dd
             for _lbl, _col, _clr in [("production", "p_model_15m", "#4f8bf9"),
                                      ("shadow", "p_gbdt", "#f0a500"),
                                      ("blend 50/50", "p_blend", "#b57edc")]:
@@ -962,11 +1001,10 @@ with tab_sol_shadow:
                 _feeq = 0.07 * _q["p_market"] * (1 - _q["p_market"])
                 _pnl = pd.Series(np.where(_win, 100 * (1 - _cost) / _cost, -100)
                                  - (100 / _cost) * _feeq, index=_q.index)
-                _figsh.add_trace(go.Scatter(x=_q["dt"], y=_pnl.cumsum(),
-                                            name=_lbl, line=dict(color=_clr, width=2)))
-                _summary.append((_lbl, len(_q), float(_pnl.sum()),
-                                 float(np.mean(_win)) if len(_q) else float("nan"),
-                                 float(np.mean(_cost)) if len(_q) else float("nan")))
+                if "flat $100" in _fams:
+                    _figsh.add_trace(go.Scatter(
+                        x=_q["dt"], y=_pnl.cumsum(), name=f"{_lbl} flat",
+                        line=dict(color=_clr, width=2)))
                 # [2026-07-31] gated+kelly variant: v2-package gates (YES needs
                 # persist>=3; NO blocked pm>0.8 and pm .5-.65 w/o stoch rescue)
                 # + fee-aware Kelly stake on flat $2500 bankroll, frac cap 10%.
@@ -1022,57 +1060,35 @@ with tab_sol_shadow:
                                     (_q["p_market"].between(0.5, 0.65)
                                      & ~(_q["slope120_stoch_k_15m"] >= 40))))
                 _gk = _q[_v2_ok & _mkv_ok & _zd_ok & _off_ok].copy()
-                if len(_gk):
-                    _gcost = np.where(_gk["side"] == "yes", _gk["p_market"],
-                                      1 - _gk["p_market"])
-                    _gwin = np.where(_gk["side"] == "yes", _gk["resolved_yes"] == 1,
-                                     _gk["resolved_yes"] == 0)
-                    _gfee = 0.07 * _gk["p_market"] * (1 - _gk["p_market"])
-                    _gf = np.where(_gk["side"] == "yes",
-                                   (_gk[_col] - _gk["p_market"] - _gfee) / (1 - _gk["p_market"]),
-                                   (_gk["p_market"] - _gk[_col] - _gfee) / _gk["p_market"])
-                    _gstake = 2500.0 * np.clip(_gf, 0, 0.10)
-                    _gpnl = pd.Series(np.where(_gwin, _gstake * (1 - _gcost) / _gcost,
-                                               -_gstake) - (_gstake / _gcost) * _gfee,
-                                      index=_gk.index)
+                _gpnl, _gdd = _kbook(_gk, _col)
+                if len(_gk) and "gated+kelly" in _fams:
                     _figsh.add_trace(go.Scatter(
                         x=_gk["dt"], y=_gpnl.cumsum(), name=f"{_lbl} gated+kelly",
                         line=dict(color=_clr, width=1.5, dash="dash")))
-                    _gcum = _gpnl.cumsum()
-                    _gdd = float((_gcum.cummax() - _gcum).max())
-                    _summary[-1] = _summary[-1] + (len(_gk), float(_gpnl.sum()), _gdd)
                 _gk65 = _q[_v2_ok & _mkv_ok & _zd_ok65 & _off_ok].copy()
-                if len(_gk65):
-                    _gc65 = np.where(_gk65["side"] == "yes", _gk65["p_market"],
-                                     1 - _gk65["p_market"])
-                    _gw65 = np.where(_gk65["side"] == "yes",
-                                     _gk65["resolved_yes"] == 1,
-                                     _gk65["resolved_yes"] == 0)
-                    _gf65 = 0.07 * _gk65["p_market"] * (1 - _gk65["p_market"])
-                    _gfr65 = np.where(
-                        _gk65["side"] == "yes",
-                        (_gk65[_col] - _gk65["p_market"] - _gf65) / (1 - _gk65["p_market"]),
-                        (_gk65["p_market"] - _gk65[_col] - _gf65) / _gk65["p_market"])
-                    _gs65 = 2500.0 * np.clip(_gfr65, 0, 0.10)
-                    _gp65 = pd.Series(np.where(_gw65, _gs65 * (1 - _gc65) / _gc65,
-                                               -_gs65) - (_gs65 / _gc65) * _gf65,
-                                      index=_gk65.index)
+                _gp65, _gdd65 = _kbook(_gk65, _col)
+                if len(_gk65) and "gk zd65" in _fams:
                     _figsh.add_trace(go.Scatter(
                         x=_gk65["dt"], y=_gp65.cumsum(), name=f"{_lbl} gk zd65",
                         line=dict(color=_clr, width=1, dash="dot")))
-                    _summary[-1] = _summary[-1] + (len(_gk65), float(_gp65.sum()))
+                _rows.append({
+                    "book": _lbl,
+                    "flat net": f"${_pnl.sum():+,.0f}",
+                    "flat n": len(_q),
+                    "WR/BE": (f"{np.mean(_win):.0%}/{np.mean(_cost):.0%}"
+                              if len(_q) else "—"),
+                    "g+k net": f"${_gpnl.sum():+,.0f}",
+                    "g+k n": len(_gk),
+                    "g+k maxDD": f"${_gdd:,.0f}",
+                    "zd65 net": f"${_gp65.sum():+,.0f}",
+                    "zd65 n": len(_gk65),
+                    "zd65 maxDD": f"${_gdd65:,.0f}",
+                })
             _figsh.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                                  legend=dict(orientation="h"))
             st.plotly_chart(_figsh, use_container_width=True)
-            _c1, _c2, _c3 = st.columns(3)
-            for _colm, _row in zip((_c1, _c2, _c3), _summary):
-                _lbl, _n, _net, _wr, _be = _row[:5]
-                _gk_txt = (f" · gated+kelly ${_row[6]:+,.0f} (n={_row[5]}, "
-                           f"maxDD ${_row[7]:,.0f})" if len(_row) > 5 else "")
-                if len(_row) > 8:
-                    _gk_txt += f" · zd65 ${_row[9]:+,.0f} (n={_row[8]})"
-                _colm.metric(f"{_lbl}: net (hypothetical $100 flat)", f"${_net:+,.0f}",
-                             f"{_n} trades · WR {_wr:.0%} vs BE {_be:.0%}{_gk_txt}")
+            st.dataframe(pd.DataFrame(_rows), hide_index=True,
+                         use_container_width=True)
             _dis = _sh.dropna(subset=["p_gbdt", "p_model_15m"])
             _dis = _dis[(_dis["p_gbdt"] - _dis["p_model_15m"]).abs() >= 0.05]
             if len(_dis):

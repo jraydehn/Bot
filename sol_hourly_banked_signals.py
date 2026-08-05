@@ -75,11 +75,28 @@ def fetch_liq_bars_live(hours: int = 240, ttl: int = 1800,
         d = d.rename(columns={"l": "liq_long", "s": "liq_short"}).sort_values("known_at")
         d = d[["known_at", "liq_long", "liq_short"]].reset_index(drop=True)
         _LIVE_CACHE[key] = {"d": d, "t": now}
+        # [2026-08-05] persist last-good to disk so transient outages never
+        # kill a runner loop (a stale liq rank is harmless: 168h window)
+        try:
+            d.to_csv(BASE / "results" / f".liq_live_cache_{key}.csv", index=False)
+        except Exception:
+            pass
         return d
     except Exception as e:
-        print(f"  [liq_live:{key}] fetch failed ({e})")
+        print(f"  [liq_live:{key}] fetch failed ({e}) — falling back to last-good")
+        cache_p = BASE / "results" / f".liq_live_cache_{key}.csv"
+        if cache_p.exists():
+            d = pd.read_csv(cache_p)
+            d["known_at"] = pd.to_datetime(d["known_at"], utc=True)
+            return d
         if key == "SOL":
             return fetch_liq_bars()
+        # last resort: the 07-31 backfill CSVs
+        bf = BASE / "results" / f"coinalyze_liq_1h_{key.lower()}_backfill_20260731.csv"
+        if bf.exists():
+            d = pd.read_csv(bf)
+            d["known_at"] = pd.to_datetime(d["known_at"], utc=True)
+            return d
         raise
 
 

@@ -118,6 +118,10 @@ def main() -> None:
                     pred=("pred_width", "median"),
                     impw=("imp_width_pct", "median")).dropna()
                 ev_stats["vratio"] = ev_stats["pred"] / ev_stats["impw"]
+                if len(ev_stats):
+                    _vmax = float(ev_stats["vratio"].max())
+                    print(f"  [hb] events={len(ev_stats)} vratio_max={_vmax:.2f} "
+                          f"impw_cov={recent['imp_width_pct'].notna().mean():.0%}")
                 fires = ev_stats[(ev_stats["vratio"] >= VRATIO_MIN)
                                  & ~ev_stats.index.isin(traded)]
                 if len(fires):

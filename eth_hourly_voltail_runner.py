@@ -124,6 +124,10 @@ def main() -> None:
                     pred=("pred_width", "median"),
                     impw=("imp_width_pct", "median")).dropna()
                 ev["vratio"] = ev["pred"] / ev["impw"]
+                if len(ev):
+                    _vmax = float(ev["vratio"].max())
+                    print(f"  [hb] events={len(ev)} vratio_max={_vmax:.2f} "
+                          f"impw_cov={recent['imp_width_pct'].notna().mean():.0%}")
                 fires = ev[(ev["vratio"] >= VRATIO_MIN) & ~ev.index.isin(traded)]
                 if len(fires):
                     mk = kalshi_get("/markets", {"series_ticker": "KXETHD",

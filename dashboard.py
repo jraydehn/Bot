@@ -936,7 +936,16 @@ with tab_sol_shadow:
             "- **gk zd65** (dotted): same stack with the zdrift NO-block "
             "widened to 0.65 — monitoring only, NOT in the live runner. "
             "Threshold surfaced by the 08-04/05 NO-side dip, so its 08-11 "
-            "read scores 08-05+ trades only.")
+            "read scores 08-05+ trades only.\n"
+            "- **gk vrM** (dash-dot): same stack but the markov gate applies "
+            "only when vol_ratio_1h < 1 (compressed/trending). Gate×regime "
+            "analysis 08-05: markov's blocks are protective in vr<1 but were "
+            "+$9,258 of blocked winners in chop (vr≥1) on the 07-10+ window "
+            "(re-added trades +$7,319, 4/5 weeks, boot p=0.048). Monitoring "
+            "only; 08-11 read scores 08-05+ trades only.\n"
+            "- **gk vrM+zd65** (long-dash-dot): both modifications combined — "
+            "the strongest replay (S 0.57/0.59/0.29, lowest DD) and the third "
+            "candidate stack racing forward. Same 08-05+ scoring rule.")
     _SH_START = pd.Timestamp("2026-07-30 01:00", tz="UTC")
     try:
         _shp = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False)
@@ -944,7 +953,7 @@ with tab_sol_shadow:
         for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes",
                    "sol_persist_score", "slope120_stoch_k_15m",
                    "stoch_cross_1h", "stoch_k_1h", "oi_chg_pct",
-                   "offset_pct", "z_drift_6h"]:
+                   "offset_pct", "z_drift_6h", "vol_ratio_1h"]:
             _shp[_c] = pd.to_numeric(_shp[_c], errors="coerce")
         _sh = _shp[(_shp["dt"] >= _SH_START)
                    & _shp["resolved_yes"].notna()
@@ -961,8 +970,9 @@ with tab_sol_shadow:
             # for the 08-11 review only if it leads or matches with lower DD.
             _sh["p_blend"] = (_sh["p_model_15m"] + _sh["p_gbdt"]) / 2
             _fams = st.multiselect(
-                "Lines on chart", ["flat $100", "gated+kelly", "gk zd65"],
-                default=["gated+kelly", "gk zd65"], key="solsh_fams")
+                "Lines on chart",
+                ["flat $100", "gated+kelly", "gk zd65", "gk vrM", "gk vrM+zd65"],
+                default=["gated+kelly", "gk vrM+zd65"], key="solsh_fams")
             _figsh = go.Figure()
             _rows = []
 
@@ -1059,31 +1069,38 @@ with tab_sol_shadow:
                                   ~((_q["p_market"] > 0.8) |
                                     (_q["p_market"].between(0.5, 0.65)
                                      & ~(_q["slope120_stoch_k_15m"] >= 40))))
-                _gk = _q[_v2_ok & _mkv_ok & _zd_ok & _off_ok].copy()
-                _gpnl, _gdd = _kbook(_gk, _col)
-                if len(_gk) and "gated+kelly" in _fams:
-                    _figsh.add_trace(go.Scatter(
-                        x=_gk["dt"], y=_gpnl.cumsum(), name=f"{_lbl} gated+kelly",
-                        line=dict(color=_clr, width=1.5, dash="dash")))
-                _gk65 = _q[_v2_ok & _mkv_ok & _zd_ok65 & _off_ok].copy()
-                _gp65, _gdd65 = _kbook(_gk65, _col)
-                if len(_gk65) and "gk zd65" in _fams:
-                    _figsh.add_trace(go.Scatter(
-                        x=_gk65["dt"], y=_gp65.cumsum(), name=f"{_lbl} gk zd65",
-                        line=dict(color=_clr, width=1, dash="dot")))
-                _rows.append({
-                    "book": _lbl,
-                    "flat net": f"${_pnl.sum():+,.0f}",
-                    "flat n": len(_q),
-                    "WR/BE": (f"{np.mean(_win):.0%}/{np.mean(_cost):.0%}"
-                              if len(_q) else "—"),
-                    "g+k net": f"${_gpnl.sum():+,.0f}",
-                    "g+k n": len(_gk),
-                    "g+k maxDD": f"${_gdd:,.0f}",
-                    "zd65 net": f"${_gp65.sum():+,.0f}",
-                    "zd65 n": len(_gk65),
-                    "zd65 maxDD": f"${_gdd65:,.0f}",
-                })
+                # [2026-08-05] regime-CONDITIONAL markov (gk vrM): apply the
+                # markov gate only when vol_ratio_1h < 1 (compressed/trending
+                # — where its blocks tested protective in every book/window);
+                # skip it in chop (vr>=1), where its blocks were winners
+                # (+$9,258 long-window blocked PnL). vr threshold 1.0 is the
+                # natural boundary, NOT swept. Monitoring only; 08-11 read
+                # scores 08-05+ trades only (hypothesis came from watching
+                # the 08-01 flip). Combo = vrM + the zd65 NO-block widen.
+                _vr1 = pd.to_numeric(_q["vol_ratio_1h"], errors="coerce")
+                _mkv_vr = np.where((_vr1 >= 1.0).fillna(False), True, _mkv_ok)
+                _r = {"book": _lbl,
+                      "flat": f"${_pnl.sum():+,.0f} (n={len(_q)})",
+                      "WR/BE": (f"{np.mean(_win):.0%}/{np.mean(_cost):.0%}"
+                                if len(_q) else "—")}
+                for _vn, _vmask, _vdash, _vw in [
+                        ("gated+kelly", _v2_ok & _mkv_ok & _zd_ok & _off_ok,
+                         "dash", 1.5),
+                        ("gk zd65", _v2_ok & _mkv_ok & _zd_ok65 & _off_ok,
+                         "dot", 1.0),
+                        ("gk vrM", _v2_ok & _mkv_vr & _zd_ok & _off_ok,
+                         "dashdot", 1.0),
+                        ("gk vrM+zd65", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
+                         "longdashdot", 1.0)]:
+                    _vq = _q[_vmask].copy()
+                    _vp, _vdd = _kbook(_vq, _col)
+                    if len(_vq) and _vn in _fams:
+                        _figsh.add_trace(go.Scatter(
+                            x=_vq["dt"], y=_vp.cumsum(), name=f"{_lbl} {_vn}",
+                            line=dict(color=_clr, width=_vw, dash=_vdash)))
+                    _r[_vn] = (f"${_vp.sum():+,.0f} (n={len(_vq)}, "
+                               f"DD ${_vdd:,.0f})")
+                _rows.append(_r)
             _figsh.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                                  legend=dict(orientation="h"))
             st.plotly_chart(_figsh, use_container_width=True)

@@ -1154,8 +1154,13 @@ with tab_15m_shadow:
         _abp = pd.read_csv(ASSET_CSV_15M[_a15], low_memory=False)
         _abp["dt"] = pd.to_datetime(_abp["logged_at"], errors="coerce",
                                     utc=True, format="mixed")
-        for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes"]:
-            _abp[_c] = pd.to_numeric(_abp[_c], errors="coerce")
+        for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes",
+                   "offset_pct", "body_15m", "dir_15m", "stoch_k_5m",
+                   "stoch_k_15m", "stoch_k_1h", "chg_5m", "chg_15m", "chg_1h",
+                   "composite_p_up", "liq_score", "vol_ratio",
+                   "vwap_hmm_state"]:
+            if _c in _abp.columns:
+                _abp[_c] = pd.to_numeric(_abp[_c], errors="coerce")
         _ab = _abp[(_abp["dt"] >= _cfg15["start"])
                    & _abp["resolved_yes"].notna()
                    & _abp["p_market"].between(0.03, 0.97)].copy()
@@ -1189,14 +1194,97 @@ with tab_15m_shadow:
                                             line=dict(color=_clr, width=2)))
                 _cum15 = _pnl.cumsum()
                 _dd15 = float((_cum15.cummax() - _cum15).max()) if len(_q) else 0.0
-                _rows15.append({
+                _row15 = {
                     "book": _lbl,
                     "net": f"${_pnl.sum():+,.0f}",
                     "n": len(_q),
                     "WR/BE": (f"{np.mean(_win):.0%}/{np.mean(_cost):.0%}"
                               if len(_q) else "—"),
                     "maxDD": f"${_dd15:,.0f}",
-                })
+                }
+                # [2026-08-05] BTC gated+kelly variant: the 12 live-runner
+                # gates that SURVIVED marginal-contribution testing (long
+                # window 07-10+ production, each gate scored by the kelly
+                # PnL of trades it uniquely blocks). Dropped: Y_stochOB
+                # (+$130 removed = not helping), Y_lowpm (never fires in
+                # this construction). Untestable (no logged column):
+                # hmm_state0 NO-gate — disclosed, not silently skipped.
+                # FLAGGED for 08-11: N_obmom helps production long-window
+                # (−$1,499) but its blocks were shadow-book winners in the
+                # first A/B days (+$2,105, n=8) — re-check on forward data.
+                # Gates block (live runner FLIPS YES→NO instead — harness
+                # convention is block, disclosed). ETH: no gated variant
+                # yet — its challenger is hours old; gates get the same
+                # marginal treatment once a record exists.
+                if _a15 == "BTC":
+                    _yes15 = _q["side"] == "yes"
+                    _no15 = ~_yes15
+                    _pm15 = _q["p_market"]
+                    _m1r = _q["markov_regime_1h"].astype(str)
+                    _m15r = _q["markov_regime_15m"].astype(str)
+                    _cpu15 = _q["composite_p_up"]
+                    _sk15q = _q["stoch_k_15m"].fillna(50)
+                    _sk1hq = _q["stoch_k_1h"].fillna(50)
+                    _ok15 = ~(_yes15 & (_q["offset_pct"].fillna(0) < 0.025))
+                    _ok15 &= ~(_yes15 & (_m1r == "Bear"))
+                    _ok15 &= ~(_yes15 & (_m15r == "Bear")
+                               & ~(_cpu15 <= 0.488).fillna(False))
+                    _ok15 &= ~(_yes15 & (_q["dir_15m"] == 1)
+                               & (_pm15 >= 0.50) & (_pm15 < 0.65)
+                               & ~((_m1r == "Bull")
+                                   | ((_m1r == "Bear") & (_m15r == "Bear")
+                                      & (_sk1hq < 35))))
+                    _ok15 &= ~(_yes15 & (_m1r == "Sideways")
+                               & (_q["body_15m"].fillna(1) < 0.30)
+                               & ~((_cpu15 < 0.40).fillna(False)
+                                   | ((_sk15q >= 20) & (_sk15q < 40))))
+                    _ok15 &= ~(_yes15 & (_sk1hq >= 95)
+                               & (_q["liq_score"] == -1).fillna(False))
+                    _ok15 &= ~(_no15 & (_q["chg_1h"].fillna(0) > 0)
+                               & (_sk1hq >= 30) & (_sk1hq < 70))
+                    _ok15 &= ~(_no15 & (_m1r == "Sideways")
+                               & (_pm15 >= 0.70) & (_sk1hq >= 70))
+                    _ok15 &= ~(_no15 & (_m1r == "Sideways")
+                               & (_m15r == "Sideways") & (_pm15 >= 0.55))
+                    _ok15 &= ~(_no15 & (_m1r == "Bear") & (_m15r == "Bull"))
+                    _ok15 &= ~(_no15 & (_q["stoch_k_5m"] > 76).fillna(False)
+                               & (_q["chg_5m"] > 0).fillna(False))
+                    _vst15 = _q["vwap_hmm_state"]
+                    _ok15 &= ~(_no15 & ((_vst15 == 4)
+                               | ((_vst15 == 2)
+                                  & (_q["vol_ratio"].fillna(1) < 0.216))
+                               | ((_vst15 == 5) & (_sk1hq < 85))
+                               | ((_vst15 == 7)
+                                  & (_q["chg_15m"].fillna(0) >= -0.112))))
+                    _gk15 = _q[np.asarray(_ok15, bool)].copy()
+                    _gc = np.where(_gk15["side"] == "yes", _gk15["p_market"],
+                                   1 - _gk15["p_market"])
+                    _gw = np.where(_gk15["side"] == "yes",
+                                   _gk15["resolved_yes"] == 1,
+                                   _gk15["resolved_yes"] == 0)
+                    _gf = 0.07 * _gk15["p_market"] * (1 - _gk15["p_market"])
+                    _gfr = np.where(
+                        _gk15["side"] == "yes",
+                        (_gk15[_col] - _gk15["p_market"] - _gf)
+                        / (1 - _gk15["p_market"]),
+                        (_gk15["p_market"] - _gk15[_col] - _gf)
+                        / _gk15["p_market"])
+                    _gs = 2500.0 * np.clip(_gfr, 0, 0.10)
+                    _gp15 = pd.Series(
+                        np.where(_gw, _gs * (1 - _gc) / _gc, -_gs)
+                        - (_gs / _gc) * _gf, index=_gk15.index)
+                    if len(_gk15):
+                        _fig15.add_trace(go.Scatter(
+                            x=_gk15["dt"], y=_gp15.cumsum(),
+                            name=f"{_lbl} gated+kelly",
+                            line=dict(color=_clr, width=1.5, dash="dash")))
+                    _gcum15 = _gp15.cumsum()
+                    _gdd15 = (float((_gcum15.cummax() - _gcum15).max())
+                              if len(_gk15) else 0.0)
+                    _row15["g+k (12 gates)"] = (
+                        f"${_gp15.sum():+,.0f} (n={len(_gk15)}, "
+                        f"DD ${_gdd15:,.0f})")
+                _rows15.append(_row15)
             _fig15.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                                  legend=dict(orientation="h"))
             st.plotly_chart(_fig15, use_container_width=True)

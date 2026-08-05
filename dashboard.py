@@ -893,9 +893,10 @@ st.markdown("<hr style='margin:12px 0 16px 0;'>", unsafe_allow_html=True)
 # Outer asset tabs
 # ---------------------------------------------------------------------------
 
-tab_btc, tab_eth, tab_sol, tab_sol_shadow, tab_sol_hourly_ab, tab_cmp = st.tabs(
-    ["₿  BTC", "Ξ  ETH", "◎  SOL", "👥  SOL SHADOW A/B", "🥊  HOURLY A/B",
-     "📊  Compare"]
+(tab_btc, tab_eth, tab_sol, tab_sol_shadow, tab_15m_shadow,
+ tab_sol_hourly_ab, tab_cmp) = st.tabs(
+    ["₿  BTC", "Ξ  ETH", "◎  SOL", "👥  SOL SHADOW A/B", "🧪  BTC/ETH 15M A/B",
+     "🥊  HOURLY A/B", "📊  Compare"]
 )
 
 with tab_btc:
@@ -1116,6 +1117,103 @@ with tab_sol_shadow:
                            f"settled correct {_shadow_right:.0%} of the time.")
     except Exception as _shex:
         st.warning(f"shadow tab error: {_shex}")
+
+with tab_15m_shadow:
+    # [2026-08-05] BTC/ETH 15m shadow A/B — stage 1 of the harness ladder
+    # the SOL SHADOW tab graduated through (user-endorsed process): flat
+    # $100 books on identical scans first; gates/kelly/variants get added
+    # LATER via marginal-contribution testing as the record accrues.
+    # BTC challenger: 5-seed refresh ensemble in p_gbdt since 08-02 22:00
+    # (staleness-test justified, abba68e). ETH challenger: 5-seed refresh
+    # in p_gbdt since 08-05 ~06:00 — DISCLOSED: ETH's staleness test was
+    # NOT confirmed; this arm exists to give the harness a real challenger
+    # (p_gbdt previously duplicated production on ETH) and is judged on
+    # forward paper only.
+    _AB15 = {
+        "BTC": {"start": pd.Timestamp("2026-08-02 22:00", tz="UTC"),
+                "note": "challenger = 5-seed refresh ensemble (staleness-test "
+                        "justified, 08-02); read at the 08-11 review."},
+        "ETH": {"start": pd.Timestamp("2026-08-05 05:15", tz="UTC"),
+                "note": "challenger = 5-seed refresh ensemble (08-05) — "
+                        "staleness NOT confirmed for ETH; unjustified-retrain "
+                        "arm, judged on forward record only; first read "
+                        "~08-18."},
+    }
+    _a15 = st.radio("Asset", ["BTC", "ETH"], horizontal=True, key="ab15_asset")
+    _cfg15 = _AB15[_a15]
+    st.markdown(
+        f"<div style='color:#f0a500;font-size:0.78rem;margin-bottom:8px;'>"
+        f"{_a15} 15m model A/B on identical live scans since "
+        f"{_cfg15['start']:%Y-%m-%d %H:%M} UTC — production (p_model_15m) vs "
+        f"shadow (p_gbdt) vs fixed 50/50 blend, hypothetical flat-$100 books "
+        f"(edge ≥ 0.04, one bet per contract, net of fees). Decisions remain "
+        f"production-only. {_cfg15['note']}</div>",
+        unsafe_allow_html=True,
+    )
+    try:
+        _abp = pd.read_csv(ASSET_CSV_15M[_a15], low_memory=False)
+        _abp["dt"] = pd.to_datetime(_abp["logged_at"], errors="coerce",
+                                    utc=True, format="mixed")
+        for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes"]:
+            _abp[_c] = pd.to_numeric(_abp[_c], errors="coerce")
+        _ab = _abp[(_abp["dt"] >= _cfg15["start"])
+                   & _abp["resolved_yes"].notna()
+                   & _abp["p_market"].between(0.03, 0.97)].copy()
+        if len(_ab) < 3:
+            st.info(f"Collecting… {len(_ab)} resolved scans since challenger "
+                    f"go-live (unresolved scans settle within ~15 min).")
+        else:
+            _ab["p_blend"] = (_ab["p_model_15m"] + _ab["p_gbdt"]) / 2
+            _fig15 = go.Figure()
+            _rows15 = []
+            for _lbl, _col, _clr in [("production", "p_model_15m", "#4f8bf9"),
+                                     ("shadow", "p_gbdt", "#f0a500"),
+                                     ("blend 50/50", "p_blend", "#b57edc")]:
+                _s = _ab.dropna(subset=[_col]).copy()
+                _fee = 0.07 * _s["p_market"] * (1 - _s["p_market"])
+                _ey = _s[_col] - _s["p_market"] - _fee
+                _en = _s["p_market"] - _s[_col] - _fee
+                _s["side"] = np.where(_ey >= _en, "yes", "no")
+                _s["edge"] = np.maximum(_ey, _en)
+                _q = _s[_s["edge"] >= 0.04].sort_values("dt").drop_duplicates(
+                    "contract_ticker", keep="first")
+                _cost = np.where(_q["side"] == "yes", _q["p_market"],
+                                 1 - _q["p_market"])
+                _win = np.where(_q["side"] == "yes", _q["resolved_yes"] == 1,
+                                _q["resolved_yes"] == 0)
+                _feeq = 0.07 * _q["p_market"] * (1 - _q["p_market"])
+                _pnl = pd.Series(np.where(_win, 100 * (1 - _cost) / _cost, -100)
+                                 - (100 / _cost) * _feeq, index=_q.index)
+                _fig15.add_trace(go.Scatter(x=_q["dt"], y=_pnl.cumsum(),
+                                            name=_lbl,
+                                            line=dict(color=_clr, width=2)))
+                _cum15 = _pnl.cumsum()
+                _dd15 = float((_cum15.cummax() - _cum15).max()) if len(_q) else 0.0
+                _rows15.append({
+                    "book": _lbl,
+                    "net": f"${_pnl.sum():+,.0f}",
+                    "n": len(_q),
+                    "WR/BE": (f"{np.mean(_win):.0%}/{np.mean(_cost):.0%}"
+                              if len(_q) else "—"),
+                    "maxDD": f"${_dd15:,.0f}",
+                })
+            _fig15.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
+                                 legend=dict(orientation="h"))
+            st.plotly_chart(_fig15, use_container_width=True)
+            st.dataframe(pd.DataFrame(_rows15), hide_index=True,
+                         use_container_width=True)
+            _dis15 = _ab.dropna(subset=["p_gbdt", "p_model_15m"])
+            _dis15 = _dis15[(_dis15["p_gbdt"] - _dis15["p_model_15m"]).abs() >= 0.05]
+            if len(_dis15):
+                _sr15 = np.mean(
+                    np.where(_dis15["p_gbdt"] > _dis15["p_model_15m"],
+                             _dis15["resolved_yes"] == 1,
+                             _dis15["resolved_yes"] == 0))
+                st.caption(f"Model disagreements ≥5pp: {len(_dis15)} scans — "
+                           f"shadow's side settled correct {_sr15:.0%} of the "
+                           f"time.")
+    except Exception as _abex:
+        st.warning(f"15m A/B tab error: {_abex}")
 
 with tab_sol_hourly_ab:
     # [2026-07-31] HOURLY model-challenger A/B, all three assets. Challenger

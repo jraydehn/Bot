@@ -3024,6 +3024,13 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             _lgbm_shadows[ticker] = compute_p_model_15m(
                 spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
                 model_override=_btc_sh)
+        elif asset.upper() == "ETH" and globals().get("_ETH_SHADOW") is not None:
+            # [2026-08-05] ETH refresh shadow (see loader comment) — gives
+            # the ETH 15m A/B a genuine challenger (p_gbdt previously
+            # duplicated production for ETH). Raw ensemble probability.
+            _lgbm_shadows[ticker] = compute_p_model_15m(
+                spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
+                model_override=globals()["_ETH_SHADOW"])
         else:
             _lgbm_shadows[ticker] = compute_p_model_15m(
                 spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
@@ -5046,6 +5053,25 @@ def main() -> None:
                   f"5-seed ensemble) → p_gbdt column")
         except Exception as _bre:
             print(f"  [btc_refresh_shadow] load failed: {_bre}")
+
+    # [2026-08-05] ETH refresh shadow: same recipe as the BTC refresh but a
+    # DIFFERENT evidence status, disclosed — ETH's staleness test was NOT
+    # confirmed, so this is not a justified retrain; it is the challenger
+    # arm for the ETH 15m shadow A/B (p_gbdt previously duplicated the
+    # production model on ETH rows, giving the harness nothing to race).
+    # Log-only; decisions untouched; judged on forward paper from 08-05.
+    global _ETH_SHADOW
+    _ETH_SHADOW = None
+    if asset == "ETH":
+        try:
+            import btc15m_refresh_ensemble  # noqa: F401 — pickle class resolution
+            _shp = Path(__file__).parent / "models" / "lgbm_15m_eth_refresh_20260805.pkl"
+            with open(_shp, "rb") as _f:
+                _ETH_SHADOW = pickle.load(_f)
+            print(f"  [eth_refresh_shadow] Loaded ({len(_ETH_SHADOW['features'])} features, "
+                  f"5-seed ensemble) → p_gbdt column")
+        except Exception as _ere:
+            print(f"  [eth_refresh_shadow] load failed: {_ere}")
 
     if _is_live_or_dual:
         _live_csv = live_trading.get_live_csv_path(asset)

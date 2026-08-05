@@ -1193,11 +1193,26 @@ with tab_15m_shadow:
                     f"go-live (unresolved scans settle within ~15 min).")
         else:
             _ab["p_blend"] = (_ab["p_model_15m"] + _ab["p_gbdt"]) / 2
+            _books15 = [("production", "p_model_15m", "#4f8bf9"),
+                        ("shadow", "p_gbdt", "#f0a500"),
+                        ("blend 50/50", "p_blend", "#b57edc")]
+            # [2026-08-05 pm] BTC-only BENCHMARK book: z-expansion applied to
+            # the MARKET probability (k=1.8 frozen from SOL, no fitting) —
+            # the favorite-longshot bias trade. Backtest 06-01+: +$6,243,
+            # WR 74.4% vs BE 72.0%, 8/11 wks, boot p=0.06; smooth k-plateau.
+            # Does NOT replicate on ETH (-$1,708) / SOL (-$4,063) => BTC-only,
+            # modest confidence; fees cleared at mid — live would fight the
+            # spread at extremes (maker territory). Model-FREE: serves as the
+            # benchmark the model books must beat at the 08-11/08-18 reads.
+            # Forward scoring from 08-05.
+            if _a15 == "BTC":
+                from scipy.stats import norm as _n15
+                _ab["p_mktfav"] = _n15.cdf(
+                    1.8 * _n15.ppf(_ab["p_market"].clip(0.01, 0.99)))
+                _books15.append(("mkt-fav k1.8", "p_mktfav", "#9aa0a6"))
             _fig15 = go.Figure()
             _rows15 = []
-            for _lbl, _col, _clr in [("production", "p_model_15m", "#4f8bf9"),
-                                     ("shadow", "p_gbdt", "#f0a500"),
-                                     ("blend 50/50", "p_blend", "#b57edc")]:
+            for _lbl, _col, _clr in _books15:
                 _s = _ab.dropna(subset=[_col]).copy()
                 _fee = 0.07 * _s["p_market"] * (1 - _s["p_market"])
                 _ey = _s[_col] - _s["p_market"] - _fee
@@ -1240,7 +1255,7 @@ with tab_15m_shadow:
                 # convention is block, disclosed). ETH: no gated variant
                 # yet — its challenger is hours old; gates get the same
                 # marginal treatment once a record exists.
-                if _a15 == "BTC":
+                if _a15 == "BTC" and _lbl != "mkt-fav k1.8":
                     _yes15 = _q["side"] == "yes"
                     _no15 = ~_yes15
                     _pm15 = _q["p_market"]

@@ -1496,6 +1496,30 @@ with tab_sol_hourly_ab:
                 # top — not worth 151 fewer trades. No gate rescues the book
                 # to positive (-$6,342 -> -$5,102 full): the July-era model's
                 # bleed is broad, per the fee-audit inversion finding.
+                # [2026-08-06] ETH: frozen-6 replay — FOUR candidates clear
+                # (richest of the 3 assets). Minimal displayed set = the two
+                # independently strong ones: NO-block at oi_chg_pct>=0.0535
+                # (-$1,114/67, P=0.02, negative EVERY week; threshold is the
+                # frozen SOL 15m constant replicating cross-asset AND cross-
+                # timeframe) + markov_daily==Sideways block (-$807/42, P=0.04
+                # — the SOL hourly finding replicating on ETH). cpu/hurst
+                # also clear individually but stack poorly (3-gate book's
+                # "positive" total leans on one week; 4-gate worse). Kelly
+                # note: ETH kelly-logged BEATS flat (-$1,175 vs -$1,770) —
+                # opposite of SOL hourly; dampener port likely helping.
+                if _aname == "ETH":
+                    _oie = pd.to_numeric(_pq["oi_chg_pct"], errors="coerce")
+                    _bad = ((_pq["side"] == "no")
+                            & (_oie >= 0.0535).fillna(False))                         | (_pq["markov_regime_daily"].astype(str)
+                           == "Sideways")
+                    _gq = _pq[~np.asarray(_bad, bool)]
+                    if len(_gq):
+                        _figab.add_trace(go.Scatter(
+                            x=_gq["dt"], y=_gq["pnl"].cumsum(),
+                            name="production oi+mkv-gated",
+                            line=dict(color="#4f8bf9", width=1.5, dash="dash")))
+                        _gk_txt = (f" · oi+mkv-gated ${_gq['pnl'].sum():+,.0f} "
+                                   f"(n={len(_gq)})")
                 if _aname == "BTC":
                     _cpub = pd.to_numeric(_pq["composite_p_up"],
                                           errors="coerce")

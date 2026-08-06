@@ -1569,8 +1569,25 @@ with tab_sol_hourly_ab:
                                                     errors="coerce").mean()))
                     _gtxt = ""
                     if _kind == "tail":
-                        _gtxt = (f" · {_rq['event'].nunique()} events "
-                                 f"(both-tail legs @ask)")
+                        # [2026-08-06] mean-cost "BE" is misleading when leg
+                        # costs vary (3-15c): wins at 14c pay 6:1, wins at 3c
+                        # pay 32:1, so avg WR vs avg cost is not a valid
+                        # comparison. Show the realized-payout breakeven
+                        # instead: avg_loss/(avg_win+avg_loss).
+                        _wl = _rq[pd.to_numeric(_rq["would_win"],
+                                                errors="coerce") == 1]
+                        _ll = _rq[pd.to_numeric(_rq["would_win"],
+                                                errors="coerce") == 0]
+                        if len(_wl) and len(_ll):
+                            _aw = float(_wl["would_pnl_net"].mean())
+                            _al = float(-_ll["would_pnl_net"].mean())
+                            _be = _al / (_aw + _al)
+                            _gtxt = (f" (realized-payout BE; avg win "
+                                     f"${_aw:,.0f} / loss ${_al:,.0f})"
+                                     f" · {_rq['event'].nunique()} events")
+                        else:
+                            _gtxt = (f" (avg cost — no wins yet) · "
+                                     f"{_rq['event'].nunique()} events")
                     elif "ctx_gates" in _rq.columns:
                         _gt = _rq[_rq["ctx_gates"].fillna("") == ""]
                         if len(_gt):

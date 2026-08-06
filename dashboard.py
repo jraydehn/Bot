@@ -1126,8 +1126,9 @@ with tab_sol_shadow:
                     _r[_vn] = (f"${_vp.sum():+,.0f} (n={len(_vq)}, "
                                f"DD ${_vdd:,.0f})")
                 _rows.append(_r)
-            _figsh.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
-                                 legend=dict(orientation="h"))
+            _figsh.update_layout(height=320, margin=dict(l=0, r=0, t=64, b=0),
+                                 legend=dict(orientation="h", yanchor="bottom",
+                                             y=1.02, xanchor="left", x=0))
             st.plotly_chart(_figsh, use_container_width=True)
             st.dataframe(pd.DataFrame(_rows), hide_index=True,
                          use_container_width=True)
@@ -1393,8 +1394,9 @@ with tab_15m_shadow:
                         f"${_gpE.sum():+,.0f} (n={len(_gkE)}, "
                         f"DD ${_gddE:,.0f})")
                 _rows15.append(_row15)
-            _fig15.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
-                                 legend=dict(orientation="h"))
+            _fig15.update_layout(height=320, margin=dict(l=0, r=0, t=48, b=0),
+                                 legend=dict(orientation="h", yanchor="bottom",
+                                             y=1.02, xanchor="left", x=0))
             st.plotly_chart(_fig15, use_container_width=True)
             st.dataframe(pd.DataFrame(_rows15), hide_index=True,
                          use_container_width=True)
@@ -1586,7 +1588,8 @@ with tab_sol_hourly_ab:
                     _cols[_ci].metric(f"{_lbl}: net (flat $100)", "—",
                                       f"collecting… ({_pend} pending)")
             _figab.update_layout(height=260, margin=dict(l=0, r=0, t=8, b=0),
-                                 legend=dict(orientation="h"))
+                                 legend=dict(orientation="h", yanchor="bottom",
+                                             y=1.02, xanchor="left", x=0))
             st.plotly_chart(_figab, use_container_width=True)
         except Exception as _abex:
             st.warning(f"{_aname} hourly A/B error: {_abex}")

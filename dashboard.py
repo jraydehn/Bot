@@ -1191,7 +1191,7 @@ with tab_15m_shadow:
                    "offset_pct", "body_15m", "dir_15m", "stoch_k_5m",
                    "stoch_k_15m", "stoch_k_1h", "chg_5m", "chg_15m", "chg_1h",
                    "composite_p_up", "liq_score", "vol_ratio",
-                   "vwap_hmm_state"]:
+                   "vwap_hmm_state", "rsi_1h", "consec_dir_15m", "bp_5m"]:
             if _c in _abp.columns:
                 _abp[_c] = pd.to_numeric(_abp[_c], errors="coerce")
         _ab = _abp[(_abp["dt"] >= _cfg15["start"])
@@ -1332,6 +1332,61 @@ with tab_15m_shadow:
                     _row15["g+k (12 gates)"] = (
                         f"${_gp15.sum():+,.0f} (n={len(_gk15)}, "
                         f"DD ${_gdd15:,.0f})")
+                # [2026-08-05] ETH gated+kelly: the 5 live gates that SURVIVED
+                # marginal testing (Y_stoch5m44, Y_stoch1h_mid[rsi<35 rescue],
+                # N_daily_sw, N_consec, N_downcandle). REJECTED as inverted on
+                # current data: Y_lowvol (+$7,562 of blocked winners long-
+                # window, +$6,892 post-swap), N_stoch1h_ob (+$2,890),
+                # N_oversold_C/GateC (+$2,051), N_kc (n=7 mixed); Y_lowcpu
+                # never fires. Survivor stack turns the harness book POSITIVE:
+                # production +$4,338 long / +$6,888 post-swap. Windows straddle
+                # the 07-29 production-model swap — gates scored on both.
+                if _a15 == "ETH":
+                    _yesE = _q["side"] == "yes"
+                    _noE = ~_yesE
+                    _pmE = _q["p_market"]
+                    _mdE = _q["markov_eth_daily"].astype(str)
+                    _sk5E = _q["stoch_k_5m"].fillna(50)
+                    _sk15E = _q["stoch_k_15m"].fillna(50)
+                    _sk1hE = _q["stoch_k_1h"].fillna(50)
+                    _okE = ~(_yesE & (_sk5E >= 44))
+                    _okE &= ~(_yesE & (_sk1hE >= 30) & (_sk1hE < 70)
+                              & ~(_q["rsi_1h"] < 35).fillna(False))
+                    _okE &= ~(_noE & (_mdE == "Sideways"))
+                    _okE &= ~(_noE & (_q["consec_dir_15m"] <= -1).fillna(False)
+                              & (_sk15E <= 40))
+                    _okE &= ~(_noE & (_q["dir_15m"] == -1) & (_pmE >= 0.50)
+                              & ~((_q["body_15m"].fillna(0) > 0.60)
+                                  & (_q["bp_5m"].fillna(0.5) < 0.45)
+                                  & ~(_q["liq_score"] == -2).fillna(False)))
+                    _gkE = _q[np.asarray(_okE, bool)].copy()
+                    _gcE = np.where(_gkE["side"] == "yes", _gkE["p_market"],
+                                    1 - _gkE["p_market"])
+                    _gwE = np.where(_gkE["side"] == "yes",
+                                    _gkE["resolved_yes"] == 1,
+                                    _gkE["resolved_yes"] == 0)
+                    _gfE = 0.07 * _gkE["p_market"] * (1 - _gkE["p_market"])
+                    _gfrE = np.where(
+                        _gkE["side"] == "yes",
+                        (_gkE[_col] - _gkE["p_market"] - _gfE)
+                        / (1 - _gkE["p_market"]),
+                        (_gkE["p_market"] - _gkE[_col] - _gfE)
+                        / _gkE["p_market"])
+                    _gsE = 2500.0 * np.clip(_gfrE, 0, 0.10)
+                    _gpE = pd.Series(
+                        np.where(_gwE, _gsE * (1 - _gcE) / _gcE, -_gsE)
+                        - (_gsE / _gcE) * _gfE, index=_gkE.index)
+                    if len(_gkE):
+                        _fig15.add_trace(go.Scatter(
+                            x=_gkE["dt"], y=_gpE.cumsum(),
+                            name=f"{_lbl} gated+kelly",
+                            line=dict(color=_clr, width=1.5, dash="dash")))
+                    _gcumE = _gpE.cumsum()
+                    _gddE = (float((_gcumE.cummax() - _gcumE).max())
+                             if len(_gkE) else 0.0)
+                    _row15["g+k (5 gates)"] = (
+                        f"${_gpE.sum():+,.0f} (n={len(_gkE)}, "
+                        f"DD ${_gddE:,.0f})")
                 _rows15.append(_row15)
             _fig15.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=0),
                                  legend=dict(orientation="h"))

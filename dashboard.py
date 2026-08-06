@@ -1237,9 +1237,12 @@ with tab_15m_shadow:
                 _feeq = 0.07 * _q["p_market"] * (1 - _q["p_market"])
                 _pnl = pd.Series(np.where(_win, 100 * (1 - _cost) / _cost, -100)
                                  - (100 / _cost) * _feeq, index=_q.index)
-                _fig15.add_trace(go.Scatter(x=_q["dt"], y=_pnl.cumsum(),
-                                            name=_lbl,
-                                            line=dict(color=_clr, width=2)))
+                # traces anchor at (window start, $0) so a large first
+                # trade reads as a jump, not a starting offset
+                _fig15.add_trace(go.Scatter(
+                    x=[_cfg15["start"]] + list(_q["dt"]),
+                    y=[0.0] + list(_pnl.cumsum()), name=_lbl,
+                    line=dict(color=_clr, width=2)))
                 _cum15 = _pnl.cumsum()
                 _dd15 = float((_cum15.cummax() - _cum15).max()) if len(_q) else 0.0
                 _row15 = {
@@ -1323,7 +1326,8 @@ with tab_15m_shadow:
                         - (_gs / _gc) * _gf, index=_gk15.index)
                     if len(_gk15):
                         _fig15.add_trace(go.Scatter(
-                            x=_gk15["dt"], y=_gp15.cumsum(),
+                            x=[_cfg15["start"]] + list(_gk15["dt"]),
+                            y=[0.0] + list(_gp15.cumsum()),
                             name=f"{_lbl} gated+kelly",
                             line=dict(color=_clr, width=1.5, dash="dash")))
                     _gcum15 = _gp15.cumsum()
@@ -1378,7 +1382,8 @@ with tab_15m_shadow:
                         - (_gsE / _gcE) * _gfE, index=_gkE.index)
                     if len(_gkE):
                         _fig15.add_trace(go.Scatter(
-                            x=_gkE["dt"], y=_gpE.cumsum(),
+                            x=[_cfg15["start"]] + list(_gkE["dt"]),
+                            y=[0.0] + list(_gpE.cumsum()),
                             name=f"{_lbl} gated+kelly",
                             line=dict(color=_clr, width=1.5, dash="dash")))
                     _gcumE = _gpE.cumsum()

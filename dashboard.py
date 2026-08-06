@@ -1486,6 +1486,30 @@ with tab_sol_hourly_ab:
                             line=dict(color="#4f8bf9", width=1.5, dash="dash")))
                         _gk_txt = (f" · mkv-gated ${_gq['pnl'].sum():+,.0f} "
                                    f"(n={len(_gq)})")
+                # [2026-08-06] BTC: same 6 frozen candidates replayed on the
+                # 645-trade book (07-01+). Sole survivor = cpu-disagree block
+                # (side contradicts composite_p_up): removes -$1,240, P>=0
+                # 0.05 — the correlated-agreement doctrine as a gate. MIRROR
+                # of SOL, where this same gate removed winners. markov-daily
+                # candidates never fired: BTC daily regime = Bull for 609/645
+                # trades (monoculture, not a data gap). hurst adds ~$123 on
+                # top — not worth 151 fewer trades. No gate rescues the book
+                # to positive (-$6,342 -> -$5,102 full): the July-era model's
+                # bleed is broad, per the fee-audit inversion finding.
+                if _aname == "BTC":
+                    _cpub = pd.to_numeric(_pq["composite_p_up"],
+                                          errors="coerce")
+                    _agree = np.where(_pq["side"] == "yes",
+                                      ~(_cpub < 0.5).fillna(False),
+                                      ~(_cpub > 0.5).fillna(False))
+                    _gq = _pq[np.asarray(_agree, bool)]
+                    if len(_gq):
+                        _figab.add_trace(go.Scatter(
+                            x=_gq["dt"], y=_gq["pnl"].cumsum(),
+                            name="production cpu-gated",
+                            line=dict(color="#4f8bf9", width=1.5, dash="dash")))
+                        _gk_txt = (f" · cpu-gated ${_gq['pnl'].sum():+,.0f} "
+                                   f"(n={len(_gq)})")
                 _cols[0].metric("production: net (flat $100)",
                                 f"${_pq['pnl'].sum():+,.0f}",
                                 f"{len(_pq)} resolved · WR {_prw.mean():.0%} "

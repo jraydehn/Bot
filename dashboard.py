@@ -1431,9 +1431,10 @@ with tab_sol_hourly_ab:
     # directional w/ ctx gates) or "tail" (two-sided vol-tail legs, ask
     # fills, no gates — cumulative over ALL legs, events counted).
     _AB_CFG = [
-        ("SOL", "2026-07-30", RESULTS_DIR / "paper_trades_sol.csv",
-         [("v7", RESULTS_DIR / "paper_trades_sol_hourly_v7.csv", "#f0a500", "dir"),
-          ("v8", RESULTS_DIR / "paper_trades_sol_hourly_v8.csv", "#00c076", "dir")]),
+        # [2026-08-06] v7/v8 removed from DISPLAY (user: nowhere near
+        # deployable). Runners + CSVs keep accruing; their 08-13/14
+        # retirement read happens off-dashboard.
+        ("SOL", "2026-07-30", RESULTS_DIR / "paper_trades_sol.csv", []),
         ("BTC", "2026-08-04", RESULTS_DIR / "paper_trades.csv",
          [("vol-tail", RESULTS_DIR / "paper_trades_btc_hourly_voltail.csv",
            "#b57edc", "tail")]),
@@ -1467,10 +1468,28 @@ with tab_sol_hourly_ab:
                 _figab.add_trace(go.Scatter(x=_pq["dt"], y=_pq["pnl"].cumsum(),
                                             name="production",
                                             line=dict(color="#4f8bf9", width=2)))
+                _gk_txt = ""
+                # [2026-08-06] SOL: minimal frozen gate — block trades when
+                # daily Markov = Sideways (hourly directional edge needs a
+                # trending daily regime). Only survivor of 6 pre-declared
+                # frozen candidates on the 78-trade history: removes -$1,041
+                # over 48 trades, 4/5 weeks helpful, P(>=0)=0.07; flips the
+                # full book -$562 -> +$479. Kelly-logged sizing tested WORSE
+                # than flat (-$795 vs -$562) — shown as a number, not a line.
+                if _aname == "SOL":
+                    _mkvd = _pq["markov_regime_daily"].astype(str)
+                    _gq = _pq[_mkvd != "Sideways"]
+                    if len(_gq):
+                        _figab.add_trace(go.Scatter(
+                            x=_gq["dt"], y=_gq["pnl"].cumsum(),
+                            name="production mkv-gated",
+                            line=dict(color="#4f8bf9", width=1.5, dash="dash")))
+                        _gk_txt = (f" · mkv-gated ${_gq['pnl'].sum():+,.0f} "
+                                   f"(n={len(_gq)})")
                 _cols[0].metric("production: net (flat $100)",
                                 f"${_pq['pnl'].sum():+,.0f}",
                                 f"{len(_pq)} resolved · WR {_prw.mean():.0%} "
-                                f"vs BE {np.mean(_prc):.0%}")
+                                f"vs BE {np.mean(_prc):.0%}{_gk_txt}")
             else:
                 _cols[0].metric("production: net (flat $100)", "—", "collecting…")
             for _ci, (_lbl, _path, _clr, _kind) in enumerate(_chals, start=1):

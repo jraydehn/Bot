@@ -1192,7 +1192,8 @@ with tab_15m_shadow:
                    "offset_pct", "body_15m", "dir_15m", "stoch_k_5m",
                    "stoch_k_15m", "stoch_k_1h", "chg_5m", "chg_15m", "chg_1h",
                    "composite_p_up", "liq_score", "vol_ratio",
-                   "vwap_hmm_state", "rsi_1h", "consec_dir_15m", "bp_5m"]:
+                   "vwap_hmm_state", "rsi_1h", "consec_dir_15m", "bp_5m",
+                   "hurst_exponent_5m"]:
             if _c in _abp.columns:
                 _abp[_c] = pd.to_numeric(_abp[_c], errors="coerce")
         _ab = _abp[(_abp["dt"] >= _cfg15["start"])
@@ -1364,6 +1365,13 @@ with tab_15m_shadow:
                               & ~((_q["body_15m"].fillna(0) > 0.60)
                                   & (_q["bp_5m"].fillna(0.5) < 0.45)
                                   & ~(_q["liq_score"] == -2).fillna(False)))
+                    # [2026-08-06] 6th gate: hurst NO-block (SOL's frozen
+                    # 0.6131 replicated on ETH: -$8,841/251 P=0.03; YES side
+                    # untouched — trending tape FEEDS ETH YES +$13,130).
+                    # Column logs for ETH from 08-06 runner deploy; NaN rows
+                    # (pre-deploy) pass — the gate PHASES IN.
+                    _okE &= ~(_noE & (_q["hurst_exponent_5m"]
+                                      >= 0.6131).fillna(False))
                     _gkE = _q[np.asarray(_okE, bool)].copy()
                     _gcE = np.where(_gkE["side"] == "yes", _gkE["p_market"],
                                     1 - _gkE["p_market"])
@@ -1390,7 +1398,7 @@ with tab_15m_shadow:
                     _gcumE = _gpE.cumsum()
                     _gddE = (float((_gcumE.cummax() - _gcumE).max())
                              if len(_gkE) else 0.0)
-                    _row15["g+k (5 gates)"] = (
+                    _row15["g+k (6 gates)"] = (
                         f"${_gpE.sum():+,.0f} (n={len(_gkE)}, "
                         f"DD ${_gddE:,.0f})")
                 _rows15.append(_row15)

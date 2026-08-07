@@ -2646,6 +2646,21 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             print(f"  [cg_flow_hmm_sol] state={_cg_flow_state_sol}  ({_cgs_lbl})")
     sig["cg_flow_state"] = _cg_flow_state_sol if _cg_flow_state_sol is not None else ""
 
+    # [2026-08-06] ETH: log hurst_exponent_5m (log-only). SOL's frozen
+    # NO-block threshold 0.6131 replicated on ETH via zero-lookahead
+    # reconstruction (-$8,841 of blocked losers /251, P=0.03, 4/5 wks;
+    # YES side confirms mechanism: trending tape FEEDS ETH YES +$13,130).
+    # Column enables the dashboard's ETH gated book to apply the gate on
+    # live-logged values (phases in from this deploy). BTC intentionally
+    # NOT enabled: tested negative (removes winners; banked 08-05).
+    if asset == "ETH" and live_1m is not None:
+        _df5_eth = live_1m.resample("5min").agg(
+            {"open": "first", "high": "max", "low": "min",
+             "close": "last", "volume": "sum"}).dropna()
+        if len(_df5_eth) >= 31:
+            sig["hurst_exponent_5m"] = _kalman_hurst_ou_at(
+                _df5_eth)["hurst_exponent"]
+
     # VWAP MTF HMM state (BTC + SOL — each asset's own model; gates applied in contract loop)
     _vwap_state: "int | None" = None
     if asset in ("BTC", "SOL") and live_1m is not None:

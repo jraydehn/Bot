@@ -938,12 +938,12 @@ with tab_sol_shadow:
             "widened to 0.65 — monitoring only, NOT in the live runner. "
             "Threshold surfaced by the 08-04/05 NO-side dip, so its 08-11 "
             "read scores 08-05+ trades only.\n"
-            "- **gk vrM** (dash-dot): same stack but the markov gate applies "
-            "only when vol_ratio_1h < 1 (compressed/trending). Gate×regime "
-            "analysis 08-05: markov's blocks are protective in vr<1 but were "
-            "+$9,258 of blocked winners in chop (vr≥1) on the 07-10+ window "
-            "(re-added trades +$7,319, 4/5 weeks, boot p=0.048). Monitoring "
-            "only; 08-11 read scores 08-05+ trades only.\n"
+            "- **gk vrM+hurst** (dash-dot): conditional markov (applies only "
+            "when vol_ratio_1h < 1) PLUS the hurst NO-block. Replaced plain "
+            "gk vrM 08-06: the stack dominates it on every window/book "
+            "(long S 0.37 vs 0.30, DD $2,882 vs $4,794) though hurst alone "
+            "still leads Sharpe. Inherits both fitted thresholds — scored on "
+            "trades after 08-05 15:20 UTC only.\n"
             "- **gk vrM+zd65** (long-dash-dot): both modifications combined — "
             "the strongest replay (S 0.57/0.59/0.29, lowest DD) and the third "
             "candidate stack racing forward. Same 08-05+ scoring rule.\n"
@@ -979,7 +979,7 @@ with tab_sol_shadow:
             _sh["p_blend"] = (_sh["p_model_15m"] + _sh["p_gbdt"]) / 2
             _fams = st.multiselect(
                 "Lines on chart",
-                ["flat $100", "gated+kelly", "gk zd65", "gk vrM",
+                ["flat $100", "gated+kelly", "gk zd65", "gk vrM+hurst",
                  "gk vrM+zd65", "gk hurst"],
                 default=["gated+kelly", "gk vrM+zd65", "gk hurst"],
                 key="solsh_fams")
@@ -1111,8 +1111,8 @@ with tab_sol_shadow:
                          "dash", 1.5),
                         ("gk zd65", _v2_ok & _mkv_ok & _zd_ok65 & _off_ok,
                          "dot", 1.0),
-                        ("gk vrM", _v2_ok & _mkv_vr & _zd_ok & _off_ok,
-                         "dashdot", 1.0),
+                        ("gk vrM+hurst", _v2_ok & _mkv_vr & _zd_ok & _off_ok
+                         & _hu_ok, "dashdot", 1.0),
                         ("gk vrM+zd65", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
                          "longdashdot", 1.0),
                         ("gk hurst", _v2_ok & _mkv_ok & _zd_ok & _off_ok & _hu_ok,

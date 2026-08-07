@@ -1365,42 +1365,50 @@ with tab_15m_shadow:
                               & ~((_q["body_15m"].fillna(0) > 0.60)
                                   & (_q["bp_5m"].fillna(0.5) < 0.45)
                                   & ~(_q["liq_score"] == -2).fillna(False)))
-                    # [2026-08-06] 6th gate: hurst NO-block (SOL's frozen
-                    # 0.6131 replicated on ETH: -$8,841/251 P=0.03; YES side
-                    # untouched — trending tape FEEDS ETH YES +$13,130).
-                    # Column logs for ETH from 08-06 runner deploy; NaN rows
-                    # (pre-deploy) pass — the gate PHASES IN.
-                    _okE &= ~(_noE & (_q["hurst_exponent_5m"]
-                                      >= 0.6131).fillna(False))
-                    _gkE = _q[np.asarray(_okE, bool)].copy()
-                    _gcE = np.where(_gkE["side"] == "yes", _gkE["p_market"],
-                                    1 - _gkE["p_market"])
-                    _gwE = np.where(_gkE["side"] == "yes",
-                                    _gkE["resolved_yes"] == 1,
-                                    _gkE["resolved_yes"] == 0)
-                    _gfE = 0.07 * _gkE["p_market"] * (1 - _gkE["p_market"])
-                    _gfrE = np.where(
-                        _gkE["side"] == "yes",
-                        (_gkE[_col] - _gkE["p_market"] - _gfE)
-                        / (1 - _gkE["p_market"]),
-                        (_gkE["p_market"] - _gkE[_col] - _gfE)
-                        / _gkE["p_market"])
-                    _gsE = 2500.0 * np.clip(_gfrE, 0, 0.10)
-                    _gpE = pd.Series(
-                        np.where(_gwE, _gsE * (1 - _gcE) / _gcE, -_gsE)
-                        - (_gsE / _gcE) * _gfE, index=_gkE.index)
-                    if len(_gkE):
-                        _fig15.add_trace(go.Scatter(
-                            x=[_cfg15["start"]] + list(_gkE["dt"]),
-                            y=[0.0] + list(_gpE.cumsum()),
-                            name=f"{_lbl} gated+kelly",
-                            line=dict(color=_clr, width=1.5, dash="dash")))
-                    _gcumE = _gpE.cumsum()
-                    _gddE = (float((_gcumE.cummax() - _gcumE).max())
-                             if len(_gkE) else 0.0)
-                    _row15["g+k (6 gates)"] = (
-                        f"${_gpE.sum():+,.0f} (n={len(_gkE)}, "
-                        f"DD ${_gddE:,.0f})")
+                    # [2026-08-07] hurst NO-block runs as its OWN variant
+                    # (user call — the 5-gate book keeps its record; one
+                    # change at a time per the harness doctrine). Hurst
+                    # column logs for ETH from 08-07 02:05 deploy; NaN rows
+                    # (pre-deploy) pass — the +hurst book PHASES IN and is
+                    # identical to the 5-gate book until then. Evidence:
+                    # SOL's frozen 0.6131 on ETH reconstruction -$8,841/251
+                    # P=0.03; YES untouched (+$13,130 of winners in trend).
+                    _hu_okE = ~(_noE & (_q["hurst_exponent_5m"]
+                                        >= 0.6131).fillna(False))
+                    for _vnE, _mE, _dshE in [
+                            ("g+k (5 gates)", _okE, "dash"),
+                            ("g+k +hurst", _okE & _hu_okE, "dot")]:
+                        _gkE = _q[np.asarray(_mE, bool)].copy()
+                        _gcE = np.where(_gkE["side"] == "yes",
+                                        _gkE["p_market"],
+                                        1 - _gkE["p_market"])
+                        _gwE = np.where(_gkE["side"] == "yes",
+                                        _gkE["resolved_yes"] == 1,
+                                        _gkE["resolved_yes"] == 0)
+                        _gfE = 0.07 * _gkE["p_market"] * (1 - _gkE["p_market"])
+                        _gfrE = np.where(
+                            _gkE["side"] == "yes",
+                            (_gkE[_col] - _gkE["p_market"] - _gfE)
+                            / (1 - _gkE["p_market"]),
+                            (_gkE["p_market"] - _gkE[_col] - _gfE)
+                            / _gkE["p_market"])
+                        _gsE = 2500.0 * np.clip(_gfrE, 0, 0.10)
+                        _gpE = pd.Series(
+                            np.where(_gwE, _gsE * (1 - _gcE) / _gcE, -_gsE)
+                            - (_gsE / _gcE) * _gfE, index=_gkE.index)
+                        if len(_gkE):
+                            _fig15.add_trace(go.Scatter(
+                                x=[_cfg15["start"]] + list(_gkE["dt"]),
+                                y=[0.0] + list(_gpE.cumsum()),
+                                name=f"{_lbl} {_vnE}",
+                                line=dict(color=_clr, width=1.5,
+                                          dash=_dshE)))
+                        _gcumE = _gpE.cumsum()
+                        _gddE = (float((_gcumE.cummax() - _gcumE).max())
+                                 if len(_gkE) else 0.0)
+                        _row15[_vnE] = (
+                            f"${_gpE.sum():+,.0f} (n={len(_gkE)}, "
+                            f"DD ${_gddE:,.0f})")
                 _rows15.append(_row15)
             _fig15.update_layout(height=320, margin=dict(l=0, r=0, t=48, b=0),
                                  legend=dict(orientation="h", yanchor="bottom",

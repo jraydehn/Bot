@@ -1116,9 +1116,38 @@ with tab_sol_shadow:
                         ("gk vrM+zd65", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
                          "longdashdot", 1.0),
                         ("gk hurst", _v2_ok & _mkv_ok & _zd_ok & _off_ok & _hu_ok,
-                         "longdash", 1.0)]:
+                         "longdash", 1.0),
+                        ("gk combo+damp", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
+                         "dot", 1.0)]:
                     _vq = _q[_vmask].copy()
                     _vp, _vdd = _kbook(_vq, _col)
+                    # [2026-08-08] gk combo+damp: vrM+zd65 stack + the LIVE
+                    # drawdown-from-peak Kelly dampener (drawdown_risk.py,
+                    # frozen params 10d/z2/x0.5/min15d, causal). Long-window
+                    # validation: combo +$6,801->+$7,810, DD -$1,009, S
+                    # 0.27->0.34; NEVER triggers on gk hurst (DD too small);
+                    # realized-edge sibling NOT used — banked negative for
+                    # SOL. Needs 15d of window history => multiplier is 1.0
+                    # until ~08-14 on this tab: identical to vrM+zd65 till
+                    # then, diverges only on live forward data.
+                    if _vn == "gk combo+damp" and len(_vq):
+                        _dser = _vp.groupby(_vq["dt"].dt.floor("D")).sum()
+                        _dmul = {}
+                        _ds = _dser.sort_index()
+                        for _i, _D in enumerate(_ds.index):
+                            _h = _ds.iloc[:_i]
+                            if len(_h) < 15:
+                                _dmul[_D] = 1.0; continue
+                            _cum = _h.cumsum()
+                            _hwm = _cum.rolling(10, min_periods=1).max()
+                            _ddw = (_hwm - _cum).clip(lower=0)
+                            _sd = _ddw.expanding(min_periods=15).std().iloc[-1]
+                            if not _sd or pd.isna(_sd):
+                                _dmul[_D] = 1.0; continue
+                            _dmul[_D] = 0.5 if (_ddw.iloc[-1] / _sd) > 2.0 else 1.0
+                        _vp = _vp * _vq["dt"].dt.floor("D").map(_dmul).fillna(1.0)
+                        _cumv = _vp.cumsum()
+                        _vdd = float((_cumv.cummax() - _cumv).max())
                     if len(_vq) and _vn in _fams:
                         _figsh.add_trace(go.Scatter(
                             x=_vq["dt"], y=_vp.cumsum(), name=f"{_lbl} {_vn}",

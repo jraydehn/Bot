@@ -947,11 +947,12 @@ with tab_sol_shadow:
             "- **gk zd65+path** (long-dash-dot): zd65 + block NO when the "
             "live-logged pm-path signal opposes it (pm_path_drift × "
             "pm_path_vr3 > 0 — book momentum pushing up against the NO). "
-            "Uses the pm_path columns logging since 08-11 03:55, so it is "
-            "identical to zd65 before then and diverges only on live "
-            "forward fires. Backfill evidence: helps the SHADOW-model "
+            "History before 08-11 03:55 uses the candle-archive backfill "
+            "(sign rule, nothing fitted); from then on, live-logged "
+            "pm_path columns. Backfill evidence: helps the SHADOW-model "
             "books (−$445 A/B window), hurts production's (+$1,201) — "
-            "the per-book table is the referee.\n"
+            "the per-book table is the referee; 08-18 read scores "
+            "live-fired trades separately.\n"
             "- **gk vrM+zd65** (long-dash-dot): both modifications combined — "
             "the strongest replay (S 0.57/0.59/0.29, lowest DD) and the third "
             "candidate stack racing forward. Same 08-05+ scoring rule.\n"
@@ -971,6 +972,21 @@ with tab_sol_shadow:
                    "offset_pct", "z_drift_6h", "vol_ratio_1h",
                    "hurst_exponent_5m", "pm_path_drift", "pm_path_vr3"]:
             _shp[_c] = pd.to_numeric(_shp[_c], errors="coerce")
+        # [2026-08-11] pm-path features: live-logged columns (since 08-11
+        # 03:55) take precedence; earlier rows filled from the candle-archive
+        # backfill (results/sol15m_pmpath_backfill.csv — sign rule is unfitted
+        # so retro rendering is legitimate; the 08-18 read still scores
+        # live-fired trades separately from reconstructed ones).
+        try:
+            _bf = pd.read_csv(RESULTS_DIR / "sol15m_pmpath_backfill.csv")
+            _shp = _shp.merge(_bf, on=["logged_at", "contract_ticker"],
+                              how="left")
+            for _pc, _bc in [("pm_path_drift", "pm_path_drift_bf"),
+                             ("pm_path_vr3", "pm_path_vr3_bf")]:
+                _shp[_pc] = pd.to_numeric(_shp[_pc], errors="coerce").fillna(
+                    pd.to_numeric(_shp[_bc], errors="coerce"))
+        except Exception:
+            pass
         _sh = _shp[(_shp["dt"] >= _SH_START)
                    & _shp["resolved_yes"].notna()
                    & _shp["p_market"].between(0.03, 0.97)].copy()

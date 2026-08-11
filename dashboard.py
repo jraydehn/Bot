@@ -1279,6 +1279,22 @@ with tab_15m_shadow:
         _abp = pd.read_csv(ASSET_CSV_15M[_a15], low_memory=False)
         _abp["dt"] = pd.to_datetime(_abp["logged_at"], errors="coerce",
                                     utc=True, format="mixed")
+        # [2026-08-11] pm-path: live-logged cols take precedence; earlier
+        # rows filled from the candle-archive backfill (sign rule unfitted
+        # => retro render legitimate).
+        try:
+            _bfp = pd.read_csv(RESULTS_DIR
+                               / f"{_a15.lower()}15m_pmpath_backfill.csv")
+            _abp = _abp.merge(_bfp, on=["logged_at", "contract_ticker"],
+                              how="left")
+            for _pc, _bc in [("pm_path_drift", "pm_path_drift_bf"),
+                             ("pm_path_vr3", "pm_path_vr3_bf")]:
+                if _pc not in _abp.columns:
+                    _abp[_pc] = np.nan
+                _abp[_pc] = pd.to_numeric(_abp[_pc], errors="coerce").fillna(
+                    pd.to_numeric(_abp[_bc], errors="coerce"))
+        except Exception:
+            pass
         for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes",
                    "offset_pct", "body_15m", "dir_15m", "stoch_k_5m",
                    "stoch_k_15m", "stoch_k_1h", "chg_5m", "chg_15m", "chg_1h",
@@ -1466,9 +1482,23 @@ with tab_15m_shadow:
                     # P=0.03; YES untouched (+$13,130 of winners in trend).
                     _hu_okE = ~(_noE & (_q["hurst_exponent_5m"]
                                         >= 0.6131).fillna(False))
+                    # [2026-08-11] +path variant: 5 gates + block NO when
+                    # pm_path_drift x pm_path_vr3 > 0. Books-level: targets
+                    # -$6,433/65 on this book, 88% of weeks helpful — ETH's
+                    # stack does NOT absorb the signal (unlike SOL
+                    # production's). History = candle backfill; live cols
+                    # (logging from 08-11) take precedence.
+                    _pa_okE = np.where(
+                        _q["side"] == "no",
+                        ~((pd.to_numeric(_q.get("pm_path_drift"),
+                                         errors="coerce")
+                           * pd.to_numeric(_q.get("pm_path_vr3"),
+                                           errors="coerce")) > 0).fillna(False),
+                        True)
                     for _vnE, _mE, _dshE in [
                             ("g+k (5 gates)", _okE, "dash"),
-                            ("g+k +hurst", _okE & _hu_okE, "dot")]:
+                            ("g+k +hurst", _okE & _hu_okE, "dot"),
+                            ("g+k +path", _okE & _pa_okE, "longdashdot")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",
                                         _gkE["p_market"],

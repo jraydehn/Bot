@@ -977,14 +977,14 @@ with tab_sol_shadow:
             # are NEVER fitted (5-day window = noise); pre-registered candidate
             # for the 08-11 review only if it leads or matches with lower DD.
             _sh["p_blend"] = (_sh["p_model_15m"] + _sh["p_gbdt"]) / 2
-            _fams = st.multiselect(
-                "Lines on chart",
-                ["flat $100", "gated+kelly", "gk zd65",
-                 "gk vrM+zd65", "gk hurst", "gk combo+damp"],
-                default=["gated+kelly", "gk vrM+zd65", "gk hurst"],
-                key="solsh_fams")
+            # [2026-08-10] chart defaults = TOP-2 gated variants by combined
+            # net across the three books (user call — static default showed
+            # gated+kelly even when it lagged). Traces are collected first,
+            # ranked, then the selector renders with the dynamic default.
             _figsh = go.Figure()
             _rows = []
+            _traces = []
+            _famnet = {}
 
             def _kbook(_qq, _col):
                 """Kelly-sized book: pnl series + maxDD ($2500 flat, cap 10%)."""
@@ -1021,10 +1021,8 @@ with tab_sol_shadow:
                 _feeq = 0.07 * _q["p_market"] * (1 - _q["p_market"])
                 _pnl = pd.Series(np.where(_win, 100 * (1 - _cost) / _cost, -100)
                                  - (100 / _cost) * _feeq, index=_q.index)
-                if "flat $100" in _fams:
-                    _figsh.add_trace(go.Scatter(
-                        x=_q["dt"], y=_pnl.cumsum(), name=f"{_lbl} flat",
-                        line=dict(color=_clr, width=2)))
+                _traces.append(("flat $100", _q["dt"], _pnl.cumsum(),
+                                f"{_lbl} flat", dict(color=_clr, width=2)))
                 # [2026-07-31] gated+kelly variant: v2-package gates (YES needs
                 # persist>=3; NO blocked pm>0.8 and pm .5-.65 w/o stoch rescue)
                 # + fee-aware Kelly stake on flat $2500 bankroll, frac cap 10%.
@@ -1147,13 +1145,36 @@ with tab_sol_shadow:
                         _vp = _vp * _vq["dt"].dt.floor("D").map(_dmul).fillna(1.0)
                         _cumv = _vp.cumsum()
                         _vdd = float((_cumv.cummax() - _cumv).max())
-                    if len(_vq) and _vn in _fams:
-                        _figsh.add_trace(go.Scatter(
-                            x=_vq["dt"], y=_vp.cumsum(), name=f"{_lbl} {_vn}",
-                            line=dict(color=_clr, width=_vw, dash=_vdash)))
+                    if len(_vq):
+                        _traces.append((_vn, _vq["dt"], _vp.cumsum(),
+                                        f"{_lbl} {_vn}",
+                                        dict(color=_clr, width=_vw,
+                                             dash=_vdash)))
+                    _famnet[_vn] = _famnet.get(_vn, 0.0) + float(_vp.sum())
                     _r[_vn] = (f"${_vp.sum():+,.0f} (n={len(_vq)}, "
                                f"DD ${_vdd:,.0f})")
                 _rows.append(_r)
+            _rank = sorted(_famnet.items(), key=lambda kv: -kv[1])
+            _top2 = []
+            for _k, _v in _rank:
+                # while the dampener is inert, combo+damp duplicates
+                # vrM+zd65 exactly — don't default to the same line twice
+                if (_k == "gk combo+damp"
+                        and "gk vrM+zd65" in _top2
+                        and abs(_famnet.get("gk vrM+zd65", 0) - _v) < 1.0):
+                    continue
+                _top2.append(_k)
+                if len(_top2) == 2:
+                    break
+            _fams = st.multiselect(
+                "Lines on chart (default = top-2 by combined net)",
+                ["flat $100", "gated+kelly", "gk zd65",
+                 "gk vrM+zd65", "gk hurst", "gk combo+damp"],
+                default=_top2, key="solsh_fams")
+            for _fam, _x, _y, _nm, _ln in _traces:
+                if _fam in _fams:
+                    _figsh.add_trace(go.Scatter(x=_x, y=_y, name=_nm,
+                                                line=_ln))
             _figsh.update_layout(height=320, margin=dict(l=0, r=0, t=64, b=0),
                                  legend=dict(orientation="h", yanchor="bottom",
                                              y=1.02, xanchor="left", x=0))

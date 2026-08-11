@@ -878,6 +878,13 @@ CSV_COLUMNS = [
     # is blind to book momentum. Standalone chasing loses to the spread;
     # value = model feature at next retrain (btc15m_pm_momentum_value_test).
     "pm_chg_5m", "pm_chg_10m", "pm_n_obs",
+    # [2026-08-10] pm-PATH features from live 1-min Kalshi candles (SOL
+    # log-only rollout): drift over first ~15min + variance-ratio-3
+    # persistence. Screen (4,400 SOL candle contracts, 06-01..07-31):
+    # drift IC +0.038 (replicates live-capture finding exactly), drift*vr3
+    # +0.051 p=7e-4, halves +.051/+.052. Feature for the ~08-30 pm-momentum
+    # retrain; NOT a decision input.
+    "pm_path_drift", "pm_path_vr3", "pm_path_n",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -4748,6 +4755,47 @@ def _pm_chg5_peek(asset: str, ticker: str, pm: float):
     return float(pm) - prior[-1]
 
 
+_PM_PATH_AUTH = None
+
+
+def _pm_path_feats(asset: str, ticker: str) -> dict:
+    """[2026-08-10] Live pm-path features from Kalshi 1-min candlesticks.
+    SOL-only log-only rollout (screen validated on SOL candle paths; BTC
+    candles too stale, ETH pending). One API call per logged contract per
+    scan (~1-3 per 5-min loop). Fails to blanks on any error."""
+    out = {"pm_path_drift": "", "pm_path_vr3": "", "pm_path_n": ""}
+    if asset.upper() != "SOL" or _PM_PATH_AUTH is None:
+        return out
+    try:
+        from live_signal import kalshi_get
+        import time as _time
+        now = int(_time.time())
+        c = kalshi_get(f"/series/KXSOL15M/markets/{ticker}/candlesticks",
+                       {"start_ts": now - 960, "end_ts": now,
+                        "period_interval": 1}, _PM_PATH_AUTH)
+        mids = []
+        for cd in c.get("candlesticks", []):
+            b = (cd.get("yes_bid") or {}).get("close_dollars")
+            a = (cd.get("yes_ask") or {}).get("close_dollars")
+            pr = (cd.get("price") or {}).get("close_dollars")
+            if b is not None and a is not None:
+                mids.append((float(b) + float(a)) / 2)
+            elif pr is not None:
+                mids.append(float(pr))
+        out["pm_path_n"] = len(mids)
+        if len(mids) < 8:
+            return out
+        r = np.diff(np.array(mids))
+        out["pm_path_drift"] = round(float(mids[-1] - mids[0]), 4)
+        if r.var() > 0 and len(r) >= 5:
+            s3 = np.array([r[i] + r[i + 1] + r[i + 2]
+                           for i in range(len(r) - 2)])
+            out["pm_path_vr3"] = round(float(s3.var() / (3 * r.var())), 4)
+    except Exception:
+        pass
+    return out
+
+
 def _pm_traj_feats(asset: str, ticker: str, pm: float) -> dict:
     import json as _json
     import time as _time
@@ -4808,8 +4856,13 @@ def _build_row(
         _pmtraj = _pm_traj_feats(asset, ticker, float(p_market))
     except Exception:
         _pmtraj = {"pm_chg_5m": "", "pm_chg_10m": "", "pm_n_obs": ""}
+    try:
+        _pmpath = _pm_path_feats(asset, ticker)
+    except Exception:
+        _pmpath = {"pm_path_drift": "", "pm_path_vr3": "", "pm_path_n": ""}
     return {
         **_pmtraj,
+        **_pmpath,
         "logged_at":            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00:00"),
         "decision_time":        decision_time,
         "asset":                asset.upper(),
@@ -5078,6 +5131,8 @@ def main() -> None:
         print(f"  Loop mode: ON (every {LOOP_INTERVAL_SEC // 60} min)")
 
     auth = load_auth()
+    global _PM_PATH_AUTH
+    _PM_PATH_AUTH = auth
     if auth is None:
         print("\n  WARNING: No Kalshi credentials. Resolution check and contract scan require auth.")
     else:

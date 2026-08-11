@@ -211,7 +211,9 @@ def fill_outcomes(auth=None) -> int:
 
     updated = 0
     for row in pending:
-        ticker = row.get("contract_ticker", "").strip()
+        # [2026-08-11] a truncated CSV row gives DictReader None values —
+        # this line crashed BOTH hourly production runners on 08-08 13:16
+        ticker = (row.get("contract_ticker") or "").strip()
         if not ticker:
             continue
         try:

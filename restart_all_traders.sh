@@ -61,11 +61,14 @@ echo "=== Starting 15m watchdog (BTC PAPER / ETH paper / SOL live) ==="
 # SOL 15m live restarted 2026-07-06 (user decision): $2,500 bankroll, $150 stop
 # (was stopped 2026-07-05 for degrading performance — no signal-side changes
 # since then, see project_sol_live_stop_20260705.md).
+# [2026-08-11] --sol-live REMOVED: SOL 15m real-money was PAUSED 2026-07-26
+# (project_sol15m_live_paused_20260726 — paper-only twin). This stale flag
+# silently re-enabled live trading during the 08-11 fleet restart; caught
+# within ~15 min, no orders placed. Re-add ONLY on an explicit user go-live.
 nohup python3 run_all_15m.py \
     --btc-bankroll 2500 \
     --eth-bankroll 2500 \
     --sol-bankroll 2500 \
-    --sol-live --sol-loss-limit 150 \
     >> logs/run_all_15m.log 2>&1 &
 echo "  PID=$!"
 

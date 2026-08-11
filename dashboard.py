@@ -984,7 +984,7 @@ with tab_sol_shadow:
             _figsh = go.Figure()
             _rows = []
             _traces = []
-            _famnet = {}
+            _famdaily = {}
 
             def _kbook(_qq, _col):
                 """Kelly-sized book: pnl series + maxDD ($2500 flat, cap 10%)."""
@@ -1150,24 +1150,37 @@ with tab_sol_shadow:
                                         f"{_lbl} {_vn}",
                                         dict(color=_clr, width=_vw,
                                              dash=_vdash)))
-                    _famnet[_vn] = _famnet.get(_vn, 0.0) + float(_vp.sum())
+                    _famdaily.setdefault(_vn, []).append(
+                        _vp.groupby(_vq["dt"].dt.floor("D")).sum())
                     _r[_vn] = (f"${_vp.sum():+,.0f} (n={len(_vq)}, "
                                f"DD ${_vdd:,.0f})")
                 _rows.append(_r)
-            _rank = sorted(_famnet.items(), key=lambda kv: -kv[1])
+            # [2026-08-10] rank by the PRE-REGISTERED promotion metric:
+            # pooled daily Sharpe (bucketed to 0.1 — differences inside
+            # ~1/sqrt(n_days) are noise) with maxDD as tiebreak. User call:
+            # a 0.03 Sharpe gap must not outrank a 2.5x drawdown gap.
+            _famstats = {}
+            for _k, _ds in _famdaily.items():
+                _D = pd.concat(_ds, axis=1).fillna(0).sum(axis=1)
+                _nz = _D[_D != 0]
+                _S = (_nz.mean() / _nz.std()
+                      if len(_nz) > 2 and _nz.std() > 0 else float("-inf"))
+                _cumD = _D.cumsum()
+                _mdd = float((_cumD.cummax() - _cumD).max())
+                _famstats[_k] = (round(_S, 1), _mdd, float(_D.sum()))
+            _rank = sorted(_famstats.items(),
+                           key=lambda kv: (-kv[1][0], kv[1][1]))
             _top2 = []
             for _k, _v in _rank:
-                # while the dampener is inert, combo+damp duplicates
-                # vrM+zd65 exactly — don't default to the same line twice
-                if (_k == "gk combo+damp"
-                        and "gk vrM+zd65" in _top2
-                        and abs(_famnet.get("gk vrM+zd65", 0) - _v) < 1.0):
+                if (_k == "gk combo+damp" and "gk vrM+zd65" in _top2
+                        and abs(_famstats.get("gk vrM+zd65",
+                                              (0, 0, 0))[2] - _v[2]) < 1.0):
                     continue
                 _top2.append(_k)
                 if len(_top2) == 2:
                     break
             _fams = st.multiselect(
-                "Lines on chart (default = top-2 by combined net)",
+                "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
                 ["flat $100", "gated+kelly", "gk zd65",
                  "gk vrM+zd65", "gk hurst", "gk combo+damp"],
                 default=_top2, key="solsh_fams")

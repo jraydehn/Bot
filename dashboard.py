@@ -944,6 +944,14 @@ with tab_sol_shadow:
             "identical to vrM+zd65 until then; divergence is pure forward "
             "evidence of the layer. (gk vrM+hurst retired 08-08: worst "
             "performance and DD of the field.)\n"
+            "- **gk zd65+path** (long-dash-dot): zd65 + block NO when the "
+            "live-logged pm-path signal opposes it (pm_path_drift × "
+            "pm_path_vr3 > 0 — book momentum pushing up against the NO). "
+            "Uses the pm_path columns logging since 08-11 03:55, so it is "
+            "identical to zd65 before then and diverges only on live "
+            "forward fires. Backfill evidence: helps the SHADOW-model "
+            "books (−$445 A/B window), hurts production's (+$1,201) — "
+            "the per-book table is the referee.\n"
             "- **gk vrM+zd65** (long-dash-dot): both modifications combined — "
             "the strongest replay (S 0.57/0.59/0.29, lowest DD) and the third "
             "candidate stack racing forward. Same 08-05+ scoring rule.\n"
@@ -961,7 +969,7 @@ with tab_sol_shadow:
                    "sol_persist_score", "slope120_stoch_k_15m",
                    "stoch_cross_1h", "stoch_k_1h", "oi_chg_pct",
                    "offset_pct", "z_drift_6h", "vol_ratio_1h",
-                   "hurst_exponent_5m"]:
+                   "hurst_exponent_5m", "pm_path_drift", "pm_path_vr3"]:
             _shp[_c] = pd.to_numeric(_shp[_c], errors="coerce")
         _sh = _shp[(_shp["dt"] >= _SH_START)
                    & _shp["resolved_yes"].notna()
@@ -1115,7 +1123,12 @@ with tab_sol_shadow:
                         ("gk hurst", _v2_ok & _mkv_ok & _zd_ok & _off_ok & _hu_ok,
                          "longdash", 1.0),
                         ("gk combo+damp", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
-                         "dot", 1.0)]:
+                         "dot", 1.0),
+                        ("gk zd65+path", _v2_ok & _mkv_ok & _zd_ok65 & _off_ok
+                         & np.where(_q["side"] == "no",
+                                    ~((_q["pm_path_drift"]
+                                       * _q["pm_path_vr3"]) > 0).fillna(False),
+                                    True), "longdashdot", 1.0)]:
                     _vq = _q[_vmask].copy()
                     _vp, _vdd = _kbook(_vq, _col)
                     # [2026-08-08] gk combo+damp: vrM+zd65 stack + the LIVE
@@ -1182,7 +1195,7 @@ with tab_sol_shadow:
             _fams = st.multiselect(
                 "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
                 ["flat $100", "gated+kelly", "gk zd65",
-                 "gk vrM+zd65", "gk hurst", "gk combo+damp"],
+                 "gk vrM+zd65", "gk hurst", "gk combo+damp", "gk zd65+path"],
                 default=_top2, key="solsh_fams")
             for _fam, _x, _y, _nm, _ln in _traces:
                 if _fam in _fams:

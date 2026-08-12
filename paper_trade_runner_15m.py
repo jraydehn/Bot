@@ -3210,7 +3210,12 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # cpu combination becomes reachable again. See
         # reform_results/eth15m_deepgate_20260718/s1_all_gates.py.
         # Backup: paper_trade_runner_15m_pre_eth_deepgate_20260718.py
-        if asset.upper() == "ETH" and best_side == "yes":
+        # [2026-08-12 PROMOTION — GATE DISABLED] eth_15m_yes_lowvol_gate
+        # INVERTED on current data (08-06 audit: blocks +$7,562 of WINNERS
+        # long-window, +$6,892 post-model-swap, +$4,018 in the shadow's
+        # first hours; its rescue already inverted 07-18). Paper book now
+        # runs the 5 validated survivor gates. Re-enable = restore `if`.
+        if False and asset.upper() == "ETH" and best_side == "yes":
             _vr_eth = float(sig.get("vol_ratio", 1.0) or 1.0)
             if _vr_eth < 0.80 and p_market < 0.65:
                 print(f"    [eth_15m_yes_lowvol_gate] BLOCK YES→NO {ticker} — "
@@ -3675,7 +3680,9 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # Causal: stoch>80 + no fresh crossover = overbought grind without breakout signal →
         # price may drift into strike. cross=1 = K>D just fired = active momentum → NO still wins.
         # Scan archive confirms: 39 blocked at 5.1% WR. Consistent Wk21-22.
-        if asset.upper() == "ETH" and best_side == "no":
+        # [2026-08-12 PROMOTION — GATE DISABLED] eth_15m_no_stoch1h_gate
+        # inverted (08-06 audit: +$2,890 of blocked winners long-window).
+        if False and asset.upper() == "ETH" and best_side == "no":
             _sk1h_no = float(sig.get("stoch_k_1h", 0.0) or 0.0)
             _sc1h_no = sig.get("stoch_cross_1h")
             if _sk1h_no > 80.0 and _sc1h_no is not None:
@@ -3696,7 +3703,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         #   sk1h<20 + non-Bear: flat_pnl=-$0.112/trade, would_pnl=-$515 Kelly-sized.
         # Causal: 1h stoch<20 = ETH oversold → bounce imminent → YES wins → NO fails.
         # Bear rescue: in BTC Bear regime, oversold = continued downtrend → NO still works.
-        if asset.upper() == "ETH" and best_side == "no":
+        # [2026-08-12 PROMOTION — GATE DISABLED] eth_no_stoch_oversold_gate
+        # (Gate C) decayed since its May MCPT (08-06 audit: +$2,051 of
+        # blocked winners).
+        if False and asset.upper() == "ETH" and best_side == "no":
             _sk1h_gc = float(sig.get("stoch_k_1h", 50.0) or 50.0)
             if _sk1h_gc < 20.0 and _markov_1h != "Bear":
                 print(f"    [eth_no_stoch_oversold_gate] BLOCK NO→YES {ticker} — "
@@ -3714,7 +3724,10 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # Rescue: pm < 0.50 AND stoch_k_5m >= 40 → market not pricing a bounce AND 5m
         #   momentum not coiling for snap-back; these 28 cases still WR=67.9%.
         # Backup: paper_trade_runner_15m_pre_eth_kc_gate_20260625.py
-        if asset.upper() == "ETH" and best_side == "no":
+        # [2026-08-12 PROMOTION — GATE DISABLED] eth_15m_no_kc_gate mixed/
+        # inverted at n=7 (08-06 audit). Long-history +4.68pp base finding
+        # stands; the GATE construction doesn't survive current books.
+        if False and asset.upper() == "ETH" and best_side == "no":
             _kc_no = sig.get("kc_pct_1h")
             if _kc_no is not None and not (isinstance(_kc_no, float) and _kc_no != _kc_no):
                 _kc_no_f = float(_kc_no)

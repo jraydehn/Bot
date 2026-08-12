@@ -2397,7 +2397,13 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # Always compute all asset regimes — cached per hour so overhead is minimal after first call.
     try:
         _markov_1h = _get_btc_markov_regime_1h()
-        if asset == "BTC":
+        # [2026-08-11] 15m-scale regime extended to ETH (was BTC-only) —
+        # same construction on the asset's OWN bars (20-bar return on
+        # completed 15m closes, ±0.4%). Log-only for ETH: reconstruction
+        # test showed the BTC gates needing it are no-ops on ETH's gated
+        # books (existing stack absorbs them); column banked for the
+        # retrain era / future native ETH gates.
+        if asset in ("BTC", "ETH"):
             _df15m_reg = live_1m.resample("15min").agg({"close": "last"}).dropna().iloc[:-1]
             _rr15m_s = _df15m_reg["close"].pct_change(20)
             if pd.notna(_rr15m_s.iloc[-1]):

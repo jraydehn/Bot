@@ -1599,26 +1599,26 @@ with tab_15m_shadow:
                     _oppd = {tt for tt in _bothd
                              if _Ad.loc[tt, "side"] != _Bd.loc[tt, "side"]}
                     _rows_d = []
+                    # [2026-08-13 corrected per user] FULL INDEPENDENCE:
+                    # both books take every bet — no de-overlap, no
+                    # arbitration; overlaps/conflicts all stand. DUAL =
+                    # literal sum of the two PnL streams.
                     for tt, rr in _Ad.iterrows():
-                        if tt in _oppd:
-                            continue
                         _rows_d.append((rr["dt"], rr["pnl"]))
                     for tt, rr in _Bd.iterrows():
-                        if tt in _bothd:
-                            continue
                         _rows_d.append((rr["dt"], rr["pnl"]))
                     _Pd = pd.DataFrame(_rows_d, columns=["dt", "pnl"])                         .sort_values("dt")
                     if len(_Pd):
                         _fig15.add_trace(go.Scatter(
                             x=[_cfg15["start"]] + list(_Pd["dt"]),
                             y=[0.0] + list(_Pd["pnl"].cumsum()),
-                            name="DUAL g+k⊕mktfav",
+                            name="DUAL independent",
                             line=dict(color="#00c076", width=2,
                                       dash="dash")))
                         _cumd = _Pd["pnl"].cumsum()
                         _ddd = float((_cumd.cummax() - _cumd).max())
                         _rows15.append({
-                            "book": "DUAL (de-overlap)",
+                            "book": "DUAL (independent)",
                             "net": f"${_Pd['pnl'].sum():+,.0f}",
                             "n": len(_Pd),
                             "WR/BE": "—",

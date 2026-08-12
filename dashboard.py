@@ -1144,8 +1144,26 @@ with tab_sol_shadow:
                          & np.where(_q["side"] == "no",
                                     ~((_q["pm_path_drift"]
                                        * _q["pm_path_vr3"]) > 0).fillna(False),
-                                    True), "longdashdot", 1.0)]:
+                                    True), "longdashdot", 1.0),
+                        ("gk zd65+path 1/h", _v2_ok & _mkv_ok & _zd_ok65
+                         & _off_ok
+                         & np.where(_q["side"] == "no",
+                                    ~((_q["pm_path_drift"]
+                                       * _q["pm_path_vr3"]) > 0).fillna(False),
+                                    True), "dash", 0.8)]:
                     _vq = _q[_vmask].copy()
+                    # [2026-08-11] 1/h refinement: max one trade per
+                    # underlying hour (same-hour 15m contracts share the
+                    # price path — correlated exposure, the 08-08/08-11
+                    # cluster-loss mode). Parameter-free; improves net, DD
+                    # and Sharpe on the 12-day record (n small, forward
+                    # race decides).
+                    if _vn == "gk zd65+path 1/h" and len(_vq):
+                        _vq = _vq.sort_values("dt").drop_duplicates(
+                            _vq["dt"].dt.floor("h").rename("eh"),
+                            keep="first") if False else _vq.assign(
+                            _eh=_vq["dt"].dt.floor("h")).drop_duplicates(
+                            "_eh", keep="first").drop(columns="_eh")
                     _vp, _vdd = _kbook(_vq, _col)
                     # [2026-08-08] gk combo+damp: vrM+zd65 stack + the LIVE
                     # drawdown-from-peak Kelly dampener (drawdown_risk.py,
@@ -1211,7 +1229,8 @@ with tab_sol_shadow:
             _fams = st.multiselect(
                 "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
                 ["flat $100", "gated+kelly", "gk zd65",
-                 "gk vrM+zd65", "gk hurst", "gk combo+damp", "gk zd65+path"],
+                 "gk vrM+zd65", "gk hurst", "gk combo+damp", "gk zd65+path",
+                 "gk zd65+path 1/h"],
                 default=_top2, key="solsh_fams")
             for _fam, _x, _y, _nm, _ln in _traces:
                 if _fam in _fams:

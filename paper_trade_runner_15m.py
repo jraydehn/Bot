@@ -4759,18 +4759,24 @@ _PM_PATH_AUTH = None
 
 
 def _pm_path_feats(asset: str, ticker: str) -> dict:
-    """[2026-08-10] Live pm-path features from Kalshi 1-min candlesticks.
-    SOL-only log-only rollout (screen validated on SOL candle paths; BTC
-    candles too stale, ETH pending). One API call per logged contract per
+    """[2026-08-10, all-asset 08-11] Live pm-path features from Kalshi
+    1-min candlesticks. Log-only. One API call per logged contract per
     scan (~1-3 per 5-min loop). Fails to blanks on any error."""
     out = {"pm_path_drift": "", "pm_path_vr3": "", "pm_path_n": ""}
-    if asset.upper() != "SOL" or _PM_PATH_AUTH is None:
+    # [2026-08-11] extended to ALL three assets: contract-level screens on
+    # the candle archives validate everywhere (drift x vr3 partial IC:
+    # BTC +0.075 p=3e-7, ETH +0.055 p=6e-5, SOL +0.051 p=7e-4; halves
+    # consistent). Earlier "BTC candles stale" verdict corrected — that
+    # null was the scan-timestamp join, not the late-window paths.
+    _series = {"BTC": "KXBTC15M", "ETH": "KXETH15M",
+               "SOL": "KXSOL15M"}.get(asset.upper())
+    if _series is None or _PM_PATH_AUTH is None:
         return out
     try:
         from live_signal import kalshi_get
         import time as _time
         now = int(_time.time())
-        c = kalshi_get(f"/series/KXSOL15M/markets/{ticker}/candlesticks",
+        c = kalshi_get(f"/series/{_series}/markets/{ticker}/candlesticks",
                        {"start_ts": now - 960, "end_ts": now,
                         "period_interval": 1}, _PM_PATH_AUTH)
         mids = []

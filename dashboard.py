@@ -956,12 +956,12 @@ with tab_sol_shadow:
             "- **gk vrM+zd65** (long-dash-dot): both modifications combined — "
             "the strongest replay (S 0.57/0.59/0.29, lowest DD) and the third "
             "candidate stack racing forward. Same 08-05+ scoring rule.\n"
-            "- **gk hurst** (long-dash): base stack + NO blocked when "
-            "hurst_exponent_5m ≥ 0.61 (trending tape kills mean-reversion "
-            "NO). Survived the full-column sweep AND the ex-drawdown test "
-            "(all 4 pre-drawdown weeks helped; long-window S 0.14→0.48, DD "
-            "halved). Races AS A COMPETING stack — it is redundant stacked "
-            "on vrM+zd65. Scored on trades after 08-05 15:20 UTC only.")
+            "- *(gk hurst retired 08-11: its differentiating signal's "
+            "weekly effect on SOL proved noise — 5 sign flips in 11 weeks, "
+            "mean ≈ 0 — and its forward record was last of field. hurst "
+            "lives on in the ETH gate, the SOL persist score, and the "
+            "pm-path lineage. Revival only via a slow sign-conditioner at "
+            "the ~08-25 regime lens.)*")
     _SH_START = pd.Timestamp("2026-07-30 01:00", tz="UTC")
     try:
         _shp = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False)
@@ -1136,8 +1136,6 @@ with tab_sol_shadow:
 
                         ("gk vrM+zd65", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
                          "longdashdot", 1.0),
-                        ("gk hurst", _v2_ok & _mkv_ok & _zd_ok & _off_ok & _hu_ok,
-                         "longdash", 1.0),
                         ("gk combo+damp", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
                          "dot", 1.0),
                         ("gk zd65+path", _v2_ok & _mkv_ok & _zd_ok65 & _off_ok
@@ -1229,7 +1227,7 @@ with tab_sol_shadow:
             _fams = st.multiselect(
                 "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
                 ["flat $100", "gated+kelly", "gk zd65",
-                 "gk vrM+zd65", "gk hurst", "gk combo+damp", "gk zd65+path",
+                 "gk vrM+zd65", "gk combo+damp", "gk zd65+path",
                  "gk zd65+path 1/h"],
                 default=_top2, key="solsh_fams")
             for _fam, _x, _y, _nm, _ln in _traces:

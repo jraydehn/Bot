@@ -1148,7 +1148,32 @@ with tab_sol_shadow:
                          & np.where(_q["side"] == "no",
                                     ~((_q["pm_path_drift"]
                                        * _q["pm_path_vr3"]) > 0).fillna(False),
-                                    True), "dash", 0.8)]:
+                                    True), "dash", 0.8),
+                        # [2026-08-11] +SW: two BTC gates ported FROZEN that
+                        # survived BOTH the population screen (67% weeks) and
+                        # the leader-book marginal: block NO in 1h-Sideways
+                        # when pm>=0.70 & stoch_1h>=70, and in double-
+                        # Sideways when pm>=0.55. N_obmom REJECTED despite
+                        # 100%-week population help — removes +$1,109 of
+                        # leader winners (post-selection inversion, third
+                        # instance).
+                        ("gk zd65+path+SW", _v2_ok & _mkv_ok & _zd_ok65
+                         & _off_ok
+                         & np.where(_q["side"] == "no",
+                                    ~((_q["pm_path_drift"]
+                                       * _q["pm_path_vr3"]) > 0).fillna(False),
+                                    True)
+                         & ~((_q["side"] == "no")
+                             & (_q["markov_sol_1h"].astype(str) == "Sideways")
+                             & (_q["p_market"] >= 0.70)
+                             & (pd.to_numeric(_q["stoch_k_1h"],
+                                              errors="coerce").fillna(50)
+                                >= 70))
+                         & ~((_q["side"] == "no")
+                             & (_q["markov_sol_1h"].astype(str) == "Sideways")
+                             & (_q["markov_sol_4h"].astype(str) == "Sideways")
+                             & (_q["p_market"] >= 0.55)),
+                         "dot", 0.8)]:
                     _vq = _q[_vmask].copy()
                     # [2026-08-11] 1/h refinement: max one trade per
                     # underlying hour (same-hour 15m contracts share the
@@ -1228,7 +1253,7 @@ with tab_sol_shadow:
                 "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
                 ["flat $100", "gated+kelly", "gk zd65",
                  "gk vrM+zd65", "gk combo+damp", "gk zd65+path",
-                 "gk zd65+path 1/h"],
+                 "gk zd65+path 1/h", "gk zd65+path+SW"],
                 default=_top2, key="solsh_fams")
             for _fam, _x, _y, _nm, _ln in _traces:
                 if _fam in _fams:

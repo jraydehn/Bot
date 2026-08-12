@@ -44,7 +44,11 @@ ASSET_DISPLAY_FROM_15M = {
                                     # BTC 15m PAPER book display. Prior: 2026-07-28 06:53:02
                                     # (fee-audit gate package live: no_midhigh/no_deep/
                                     # yes_thrust gates + fee-aware Kelly).
-    "ETH": "2026-07-29 18:25:54",  # cleared 2026-07-29 per user request — slope-feature
+    "ETH": "2026-08-12 19:05:00",  # cleared 2026-08-12 per user request — fresh run of
+                                    # the PROMOTED paper book (exact-replica decision path
+                                    # live 19:05 UTC: production model + 5 survivor gates,
+                                    # c4cd6a7). First trade shown: 19:23 UTC YES @0.395.
+                                    # Prior: 2026-07-29 18:25:54 (slope-feature
                                     # model live (replaced inverted blend chain, commit
                                     # 163276d). Prior: 2026-07-28 06:53:02 (fee-audit gate
                                     # package live (3 band blocks + yes_dipvol + no_slope

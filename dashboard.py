@@ -1421,6 +1421,9 @@ with tab_15m_shadow:
                 # convention is block, disclosed). ETH: no gated variant
                 # yet — its challenger is hours old; gates get the same
                 # marginal treatment once a record exists.
+                if _a15 == "BTC" and _lbl == "mkt-fav k1.8":
+                    _mfav_book = _q[["contract_ticker", "dt", "side"]].copy()
+                    _mfav_book["pnl"] = _pnl.values
                 if _a15 == "BTC" and _lbl != "mkt-fav k1.8":
                     _yes15 = _q["side"] == "yes"
                     _no15 = ~_yes15
@@ -1490,6 +1493,10 @@ with tab_15m_shadow:
                     _row15["g+k (12 gates)"] = (
                         f"${_gp15.sum():+,.0f} (n={len(_gk15)}, "
                         f"DD ${_gdd15:,.0f})")
+                    if _lbl == "production":
+                        _prod_gk = _gk15[["contract_ticker", "dt",
+                                          "side"]].copy()
+                        _prod_gk["pnl"] = _gp15.values
                 # [2026-08-05] ETH gated+kelly: the 5 live gates that SURVIVED
                 # marginal testing (Y_stoch5m44, Y_stoch1h_mid[rsi<35 rescue],
                 # N_daily_sw, N_consec, N_downcandle). REJECTED as inverted on
@@ -1576,6 +1583,48 @@ with tab_15m_shadow:
                             f"${_gpE.sum():+,.0f} (n={len(_gkE)}, "
                             f"DD ${_gddE:,.0f})")
                 _rows15.append(_row15)
+            # [2026-08-12] DUAL paper book (user architecture idea, first
+            # combination to beat both parents): union of production g+k
+            # (12 gates, kelly) and mkt-fav (flat) with de-overlap — same
+            # contract opposite sides -> skip both (fee-burning
+            # cancellation); same side -> model book's position only.
+            # 7-day record: +$7,070 S 0.83 vs parents 0.56/0.62; corr of
+            # parents' dailies ~0. LIVE preconditions unchanged (tracker).
+            if _a15 == "BTC":
+                try:
+                    _Ad = _prod_gk.set_index("contract_ticker")
+                    _Bd = _mfav_book.set_index("contract_ticker")
+                    _bothd = set(_Ad.index) & set(_Bd.index)
+                    _oppd = {tt for tt in _bothd
+                             if _Ad.loc[tt, "side"] != _Bd.loc[tt, "side"]}
+                    _rows_d = []
+                    for tt, rr in _Ad.iterrows():
+                        if tt in _oppd:
+                            continue
+                        _rows_d.append((rr["dt"], rr["pnl"]))
+                    for tt, rr in _Bd.iterrows():
+                        if tt in _bothd:
+                            continue
+                        _rows_d.append((rr["dt"], rr["pnl"]))
+                    _Pd = pd.DataFrame(_rows_d, columns=["dt", "pnl"])                         .sort_values("dt")
+                    if len(_Pd):
+                        _fig15.add_trace(go.Scatter(
+                            x=[_cfg15["start"]] + list(_Pd["dt"]),
+                            y=[0.0] + list(_Pd["pnl"].cumsum()),
+                            name="DUAL g+k⊕mktfav",
+                            line=dict(color="#00c076", width=2,
+                                      dash="dash")))
+                        _cumd = _Pd["pnl"].cumsum()
+                        _ddd = float((_cumd.cummax() - _cumd).max())
+                        _rows15.append({
+                            "book": "DUAL (de-overlap)",
+                            "net": f"${_Pd['pnl'].sum():+,.0f}",
+                            "n": len(_Pd),
+                            "WR/BE": "—",
+                            "maxDD": f"${_ddd:,.0f}",
+                        })
+                except Exception:
+                    pass
             _fig15.update_layout(height=320, margin=dict(l=0, r=0, t=48, b=0),
                                  legend=dict(orientation="h", yanchor="bottom",
                                              y=1.02, xanchor="left", x=0))

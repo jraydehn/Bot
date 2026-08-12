@@ -3137,6 +3137,65 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             print(f"  [skip] expiry {close_time} already bet this session.")
             continue
 
+        # [2026-08-12 EXACT-REPLICA PROMOTION] SOL & ETH paper decisions =
+        # the shadow-book logic verbatim (_replica_decide): raw model value,
+        # symmetric fee-adjusted edge >= 0.04, EVERY qualifying contract,
+        # plain Kelly $2500/10% cap. Bypasses the entire legacy path below
+        # (drift shifts, single-best-per-cycle, gate chain, sizing
+        # overlays). BTC continues on the legacy path unchanged.
+        if asset.upper() in ("SOL", "ETH"):
+            _akey = asset.upper()
+            if _akey not in _REPLICA_SEEDED:
+                _REPLICA_SEEDED.add(_akey)
+                try:
+                    import csv as _csvm
+                    with open(_csv_path(asset)) as _fh:
+                        for _r in list(_csvm.DictReader(_fh))[-300:]:
+                            if _r.get("decision") == "trade":
+                                _REPLICA_TRADED.add(_r.get("contract_ticker"))
+                except Exception:
+                    pass
+            _rep = None
+            if ticker not in _REPLICA_TRADED:
+                _rep = _replica_decide(asset, p_model_no, p_market, sig,
+                                       offset_pct, ticker)
+            if _rep is None:
+                row = _build_row(
+                    asset=asset, decision_time=decision_time, ticker=ticker,
+                    close_time=close_time, spot=spot, floor_s=floor_s,
+                    offset_pct=offset_pct, tau_min=tau_min,
+                    p_market=p_market, p_model=p_model_no, raw_edge=0.0,
+                    side="", decision="pass", sig=sig, kelly_fraction=0.0,
+                    bet_fraction=0.0, bet_amount=0.0, bankroll=bankroll,
+                    liq_signal=_liq_signal, cg=_cg,
+                    spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
+                    is_live=is_live, fee_est="")
+                append_row(row, asset=asset)
+                continue
+            _rside, _redge, _rstake = _rep
+            _rcost = p_market if _rside == "yes" else 1 - p_market
+            _rfee = round((_rstake / max(_rcost, 0.01)) * 0.07
+                          * p_market * (1 - p_market), 2)
+            print(f"    [replica] TRADE {_rside} {ticker} pm={p_market:.3f} "
+                  f"p={p_model_no:.3f} edge={_redge:.3f} stake=${_rstake:.0f}")
+            row = _build_row(
+                asset=asset, decision_time=decision_time, ticker=ticker,
+                close_time=close_time, spot=spot, floor_s=floor_s,
+                offset_pct=offset_pct, tau_min=tau_min, p_market=p_market,
+                p_model=p_model_no, raw_edge=_redge, side=_rside,
+                decision="trade", sig=sig,
+                kelly_fraction=round(_redge / max(1 - p_market if _rside == "yes" else p_market, 0.01), 4),
+                bet_fraction=round(_rstake / 2500.0, 4),
+                bet_amount=_rstake, bankroll=bankroll,
+                liq_signal=_liq_signal, cg=_cg,
+                spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
+                is_live=is_live, fee_est=_rfee)
+            append_row(row, asset=asset)
+            _REPLICA_TRADED.add(ticker)
+            if already_bet is not None:
+                already_bet.add(close_time)
+            continue
+
         edge_yes = p_model_yes - p_market
         # BTC: non-coherent — edge_no = p_no − (1−pm). Independent of edge_yes.
         # ETH/SOL: legacy formula (p_model_no = P(YES), so pm - P(YES) = real edge).
@@ -4792,6 +4851,121 @@ def _v3_agree_val(p_v3, side) -> "int | str":
 # results/.pm_history_15m_{ASSET}.json so restarts keep trajectory context.
 _PM_HIST: dict = {}
 _PM_HIST_LOADED: set = set()
+
+
+_REPLICA_TRADED: set = set()
+_REPLICA_SEEDED: set = set()
+
+
+def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
+    """[2026-08-12 EXACT-REPLICA PROMOTION] Shadow-book decision logic,
+    verbatim: symmetric fee-adjusted edge >= 0.04 on the raw model value,
+    EVERY qualifying contract (one bet per contract, first qualifying
+    scan), plain Kelly $2500 cap 10%. Gates: SOL = v2+markov+zd65+offset/
+    flip+path+SW; ETH = the 5 audit survivors. No drift shifts, no
+    overlays, no single-best-per-cycle. Stop-losses return at go-live
+    (user decision). Returns (side, edge, stake) or None."""
+    a = asset.upper()
+    try:
+        p = float(p_model); pm = float(p_market)
+    except (TypeError, ValueError):
+        return None
+    if not (0.03 <= pm <= 0.97) or not (0.0 < p < 1.0):
+        return None
+    fee = 0.07 * pm * (1 - pm)
+    ey, en = p - pm - fee, pm - p - fee
+    side, edge = ("yes", ey) if ey >= en else ("no", en)
+    if edge < 0.04:
+        return None
+    def _fv(k, d=None):
+        try:
+            v = float(sig.get(k))
+            return v if v == v else d
+        except (TypeError, ValueError):
+            return d
+    sk1 = _fv("stoch_k_1h", 50.0)
+    if a == "SOL":
+        m6 = str(sig.get("markov_sol_6h") or "")
+        m4 = str(sig.get("markov_sol_4h") or "")
+        m1 = str(sig.get("markov_sol_1h") or "")
+        sc1 = _fv("stoch_cross_1h", 0.0) or 0.0
+        oi = _fv("oi_chg_pct", 0.0) or 0.0
+        zd = _fv("z_drift_6h")
+        off = float(offset_pct)
+        if side == "yes":
+            persist = _fv("sol_persist_score")
+            if not (persist is not None and persist >= 3):
+                return None
+            gy = ((m6 == "Bull" and sc1 != 0) or m4 == "Sideways"
+                  or (m1 == "Sideways" and oi < 0.0535))
+            ry = ((m6 == "Bull" and sc1 == 0)
+                  or (m1 == "Sideways" and oi >= 0.0535))
+            if gy and not ry:
+                return None
+            flip = (m1 == "Sideways" and oi >= 0.0535
+                    and zd is not None and zd < 0.55)
+            if -10.0 <= off < 0.0 and not flip:
+                return None
+        else:
+            slope_sk = _fv("slope120_stoch_k_15m")
+            if pm > 0.8:
+                return None
+            if 0.5 <= pm <= 0.65 and not (slope_sk is not None
+                                          and slope_sk >= 40):
+                return None
+            gn = ((m6 == "Bull" and off > -0.006)
+                  or (m4 == "Sideways" and (sk1 or 50.0) < 90.0))
+            rn = ((m6 == "Bull" and off <= -0.006)
+                  or (m4 == "Sideways" and (sk1 or 50.0) >= 90.0))
+            if gn and not rn:
+                return None
+            if zd is not None and zd < 0.65:
+                return None
+            try:
+                _pp = _pm_path_feats(asset, ticker)
+                _d, _v = float(_pp.get("pm_path_drift")), float(
+                    _pp.get("pm_path_vr3"))
+                if _d == _d and _v == _v and _d * _v > 0:
+                    return None
+            except (TypeError, ValueError):
+                pass
+            if m1 == "Sideways" and pm >= 0.70 and (sk1 or 50.0) >= 70:
+                return None
+            if m1 == "Sideways" and m4 == "Sideways" and pm >= 0.55:
+                return None
+    elif a == "ETH":
+        md = str(sig.get("markov_eth_daily") or "")
+        sk5 = _fv("stoch_k_5m", 50.0)
+        sk15 = _fv("stoch_k_15m", 50.0)
+        rsi1 = _fv("rsi_1h")
+        cd15 = _fv("consec_dir_15m")
+        d15 = _fv("dir_15m")
+        body = _fv("body_15m", 0.0) or 0.0
+        bp5 = _fv("bp_5m", 0.5)
+        liq = _fv("liq_score")
+        if side == "yes":
+            if (sk5 or 50.0) >= 44:
+                return None
+            if 30.0 <= (sk1 or 50.0) < 70.0 and not (
+                    rsi1 is not None and rsi1 < 35.0):
+                return None
+        else:
+            if md == "Sideways":
+                return None
+            if cd15 is not None and cd15 <= -1 and (sk15 or 50.0) <= 40:
+                return None
+            if d15 == -1 and pm >= 0.50:
+                rescue = (body > 0.60 and (bp5 if bp5 is not None else 0.5)
+                          < 0.45 and not (liq is not None and liq == -2))
+                if not rescue:
+                    return None
+    else:
+        return None
+    kel = (p - pm - fee) / (1 - pm) if side == "yes" else (pm - p - fee) / pm
+    stake = round(2500.0 * max(0.0, min(kel, 0.10)), 2)
+    if stake <= 0:
+        return None
+    return side, edge, stake
 
 
 _SOL_CAND_TRADED: set = set()

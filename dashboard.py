@@ -1291,7 +1291,11 @@ with tab_15m_shadow:
     # (p_gbdt previously duplicated production on ETH) and is judged on
     # forward paper only.
     _AB15 = {
-        "BTC": {"start": pd.Timestamp("2026-08-05 22:00", tz="UTC"),
+        # [2026-08-13] display window RESET by user request (fresh
+        # collection). Underlying CSV history is untouched — the scheduled
+        # 08-18 reads (mktanchor decision, mkt-fav, DUAL) still score from
+        # 08-05 22:00 offline.
+        "BTC": {"start": pd.Timestamp("2026-08-13 00:00", tz="UTC"),
                 "note": "challenger = MARKET-ANCHORED model (08-05: pm + "
                         "pm-trajectory + tau/offset/spread/vol — learns the "
                         "market's residual biases; replaced the refresh "

@@ -919,10 +919,12 @@ with tab_sol_shadow:
     # Promotion decision at the 08-11 review.
     st.markdown(
         "<div style='color:#f0a500;font-size:0.78rem;margin-bottom:8px;'>"
-        "SOL 15m model A/B on identical live scans since 2026-07-30 01:00 UTC — "
-        "production (iso+z-expansion, blue) vs slope-shadow (p_gbdt, orange) vs "
-        "fixed 50/50 blend (purple). Hypothetical books; decisions remain "
-        "production-only. Promotion decision at the 08-11 review."
+        "SOL 15m model A/B on identical live scans since 2026-07-30 01:00 UTC. "
+        "ROLE SWAP 2026-08-12 18:00 UTC (slope model PROMOTED to the paper "
+        "decision path): from then on, blue/p_model_15m = the promoted slope "
+        "model (now deciding) and orange/p_gbdt = the demoted iso+z-expansion "
+        "model. Before then, the reverse. Books remain hypothetical replays "
+        "on identical scans."
         "</div>",
         unsafe_allow_html=True,
     )

@@ -2997,7 +2997,17 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # p_up_v2 -> K_YES/K_NO model is computed and logged as a SHADOW below
         # (p_model_yes_v2/p_model_no_v2 etc.) for direct comparison later --
         # it does not influence best_side/best_edge/trade placement.
-        p_model_no  = compute_p_model_15m(spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
+        # [2026-08-12 PROMOTION] SOL paper book's DECISION model = the
+        # slope-shadow (user promotion after the 08-11 review + candidate
+        # staging). Production model still computed below and logged to
+        # p_gbdt (role swap) so the A/B record continues uninterrupted.
+        _sol_prom = globals().get("_SOL_SHADOW") if asset.upper() == "SOL" else None
+        if _sol_prom is not None:
+            p_model_no = compute_p_model_15m(spot, floor_s, tau_min, sig,
+                                             asset=asset, p_market=p_market,
+                                             model_override=_sol_prom)
+        else:
+            p_model_no  = compute_p_model_15m(spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
         if asset == "BTC" and _zdrift_15m is not None:
             p_model_yes = compute_p_yes_zdrift_15m(spot, floor_s, tau_min, sig, _zdrift_15m, p_market)
         else:
@@ -3042,9 +3052,12 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         _sol_sh = globals().get("_SOL_SHADOW")
         _btc_sh = globals().get("_BTC_SHADOW")
         if asset.upper() == "SOL" and _sol_sh is not None:
+            # [2026-08-12 PROMOTION role swap] slope model now DECIDES (and
+            # logs to p_model_15m); p_gbdt carries the demoted production
+            # model so the A/B stream continues (labels on the SOL SHADOW
+            # tab: "production"=slope-decided book, "shadow"=old model).
             _lgbm_shadows[ticker] = compute_p_model_15m(
-                spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
-                model_override=_sol_sh)
+                spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
         elif asset.upper() == "BTC" and _btc_sh is not None:
             # [2026-08-05] BTC p_gbdt seat SWAPPED: market-anchored challenger
             # (train_btc15m_mktanchor_20260805.py — predicts outcome from
@@ -4030,13 +4043,46 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # (yes_ou_theta flips YES->NO), so a final-position check cannot be bypassed
         # by a flip-chain. Catches the full streak 4/4.
         # Backup: paper_trade_runner_15m_pre_sol_zdrift_gate_20260709.py
+        # [2026-08-12 PROMOTION] threshold widened 0.55->0.65 per the
+        # promoted zd65+path+SW stack (zd65 = the racing leader's widen;
+        # original 0.55 validation and threshold-plateau note above stand).
         if (asset.upper() == "SOL" and best_side == "no"
-                and _z_drift_6h is not None and _z_drift_6h < 0.55):
+                and _z_drift_6h is not None and _z_drift_6h < 0.65):
             print(f"    [sol_15m_no_zdrift_gate] BLOCK NO {ticker} — "
-                  f"z_drift_6h={_z_drift_6h:+.4f}<0.55 (stale-drift regime, "
-                  f"ep_edge=-6.9pp P=0.004, complement +5.7pp)")
+                  f"z_drift_6h={_z_drift_6h:+.4f}<0.65 (promoted zd65 stack)")
             evaluated.append((best_edge, best_side, c, p_model, offset_pct))
             continue
+
+        # [2026-08-12 PROMOTION] pm-path NO gate: block NO when the live
+        # pm-path signal opposes it (drift x vr3 > 0 = book momentum
+        # pushing up). Part of the promoted zd65+path+SW stack.
+        if asset.upper() == "SOL" and best_side == "no":
+            try:
+                _pp = _pm_path_feats(asset, ticker)
+                _ppd, _ppv = float(_pp.get("pm_path_drift")), float(_pp.get("pm_path_vr3"))
+                if _ppd == _ppd and _ppv == _ppv and _ppd * _ppv > 0:
+                    print(f"    [sol_15m_path_no_gate] BLOCK NO {ticker} — "
+                          f"pm_path drift*vr3={_ppd*_ppv:+.4f}>0 (book momentum against NO)")
+                    evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        # [2026-08-12 PROMOTION] SW pair (BTC gates ported frozen, two-level
+        # validated 08-11): block NO in 1h-Sideways at pm>=0.70 with
+        # stoch_1h>=70, and in double-Sideways at pm>=0.55.
+        if asset.upper() == "SOL" and best_side == "no":
+            _m1sw = str(sig.get("markov_sol_1h") or "")
+            _m4sw = str(sig.get("markov_sol_4h") or "")
+            _sk1sw = float(sig.get("stoch_k_1h") or 50.0)
+            if _m1sw == "Sideways" and p_market >= 0.70 and _sk1sw >= 70.0:
+                print(f"    [sol_15m_sw_ob_gate] BLOCK NO {ticker} — 1h=SW pm>=0.70 stoch>=70")
+                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                continue
+            if _m1sw == "Sideways" and _m4sw == "Sideways" and p_market >= 0.55:
+                print(f"    [sol_15m_sw_sw_gate] BLOCK NO {ticker} — double-Sideways pm>=0.55")
+                evaluated.append((best_edge, best_side, c, p_model, offset_pct))
+                continue
 
         # [sol_15m_cg_liq_yes_gate] Block SOL YES when the CG flow HMM is in State 4
         # (long-liquidation regime: liq_imb_4h=-0.92 = longs being liquidated, sell
@@ -4981,11 +5027,8 @@ def _build_row(
         _pmpath = _pm_path_feats(asset, ticker)
     except Exception:
         _pmpath = {"pm_path_drift": "", "pm_path_vr3": "", "pm_path_n": ""}
-    try:
-        _maybe_log_sol_candidate(asset, ticker, close_time, p_market,
-                                 sig, _pmpath, offset_pct)
-    except Exception as _sce:
-        print(f"    [sol_candidate] log error: {_sce}")
+    # [2026-08-12] candidate hook retired at full promotion — the paper
+    # book's decision path now IS the promoted stack.
     return {
         **_pmtraj,
         **_pmpath,

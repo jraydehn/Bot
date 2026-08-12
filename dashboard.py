@@ -1599,7 +1599,7 @@ with tab_15m_shadow:
                     _oppd = {tt for tt in _bothd
                              if _Ad.loc[tt, "side"] != _Bd.loc[tt, "side"]}
                     _rows_d = []
-                    # [2026-08-13 corrected per user] FULL INDEPENDENCE:
+                    # [2026-08-12 corrected per user] FULL INDEPENDENCE:
                     # both books take every bet — no de-overlap, no
                     # arbitration; overlaps/conflicts all stand. DUAL =
                     # literal sum of the two PnL streams.

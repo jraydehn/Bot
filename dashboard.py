@@ -262,6 +262,16 @@ def load_trades(asset: str) -> pd.DataFrame:
         # tagged retroactively, so this only cleanly prefers the live row going
         # forward (older rows still merge, just without a live/paper preference).
         _key_cols = [c for c in ["contract_ticker", "decision", "side"] if c in df_15m.columns]
+        # [2026-08-12] BTC DUAL paper book: the mkt-fav arm (flat $100,
+        # kelly_fraction=0) can legitimately trade the SAME contract/side
+        # in the same scan as the production arm — key the dedup on the
+        # flat-stake fingerprint so those two rows never merge. Live/twin
+        # duplicate pairs are both kelly-sized, so their dedup is unchanged.
+        if {"bet_amount", "kelly_fraction"} <= set(df_15m.columns):
+            _flat15 = ((pd.to_numeric(df_15m["bet_amount"], errors="coerce") == 100.0)
+                       & (pd.to_numeric(df_15m["kelly_fraction"], errors="coerce") == 0.0))
+            df_15m["_flat"] = _flat15.fillna(False)
+            _key_cols.append("_flat")
         if _key_cols:
             _ts = pd.to_datetime(df_15m["logged_at"], errors="coerce", utc=True, format="mixed")
             _is_live_col = df_15m["is_live"] if "is_live" in df_15m.columns \
@@ -278,7 +288,8 @@ def load_trades(asset: str) -> pd.DataFrame:
             df_15m["_session"] = _new_session.cumsum()
             df_15m = df_15m.sort_values("_live", ascending=False)
             df_15m = df_15m.drop_duplicates(subset=_key_cols + ["_session"], keep="first")
-            df_15m = df_15m.drop(columns=["_ts", "_live", "_session"])
+            df_15m = df_15m.drop(columns=["_ts", "_live", "_session"], errors="ignore")
+        df_15m = df_15m.drop(columns=["_flat"], errors="ignore")
 
     frames = [f for f in [df_1h, df_15m] if not f.empty]
     if not frames:
@@ -1368,6 +1379,23 @@ with tab_15m_shadow:
             st.info(f"Collecting… {len(_ab)} resolved scans since challenger "
                     f"go-live (unresolved scans settle within ~15 min).")
         else:
+            # [2026-08-12] BTC p_model_15m semantics fix: the legacy runner
+            # logged the BEST-SIDE probability (P(NO) on model-NO-leaning
+            # rows, non-coherent convention) while these books read the
+            # column as P(YES) — on NO-leaning rows the book bought YES
+            # against the model lean. Shown immaterial over the A/B window
+            # (honest +$4,589/n43/WR86% vs artifact +$4,627/n50/WR78%; only
+            # 53/739 rows flipped). Reconstruct true P(YES) for pre-cutover
+            # rows via raw_edge (identifies the leaning); the DUAL-replica
+            # runner logs uniform P(YES) from the cutover on.
+            if _a15 == "BTC" and "raw_edge" in _ab.columns:
+                _cut12 = pd.Timestamp("2026-08-12 22:00", tz="UTC")
+                _vv = _ab["p_model_15m"]
+                _rev = pd.to_numeric(_ab["raw_edge"], errors="coerce")
+                _dyes = (_rev - (_vv - _ab["p_market"])).abs()
+                _dno = (_rev - (_vv - (1 - _ab["p_market"]))).abs()
+                _flip = (_ab["dt"] < _cut12) & (_dno < _dyes)
+                _ab.loc[_flip, "p_model_15m"] = 1 - _vv[_flip]
             _ab["p_blend"] = (_ab["p_model_15m"] + _ab["p_gbdt"]) / 2
             _books15 = [("production", "p_model_15m", "#4f8bf9"),
                         ("shadow", "p_gbdt", "#f0a500"),

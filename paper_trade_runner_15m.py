@@ -3133,7 +3133,12 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         except Exception:
             pass
 
-        if already_bet is not None and close_time in already_bet:
+        # [2026-08-12] replica assets bypass the per-expiry session cap:
+        # shadow books bet EVERY qualifying contract, including multiple
+        # strikes of the same expiry — the cap (and the skipped logging it
+        # caused) is legacy-path-only.
+        if (already_bet is not None and close_time in already_bet
+                and asset.upper() not in ("SOL", "ETH", "BTC")):
             print(f"  [skip] expiry {close_time} already bet this session.")
             continue
 
@@ -3164,6 +3169,11 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                                 _REPLICA_TRADED.add(_r.get("contract_ticker"))
                 except Exception:
                     pass
+            # [2026-08-12] the A/B companion stream (p_gbdt) must keep
+            # logging through the replica path — legacy set this on sig in
+            # its pass-row code, which the replica bypasses (caught after
+            # promotion: p_gbdt went blank on SOL/ETH rows).
+            sig["p_gbdt"] = _lgbm_shadows.get(ticker, "")
             _rep = None
             if ticker not in _REPLICA_TRADED:
                 _rep = _replica_decide(asset, p_model_no, p_market, sig,
@@ -3210,8 +3220,99 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 is_live=is_live, fee_est=_rfee)
             append_row(row, asset=asset)
             _REPLICA_TRADED.add(ticker)
-            if already_bet is not None:
-                already_bet.add(close_time)
+            continue
+
+        # [2026-08-12 BTC DUAL REPLICA PROMOTION] BTC paper = the promoted
+        # DUAL shadow: production g+k (12 gates, plain kelly $2500/10%) AND
+        # mkt-fav k1.8 (flat $100), FULLY INDEPENDENT — each book takes its
+        # own bet, no arbitration, no blending (user architecture). Logged
+        # p_model_15m is now uniformly P(YES); the legacy convention logged
+        # P(NO) on model-NO-leaning rows, which the dashboard books read as
+        # P(YES) — an artifact shown immaterial over the A/B window (honest
+        # book +$4,589/n43/WR86% vs artifact +$4,627/n50/WR78%); dashboard
+        # reconstructs pre-cutover rows. mkt-fav trade rows are marked by
+        # kelly_fraction=0.0 + bet_amount=100.0. Legacy path bypassed.
+        if asset.upper() == "BTC":
+            if "BTC" not in _REPLICA_SEEDED:
+                _REPLICA_SEEDED.add("BTC")
+                try:
+                    import csv as _csvm
+                    with open(_csv_path(asset)) as _fh:
+                        for _r in list(_csvm.DictReader(_fh))[-300:]:
+                            _tkr = _r.get("contract_ticker")
+                            if _r.get("decision") == "trade":
+                                try:
+                                    _isflat = (float(_r.get("bet_amount") or 0) == 100.0
+                                               and float(_r.get("kelly_fraction") or 1) == 0.0)
+                                except (TypeError, ValueError):
+                                    _isflat = False
+                                (_REPLICA_TRADED_MF if _isflat
+                                 else _REPLICA_TRADED).add(_tkr)
+                            else:
+                                try:
+                                    if float(_r.get("raw_edge") or 0) >= 0.04:
+                                        _REPLICA_TRADED.add(_tkr)
+                                except (TypeError, ValueError):
+                                    pass
+                except Exception:
+                    pass
+            sig["p_gbdt"] = _lgbm_shadows.get(ticker, "")
+            _repP, _repM = _replica_decide_btc(
+                p_model_yes, p_market, sig, offset_pct,
+                _liq_signal.liq_score if _liq_signal is not None else None,
+                skip_p=ticker in _REPLICA_TRADED,
+                skip_m=ticker in _REPLICA_TRADED_MF)
+            _blocked_edge = 0.0
+            if isinstance(_repP, tuple) and _repP[0] == "blocked":
+                _blocked_edge = round(float(_repP[1]), 4)
+                _REPLICA_TRADED.add(ticker)
+                _repP = None
+            _wrote = False
+            for _bk, _rep in (("prod", _repP), ("mktfav", _repM)):
+                if _rep is None:
+                    continue
+                _rside, _redge, _rstake = _rep
+                _rcost = p_market if _rside == "yes" else 1 - p_market
+                _rfee = round((_rstake / max(_rcost, 0.01)) * 0.07
+                              * p_market * (1 - p_market), 2)
+                print(f"    [replica-{_bk}] TRADE {_rside} {ticker} "
+                      f"pm={p_market:.3f} p={p_model_yes:.3f} "
+                      f"edge={_redge:.3f} stake=${_rstake:.0f}")
+                row = _build_row(
+                    asset=asset, decision_time=decision_time, ticker=ticker,
+                    close_time=close_time, spot=spot, floor_s=floor_s,
+                    offset_pct=offset_pct, tau_min=tau_min,
+                    p_market=p_market, p_model=p_model_yes,
+                    raw_edge=round(_redge, 4), side=_rside, decision="trade",
+                    sig=sig,
+                    kelly_fraction=(0.0 if _bk == "mktfav" else round(
+                        _redge / max(1 - p_market if _rside == "yes"
+                                     else p_market, 0.01), 4)),
+                    bet_fraction=round(_rstake / 2500.0, 4),
+                    bet_amount=_rstake, bankroll=bankroll,
+                    liq_signal=_liq_signal, cg=_cg,
+                    spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
+                    is_live=is_live, fee_est=_rfee)
+                append_row(row, asset=asset)
+                (_REPLICA_TRADED_MF if _bk == "mktfav"
+                 else _REPLICA_TRADED).add(ticker)
+                _wrote = True
+            # scan record: a pass row when nothing traded, or when the
+            # prod book's blocked-consumption marker would otherwise be
+            # lost because only mkt-fav wrote a trade row.
+            if not _wrote or (_blocked_edge > 0 and _repP is None and _wrote):
+                row = _build_row(
+                    asset=asset, decision_time=decision_time, ticker=ticker,
+                    close_time=close_time, spot=spot, floor_s=floor_s,
+                    offset_pct=offset_pct, tau_min=tau_min,
+                    p_market=p_market, p_model=p_model_yes,
+                    raw_edge=_blocked_edge,
+                    side="", decision="pass", sig=sig, kelly_fraction=0.0,
+                    bet_fraction=0.0, bet_amount=0.0, bankroll=bankroll,
+                    liq_signal=_liq_signal, cg=_cg,
+                    spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
+                    is_live=is_live, fee_est="")
+                append_row(row, asset=asset)
             continue
 
         edge_yes = p_model_yes - p_market
@@ -4872,7 +4973,104 @@ _PM_HIST_LOADED: set = set()
 
 
 _REPLICA_TRADED: set = set()
+_REPLICA_TRADED_MF: set = set()   # BTC mkt-fav book's own consumption set
 _REPLICA_SEEDED: set = set()
+
+
+def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
+                        skip_p=False, skip_m=False):
+    """[2026-08-12 BTC DUAL REPLICA] The two promoted BTC shadow books,
+    decided independently (no arbitration — user architecture).
+
+    Book P — production g+k: symmetric fee-adjusted edge >= 0.04 on the
+    TRUE P(YES) (honest semantics; see caller comment), the 12
+    marginal-surviving gates, plain kelly $2500 cap 10%. Returns
+    (side, edge, stake), ("blocked", edge) on a post-edge gate block
+    (consumes the contract — keep="first" dedup), or None.
+
+    Book M — mkt-fav k1.8: z-expansion of the MARKET probability
+    (favorite-longshot bias, k frozen from SOL), edge >= 0.04, flat $100.
+    Model-free benchmark; no gates, so no blocked case. Returns
+    (side, edge, 100.0) or None."""
+    try:
+        p = float(p_yes); pm = float(p_market)
+    except (TypeError, ValueError):
+        return None, None
+    if not (0.03 <= pm <= 0.97) or not (0.0 < p < 1.0):
+        return None, None
+    fee = 0.07 * pm * (1 - pm)
+
+    def _fv(k, d=None):
+        try:
+            v = float(sig.get(k))
+            return v if v == v else d
+        except (TypeError, ValueError):
+            return d
+
+    P = None
+    if not skip_p:
+        ey, en = p - pm - fee, pm - p - fee
+        side, edge = ("yes", ey) if ey >= en else ("no", en)
+        if edge >= 0.04:
+            m1 = str(sig.get("markov_regime_1h") or "")
+            m15 = str(sig.get("markov_regime_15m") or "")
+            cpu = _fv("composite_p_up")
+            sk15 = _fv("stoch_k_15m", 50.0)
+            sk1 = _fv("stoch_k_1h", 50.0)
+            sk5 = _fv("stoch_k_5m")
+            body = _fv("body_15m", 1.0)
+            d15 = _fv("dir_15m")
+            chg1h = _fv("chg_1h", 0.0)
+            chg15 = _fv("chg_15m", 0.0)
+            chg5 = _fv("chg_5m")
+            vr = _fv("vol_ratio", 1.0)
+            vst = _fv("vwap_hmm_state")
+            try:
+                liq = float(liq_score) if liq_score is not None else None
+            except (TypeError, ValueError):
+                liq = None
+            if side == "yes":
+                hit = (float(offset_pct) < 0.025
+                       or m1 == "Bear"
+                       or (m15 == "Bear"
+                           and not (cpu is not None and cpu <= 0.488))
+                       or (d15 == 1 and 0.50 <= pm < 0.65
+                           and not (m1 == "Bull"
+                                    or (m1 == "Bear" and m15 == "Bear"
+                                        and sk1 < 35)))
+                       or (m1 == "Sideways" and body < 0.30
+                           and not ((cpu is not None and cpu < 0.40)
+                                    or (20 <= sk15 < 40)))
+                       or (sk1 >= 95 and liq == -1))
+            else:
+                hit = ((chg1h > 0 and 30 <= sk1 < 70)
+                       or (m1 == "Sideways" and pm >= 0.70 and sk1 >= 70)
+                       or (m1 == "Sideways" and m15 == "Sideways"
+                           and pm >= 0.55)
+                       or (m1 == "Bear" and m15 == "Bull")
+                       or (sk5 is not None and sk5 > 76
+                           and chg5 is not None and chg5 > 0)
+                       or (vst is not None
+                           and (vst == 4
+                                or (vst == 2 and vr < 0.216)
+                                or (vst == 5 and sk1 < 85)
+                                or (vst == 7 and chg15 >= -0.112))))
+            if hit:
+                P = ("blocked", edge)
+            else:
+                kel = ((p - pm - fee) / (1 - pm) if side == "yes"
+                       else (pm - p - fee) / pm)
+                stake = round(2500.0 * max(0.0, min(kel, 0.10)), 2)
+                P = (side, edge, stake) if stake > 0 else None
+
+    M = None
+    if not skip_m:
+        pmf = float(norm.cdf(1.8 * norm.ppf(min(max(pm, 0.01), 0.99))))
+        eyM, enM = pmf - pm - fee, pm - pmf - fee
+        sideM, edgeM = ("yes", eyM) if eyM >= enM else ("no", enM)
+        if edgeM >= 0.04:
+            M = (sideM, edgeM, 100.0)
+    return P, M
 
 
 def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):

@@ -40,9 +40,10 @@ ASSET_DISPLAY_FROM = {
                                     # isolated from the pre-fix period's HMM-decode etc. noise.
 }
 ASSET_DISPLAY_FROM_15M = {
-    "BTC": "2026-07-28 06:53:02",  # cleared 2026-07-28 per user request — fee-audit gate
-                                    # package live (no_midhigh/no_deep/yes_thrust gates +
-                                    # fee-aware Kelly). Prior: 2026-06-29 23:31:53.
+    "BTC": "2026-08-12 16:55:51",  # cleared 2026-08-13 per user request — clean run of the
+                                    # BTC 15m PAPER book display. Prior: 2026-07-28 06:53:02
+                                    # (fee-audit gate package live: no_midhigh/no_deep/
+                                    # yes_thrust gates + fee-aware Kelly).
     "ETH": "2026-07-29 18:25:54",  # cleared 2026-07-29 per user request — slope-feature
                                     # model live (replaced inverted blend chain, commit
                                     # 163276d). Prior: 2026-07-28 06:53:02 (fee-audit gate
@@ -1291,11 +1292,7 @@ with tab_15m_shadow:
     # (p_gbdt previously duplicated production on ETH) and is judged on
     # forward paper only.
     _AB15 = {
-        # [2026-08-13] display window RESET by user request (fresh
-        # collection). Underlying CSV history is untouched — the scheduled
-        # 08-18 reads (mktanchor decision, mkt-fav, DUAL) still score from
-        # 08-05 22:00 offline.
-        "BTC": {"start": pd.Timestamp("2026-08-13 00:00", tz="UTC"),
+        "BTC": {"start": pd.Timestamp("2026-08-05 22:00", tz="UTC"),
                 "note": "challenger = MARKET-ANCHORED model (08-05: pm + "
                         "pm-trajectory + tau/offset/spread/vol — learns the "
                         "market's residual biases; replaced the refresh "

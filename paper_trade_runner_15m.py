@@ -4735,6 +4735,115 @@ _PM_HIST: dict = {}
 _PM_HIST_LOADED: set = set()
 
 
+_SOL_CAND_TRADED: set = set()
+_SOL_CAND_PATH = Path(__file__).parent / "results" / "paper_trades_sol15m_cand_zd65path_sw.csv"
+_SOL_CAND_COLS = ["logged_at", "contract_ticker", "close_ts", "p_market",
+                  "p_gbdt", "side", "edge", "stake", "zd", "pm_path_sig",
+                  "m1", "m4", "gates"]
+
+
+def _maybe_log_sol_candidate(asset, ticker, close_time, p_market, sig,
+                             pmpath, offset_pct):
+    """[2026-08-12] SOL candidate paper book — DECISION-GRADE record for the
+    zd65+path+SW stack on the slope-shadow model ("almost promote": runs
+    real decisions at scan time in parallel; production book untouched;
+    full promotion only if it leads the 08-18 read). One bet per contract,
+    first qualifying scan; kelly $2500 cap 10%; resolution joined from the
+    main CSV by the reads."""
+    if asset.upper() != "SOL" or ticker in _SOL_CAND_TRADED:
+        return
+    try:
+        p = float(sig.get("p_gbdt"))
+        pm = float(p_market)
+    except (TypeError, ValueError):
+        return
+    if not (0.03 <= pm <= 0.97) or not (0.0 < p < 1.0):
+        return
+    fee = 0.07 * pm * (1 - pm)
+    ey, en = p - pm - fee, pm - p - fee
+    side, edge = ("yes", ey) if ey >= en else ("no", en)
+    if edge < 0.04:
+        return
+    def _fv(k, d=None):
+        try:
+            v = float(sig.get(k))
+            return v if v == v else d
+        except (TypeError, ValueError):
+            return d
+    m6 = str(sig.get("markov_sol_6h") or "")
+    m4 = str(sig.get("markov_sol_4h") or "")
+    m1 = str(sig.get("markov_sol_1h") or "")
+    sc1 = _fv("stoch_cross_1h", 0.0) or 0.0
+    sk1 = _fv("stoch_k_1h", 50.0)
+    oi = _fv("oi_chg_pct", 0.0) or 0.0
+    zd = _fv("z_drift_6h")
+    off = float(offset_pct)
+    persist = _fv("sol_persist_score")
+    slope_sk = _fv("slope120_stoch_k_15m")
+    if side == "yes":
+        if not (persist is not None and persist >= 3):
+            return
+        gy = ((m6 == "Bull" and sc1 != 0) or m4 == "Sideways"
+              or (m1 == "Sideways" and oi < 0.0535))
+        ry = ((m6 == "Bull" and sc1 == 0)
+              or (m1 == "Sideways" and oi >= 0.0535))
+        if gy and not ry:
+            return
+        flip = (m1 == "Sideways" and oi >= 0.0535
+                and zd is not None and zd < 0.55)
+        if -10.0 <= off < 0.0 and not flip:
+            return
+    else:
+        if pm > 0.8:
+            return
+        if 0.5 <= pm <= 0.65 and not (slope_sk is not None and slope_sk >= 40):
+            return
+        gn = ((m6 == "Bull" and off > -0.006)
+              or (m4 == "Sideways" and (sk1 or 50.0) < 90.0))
+        rn = ((m6 == "Bull" and off <= -0.006)
+              or (m4 == "Sideways" and (sk1 or 50.0) >= 90.0))
+        if gn and not rn:
+            return
+        if zd is not None and zd < 0.65:
+            return
+        try:
+            pd_, pv_ = float(pmpath.get("pm_path_drift")), float(
+                pmpath.get("pm_path_vr3"))
+            if pd_ == pd_ and pv_ == pv_ and pd_ * pv_ > 0:
+                return
+        except (TypeError, ValueError):
+            pass
+        if m1 == "Sideways" and pm >= 0.70 and (sk1 or 50.0) >= 70:
+            return
+        if m1 == "Sideways" and m4 == "Sideways" and pm >= 0.55:
+            return
+    kel = (p - pm - fee) / (1 - pm) if side == "yes" else (pm - p - fee) / pm
+    stake = round(2500.0 * max(0.0, min(kel, 0.10)), 2)
+    if stake <= 0:
+        return
+    import csv as _csv
+    new_file = not _SOL_CAND_PATH.exists()
+    with open(_SOL_CAND_PATH, "a", newline="") as _fh:
+        _w = _csv.DictWriter(_fh, fieldnames=_SOL_CAND_COLS)
+        if new_file:
+            _w.writeheader()
+        try:
+            _sig_path = float(pmpath.get("pm_path_drift")) * float(
+                pmpath.get("pm_path_vr3"))
+        except (TypeError, ValueError):
+            _sig_path = ""
+        _w.writerow({
+            "logged_at": datetime.now(timezone.utc).isoformat(),
+            "contract_ticker": ticker, "close_ts": close_time,
+            "p_market": round(pm, 4), "p_gbdt": round(p, 4),
+            "side": side, "edge": round(edge, 4), "stake": stake,
+            "zd": zd if zd is not None else "", "pm_path_sig": _sig_path,
+            "m1": m1, "m4": m4, "gates": "zd65+path+SW"})
+    _SOL_CAND_TRADED.add(ticker)
+    print(f"    [sol_candidate] TRADE {side} {ticker} pm={pm:.3f} "
+          f"p={p:.3f} edge={edge:.3f} stake=${stake:.0f}")
+
+
 def _pm_chg5_peek(asset: str, ticker: str, pm: float):
     """[2026-08-05] NON-MUTATING read of the pm-history buffer: pm minus the
     last observation 3-10 min old (matches the market-anchored challenger's
@@ -4872,6 +4981,11 @@ def _build_row(
         _pmpath = _pm_path_feats(asset, ticker)
     except Exception:
         _pmpath = {"pm_path_drift": "", "pm_path_vr3": "", "pm_path_n": ""}
+    try:
+        _maybe_log_sol_candidate(asset, ticker, close_time, p_market,
+                                 sig, _pmpath, offset_pct)
+    except Exception as _sce:
+        print(f"    [sol_candidate] log error: {_sce}")
     return {
         **_pmtraj,
         **_pmpath,

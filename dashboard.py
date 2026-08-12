@@ -1038,8 +1038,13 @@ with tab_sol_shadow:
             # banked). gated+kelly base variant retired same day: dead
             # weight as a racer; its live-equivalent role is recoverable
             # (zd65 minus the 0.55->0.65 widen).
-            for _lbl, _col, _clr in [("production", "p_model_15m", "#4f8bf9"),
-                                     ("shadow", "p_gbdt", "#f0a500")]:
+            # [2026-08-12] labels renamed after the promotion role swap:
+            # "deciding" = whatever model drives the paper book at each
+            # moment (p_model_15m — old model pre-18:00, slope after);
+            # "companion" = the non-deciding comparison stream (p_gbdt).
+            # Truthful across the swap boundary, unlike production/shadow.
+            for _lbl, _col, _clr in [("deciding", "p_model_15m", "#4f8bf9"),
+                                     ("companion", "p_gbdt", "#f0a500")]:
                 _s = _sh.dropna(subset=[_col]).copy()
                 _fee = 0.07 * _s["p_market"] * (1 - _s["p_market"])
                 _ey = _s[_col] - _s["p_market"] - _fee

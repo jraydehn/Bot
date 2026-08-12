@@ -56,10 +56,10 @@ ASSET_DISPLAY_FROM_15M = {
                                     # unprompted clear for the eth_yes_kelly_damp removal —
                                     # see project_eth15m_yes_kelly_undamp_20260717.md and
                                     # feedback_dashboard_clear_only_when_asked.md]
-    "SOL": "2026-08-12 17:20:00",  # cleared 2026-08-12 per user request (10:20 PST) —
-                                    # clean run alongside the zd65+path+SW candidate book
-                                    # go-live. Prior: 2026-07-28 06:18:03 (persistence YES
-                                    # gate + NO band gates + fee-aware Kelly live).
+    "SOL": "2026-08-12 18:00:00",  # cleared 2026-08-12 per user request — fresh run of
+                                    # the PROMOTED paper model (slope + zd65+path+SW became
+                                    # the decision path 18:00 UTC, commit 0f9f2b2).
+                                    # Prior: 2026-08-12 17:20:00 (candidate-staging clear).
                                     # (15m falls back to ASSET_DISPLAY_FROM when absent here, which
                                     # would otherwise incorrectly inherit the hourly-only 07-07 clear)
 }

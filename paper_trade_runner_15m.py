@@ -3151,7 +3151,16 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     import csv as _csvm
                     with open(_csv_path(asset)) as _fh:
                         for _r in list(_csvm.DictReader(_fh))[-300:]:
-                            if _r.get("decision") == "trade":
+                            _consumed = _r.get("decision") == "trade"
+                            if not _consumed:
+                                # gate-blocked first-qualifying scans are
+                                # logged as pass with raw_edge >= 0.04
+                                try:
+                                    _consumed = float(
+                                        _r.get("raw_edge") or 0) >= 0.04
+                                except (TypeError, ValueError):
+                                    pass
+                            if _consumed:
                                 _REPLICA_TRADED.add(_r.get("contract_ticker"))
                 except Exception:
                     pass
@@ -3159,12 +3168,21 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             if ticker not in _REPLICA_TRADED:
                 _rep = _replica_decide(asset, p_model_no, p_market, sig,
                                        offset_pct, ticker)
+            _blocked_edge = 0.0
+            if isinstance(_rep, tuple) and _rep[0] == "blocked":
+                # shadow dedup is keep="first" over edge-qualifying scans:
+                # a gate-blocked first look consumes the contract; later
+                # re-qualifying scans must not trade.
+                _blocked_edge = round(float(_rep[1]), 4)
+                _REPLICA_TRADED.add(ticker)
+                _rep = None
             if _rep is None:
                 row = _build_row(
                     asset=asset, decision_time=decision_time, ticker=ticker,
                     close_time=close_time, spot=spot, floor_s=floor_s,
                     offset_pct=offset_pct, tau_min=tau_min,
-                    p_market=p_market, p_model=p_model_no, raw_edge=0.0,
+                    p_market=p_market, p_model=p_model_no,
+                    raw_edge=_blocked_edge,
                     side="", decision="pass", sig=sig, kelly_fraction=0.0,
                     bet_fraction=0.0, bet_amount=0.0, bankroll=bankroll,
                     liq_signal=_liq_signal, cg=_cg,
@@ -4864,7 +4882,12 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
     scan), plain Kelly $2500 cap 10%. Gates: SOL = v2+markov+zd65+offset/
     flip+path+SW; ETH = the 5 audit survivors. No drift shifts, no
     overlays, no single-best-per-cycle. Stop-losses return at go-live
-    (user decision). Returns (side, edge, stake) or None."""
+    (user decision). Returns (side, edge, stake), ("blocked", edge) when
+    the edge qualified but a gate blocked — the shadow book's dedup is
+    keep="first" over EDGE-qualifying scans, so a gate-blocked first look
+    consumes the contract forever (caught 08-12: replica traded ETH
+    KXETH15M-26AUG121615-15 on a later re-qualifying scan the shadow
+    never revisits) — or None when the edge never qualified."""
     a = asset.upper()
     try:
         p = float(p_model); pm = float(p_market)
@@ -4877,6 +4900,7 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
     side, edge = ("yes", ey) if ey >= en else ("no", en)
     if edge < 0.04:
         return None
+    blocked = ("blocked", edge)
     def _fv(k, d=None):
         try:
             v = float(sig.get(k))
@@ -4895,44 +4919,44 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
         if side == "yes":
             persist = _fv("sol_persist_score")
             if not (persist is not None and persist >= 3):
-                return None
+                return blocked
             gy = ((m6 == "Bull" and sc1 != 0) or m4 == "Sideways"
                   or (m1 == "Sideways" and oi < 0.0535))
             ry = ((m6 == "Bull" and sc1 == 0)
                   or (m1 == "Sideways" and oi >= 0.0535))
             if gy and not ry:
-                return None
+                return blocked
             flip = (m1 == "Sideways" and oi >= 0.0535
                     and zd is not None and zd < 0.55)
             if -10.0 <= off < 0.0 and not flip:
-                return None
+                return blocked
         else:
             slope_sk = _fv("slope120_stoch_k_15m")
             if pm > 0.8:
-                return None
+                return blocked
             if 0.5 <= pm <= 0.65 and not (slope_sk is not None
                                           and slope_sk >= 40):
-                return None
+                return blocked
             gn = ((m6 == "Bull" and off > -0.006)
                   or (m4 == "Sideways" and (sk1 or 50.0) < 90.0))
             rn = ((m6 == "Bull" and off <= -0.006)
                   or (m4 == "Sideways" and (sk1 or 50.0) >= 90.0))
             if gn and not rn:
-                return None
+                return blocked
             if zd is not None and zd < 0.65:
-                return None
+                return blocked
             try:
                 _pp = _pm_path_feats(asset, ticker)
                 _d, _v = float(_pp.get("pm_path_drift")), float(
                     _pp.get("pm_path_vr3"))
                 if _d == _d and _v == _v and _d * _v > 0:
-                    return None
+                    return blocked
             except (TypeError, ValueError):
                 pass
             if m1 == "Sideways" and pm >= 0.70 and (sk1 or 50.0) >= 70:
-                return None
+                return blocked
             if m1 == "Sideways" and m4 == "Sideways" and pm >= 0.55:
-                return None
+                return blocked
     elif a == "ETH":
         md = str(sig.get("markov_eth_daily") or "")
         sk5 = _fv("stoch_k_5m", 50.0)
@@ -4945,20 +4969,20 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
         liq = _fv("liq_score")
         if side == "yes":
             if (sk5 or 50.0) >= 44:
-                return None
+                return blocked
             if 30.0 <= (sk1 or 50.0) < 70.0 and not (
                     rsi1 is not None and rsi1 < 35.0):
-                return None
+                return blocked
         else:
             if md == "Sideways":
-                return None
+                return blocked
             if cd15 is not None and cd15 <= -1 and (sk15 or 50.0) <= 40:
-                return None
+                return blocked
             if d15 == -1 and pm >= 0.50:
                 rescue = (body > 0.60 and (bp5 if bp5 is not None else 0.5)
                           < 0.45 and not (liq is not None and liq == -2))
                 if not rescue:
-                    return None
+                    return blocked
     else:
         return None
     kel = (p - pm - fee) / (1 - pm) if side == "yes" else (pm - p - fee) / pm

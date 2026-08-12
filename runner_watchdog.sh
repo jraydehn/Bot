@@ -7,7 +7,8 @@
 # this; log mtime can. Installed proactively after that incident. Run from cron every 10 minutes:
 #   */10 * * * * /Users/justindehn/Documents/ClaudeCode/kalshi_btc/runner_watchdog.sh
 #
-# Scope: 15m paper runners + hourly challenger runners. The hourly
+# Scope: 15m paper runners + hourly voltail challengers.
+# [2026-08-12] bookdyn x2 + v7/v8 RETIRED (books -$6.1k/-$1.2k/-$5.4k/-$4.0k) — removed from watch. The hourly
 # PRODUCTION runners live under run_all_assets.py's own watchdog and are
 # left alone. To disable: remove the crontab line.
 cd /Users/justindehn/Documents/ClaudeCode/kalshi_btc || exit 1
@@ -36,11 +37,3 @@ check "btc_hourly_voltail_runner.py" results/btc_hourly_voltail_runner.log \
       "python3 -u btc_hourly_voltail_runner.py"
 check "eth_hourly_voltail_runner.py" results/eth_hourly_voltail_runner.log \
       "python3 -u eth_hourly_voltail_runner.py"
-check "sol_hourly_v7_runner.py" results/sol_hourly_v7_runner.log \
-      "python3 -u sol_hourly_v7_runner.py"
-check "sol_hourly_v8_runner.py" results/sol_hourly_v8_runner.log \
-      "python3 -u sol_hourly_v8_runner.py"
-check "btc_hourly_bookdyn_runner.py" results/btc_hourly_bookdyn_runner.log \
-      "python3 -u btc_hourly_bookdyn_runner.py"
-check "eth_hourly_bookdyn_runner.py" results/eth_hourly_bookdyn_runner.log \
-      "python3 -u eth_hourly_bookdyn_runner.py"

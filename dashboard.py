@@ -1028,9 +1028,14 @@ with tab_sol_shadow:
                 _cum = _p.cumsum()
                 _dd = float((_cum.cummax() - _cum).max()) if len(_p) else 0.0
                 return _p, _dd
+            # [2026-08-11] blend book RETIRED: its pre-registered read
+            # concluded today — failed every promotion metric (net -$1,721,
+            # S -0.20, worst DD; prob-averaging = disagreement-dampening,
+            # banked). gated+kelly base variant retired same day: dead
+            # weight as a racer; its live-equivalent role is recoverable
+            # (zd65 minus the 0.55->0.65 widen).
             for _lbl, _col, _clr in [("production", "p_model_15m", "#4f8bf9"),
-                                     ("shadow", "p_gbdt", "#f0a500"),
-                                     ("blend 50/50", "p_blend", "#b57edc")]:
+                                     ("shadow", "p_gbdt", "#f0a500")]:
                 _s = _sh.dropna(subset=[_col]).copy()
                 _fee = 0.07 * _s["p_market"] * (1 - _s["p_market"])
                 _ey = _s[_col] - _s["p_market"] - _fee
@@ -1129,8 +1134,6 @@ with tab_sol_shadow:
                       "WR/BE": (f"{np.mean(_win):.0%}/{np.mean(_cost):.0%}"
                                 if len(_q) else "—")}
                 for _vn, _vmask, _vdash, _vw in [
-                        ("gated+kelly", _v2_ok & _mkv_ok & _zd_ok & _off_ok,
-                         "dash", 1.5),
                         ("gk zd65", _v2_ok & _mkv_ok & _zd_ok65 & _off_ok,
                          "dot", 1.0),
 
@@ -1251,7 +1254,7 @@ with tab_sol_shadow:
                     break
             _fams = st.multiselect(
                 "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
-                ["flat $100", "gated+kelly", "gk zd65",
+                ["flat $100", "gk zd65",
                  "gk vrM+zd65", "gk combo+damp", "gk zd65+path",
                  "gk zd65+path 1/h", "gk zd65+path+SW"],
                 default=_top2, key="solsh_fams")

@@ -1200,7 +1200,35 @@ with tab_sol_shadow:
                              & (_q["markov_sol_1h"].astype(str) == "Sideways")
                              & (_q["markov_sol_4h"].astype(str) == "Sideways")
                              & (_q["p_market"] >= 0.55)),
-                         "dot", 0.8)]:
+                         "dot", 0.8),
+                        # [2026-08-13] xHdamp: SAME trades as +SW, stakes
+                        # scaled by tape persistence — clip((H-0.4)/0.2,
+                        # 0.25, 1.0): full size at H>=0.6, quarter at
+                        # H<=0.4. Hurst's first SIZING use (levels/gates
+                        # adjudicated dead; d-hurst tested dead 08-13).
+                        # Evidence: low-H trades lose on BOTH the SOL stack
+                        # book (-$918/15, 3/3 wks, p=0.19) and ETH's young
+                        # slice (same sign); modulator +$1,927->+$2,223 with
+                        # zero trades dropped, and never fully exits (robust
+                        # to SOL hurst's 5-flips/11wks history). MODEST
+                        # evidence — forward race decides.
+                        ("gk +SW xHdamp", _v2_ok & _mkv_ok & _zd_ok65
+                         & _off_ok
+                         & np.where(_q["side"] == "no",
+                                    ~((_q["pm_path_drift"]
+                                       * _q["pm_path_vr3"]) > 0).fillna(False),
+                                    True)
+                         & ~((_q["side"] == "no")
+                             & (_q["markov_sol_1h"].astype(str) == "Sideways")
+                             & (_q["p_market"] >= 0.70)
+                             & (pd.to_numeric(_q["stoch_k_1h"],
+                                              errors="coerce").fillna(50)
+                                >= 70))
+                         & ~((_q["side"] == "no")
+                             & (_q["markov_sol_1h"].astype(str) == "Sideways")
+                             & (_q["markov_sol_4h"].astype(str) == "Sideways")
+                             & (_q["p_market"] >= 0.55)),
+                         "longdash", 0.8)]:
                     _vq = _q[_vmask].copy()
                     # [2026-08-11] 1/h refinement: max one trade per
                     # underlying hour (same-hour 15m contracts share the
@@ -1224,6 +1252,14 @@ with tab_sol_shadow:
                     # SOL. Needs 15d of window history => multiplier is 1.0
                     # until ~08-14 on this tab: identical to vrM+zd65 till
                     # then, diverges only on live forward data.
+                    if _vn == "gk +SW xHdamp" and len(_vq):
+                        _hmul = np.clip(
+                            (pd.to_numeric(_vq["hurst_exponent_5m"],
+                                           errors="coerce") - 0.4) / 0.2,
+                            0.25, 1.0).fillna(1.0)
+                        _vp = _vp * _hmul
+                        _cumh = _vp.cumsum()
+                        _vdd = float((_cumh.cummax() - _cumh).max())
                     if _vn == "gk combo+damp" and len(_vq):
                         _dser = _vp.groupby(_vq["dt"].dt.floor("D")).sum()
                         _dmul = {}
@@ -1280,7 +1316,7 @@ with tab_sol_shadow:
                 "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
                 ["flat $100", "gk zd65",
                  "gk vrM+zd65", "gk combo+damp", "gk zd65+path",
-                 "gk zd65+path 1/h", "gk zd65+path+SW"],
+                 "gk zd65+path 1/h", "gk zd65+path+SW", "gk +SW xHdamp"],
                 default=_top2, key="solsh_fams")
             for _fam, _x, _y, _nm, _ln in _traces:
                 if _fam in _fams:

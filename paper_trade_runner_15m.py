@@ -1001,8 +1001,17 @@ def append_row(row: dict, asset: str) -> None:
                     _ba = pd.to_numeric(dup["bet_amount"], errors="coerce")
                     _kf = pd.to_numeric(dup["kelly_fraction"], errors="coerce")
                     _dup_flat = (_ba == 100.0) & (_kf == 0.0)
+                    # NOTE: no `or`-defaulting here — kelly_fraction is
+                    # LEGITIMATELY 0.0 on mkt-fav rows and 0.0 is falsy
+                    # (caught 08-13: `or 1` reclassified every mkt-fav row
+                    # as kelly-class, so the guard swallowed 6 more DUAL
+                    # double-bets after the first fix).
+                    try:
+                        _rkf = float(row.get("kelly_fraction"))
+                    except (TypeError, ValueError):
+                        _rkf = 1.0
                     _row_flat = (float(row.get("bet_amount") or 0) == 100.0
-                                 and float(row.get("kelly_fraction") or 1) == 0.0)
+                                 and _rkf == 0.0)
                     dup = dup[_dup_flat == _row_flat]
                 if len(dup) > 0:
                     print(f"  [dedup_guard] SKIP duplicate trade row for {row.get('contract_ticker')} "

@@ -980,12 +980,30 @@ def append_row(row: dict, asset: str) -> None:
         # race against a concurrent live/twin append.
         if row.get("decision") == "trade" and csv_path.exists():
             try:
-                existing = pd.read_csv(csv_path, usecols=["contract_ticker", "decision", "side"], low_memory=False)
+                existing = pd.read_csv(csv_path,
+                                       usecols=["contract_ticker", "decision",
+                                                "side", "bet_amount",
+                                                "kelly_fraction"],
+                                       low_memory=False)
                 dup = existing[
                     (existing["decision"] == "trade")
                     & (existing["contract_ticker"] == row.get("contract_ticker"))
                     & (existing["side"] == row.get("side"))
                 ]
+                # [2026-08-13] BTC DUAL replica: the prod (kelly) and
+                # mkt-fav (flat $100, kelly_fraction=0) books legitimately
+                # trade the same contract/side in the same scan — two real
+                # decisions, not a live/twin race. Only treat as duplicate
+                # when the existing row is the SAME book class (caught
+                # 08-13 00:06: guard swallowed a decided-and-printed
+                # mkt-fav row after the prod row).
+                if len(dup) > 0:
+                    _ba = pd.to_numeric(dup["bet_amount"], errors="coerce")
+                    _kf = pd.to_numeric(dup["kelly_fraction"], errors="coerce")
+                    _dup_flat = (_ba == 100.0) & (_kf == 0.0)
+                    _row_flat = (float(row.get("bet_amount") or 0) == 100.0
+                                 and float(row.get("kelly_fraction") or 1) == 0.0)
+                    dup = dup[_dup_flat == _row_flat]
                 if len(dup) > 0:
                     print(f"  [dedup_guard] SKIP duplicate trade row for {row.get('contract_ticker')} "
                           f"{row.get('side')} -- already logged (live/twin race)")

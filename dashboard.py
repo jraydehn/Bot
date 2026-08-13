@@ -1615,8 +1615,21 @@ with tab_15m_shadow:
                     # can't price knife-catches (real, model-specific) or
                     # it's an August-regime artifact. Forward reads decide;
                     # do NOT promote on post-swap stats alone.
+                    # [2026-08-13 v2 refinement, same day] knife block now
+                    # requires OTM (offset_pct<0): ITM knives only need the
+                    # price to HOLD and win 72%/56% (Jul/Aug) — released;
+                    # OTM knives need a true reversal and lose in BOTH eras
+                    # (42%/22%). July cost -$3,261 -> -$1,094 (R1) while
+                    # keeping ~90% of the Aug value; with dead-tape,
+                    # Aug delta +$4,820 p=0.000 3/3wks vs Jul -$1,278.
+                    # DISCLOSED: moneyness was selected with both eras
+                    # visible (though consistent within each) — forward
+                    # reads referee. Reliability of the July test itself:
+                    # triangulated (old-model real book, 6-seed OOS replay,
+                    # model-free population edge +3.5pp) — solid.
                     _kn_okE = ~(_yesE
-                                & ((_q["chg_1h"] < -0.45).fillna(False)
+                                & (((_q["chg_1h"] < -0.45).fillna(False)
+                                    & (_q["offset_pct"] < 0).fillna(False))
                                    | (_q["realized_vol_annual"]
                                       < 0.135).fillna(False)))
                     for _vnE, _mE, _dshE in [

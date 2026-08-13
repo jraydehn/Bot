@@ -1605,11 +1605,26 @@ with tab_15m_shadow:
                                  & (_q["chg_5m"].fillna(0) > 0))
                     _n3_okE &= ~(_noE & (_q["chg_1h"].fillna(0) > 0)
                                  & (_sk1hE >= 30) & (_sk1hE < 70))
+                    # [2026-08-13] +YESknife variant: 5 gates + block YES on
+                    # falling-knife (chg_1h < -0.45) or dead-tape
+                    # (realized_vol_annual < 0.135). Post-swap book: 50 blk
+                    # @34% WR, +$5,359, p=0.001, 3/3 wks, catches 3/4 of the
+                    # 08-13 consecutive YES losses. DISCLOSED INSTABILITY:
+                    # INVERTED on the pre-swap old-model book (blocked 60%
+                    # winners, -$3,261, p=0.945) — either the new model
+                    # can't price knife-catches (real, model-specific) or
+                    # it's an August-regime artifact. Forward reads decide;
+                    # do NOT promote on post-swap stats alone.
+                    _kn_okE = ~(_yesE
+                                & ((_q["chg_1h"] < -0.45).fillna(False)
+                                   | (_q["realized_vol_annual"]
+                                      < 0.135).fillna(False)))
                     for _vnE, _mE, _dshE in [
                             ("g+k (5 gates)", _okE, "dash"),
                             ("g+k +hurst", _okE & _hu_okE, "dot"),
                             ("g+k +path", _okE & _pa_okE, "longdashdot"),
-                            ("g+k +NOtrio", _okE & _n3_okE, "dashdot")]:
+                            ("g+k +NOtrio", _okE & _n3_okE, "dashdot"),
+                            ("g+k +YESknife", _okE & _kn_okE, "solid")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",
                                         _gkE["p_market"],

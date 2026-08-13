@@ -1668,12 +1668,47 @@ with tab_15m_shadow:
                                     & (_q["offset_pct"] < 0).fillna(False))
                                    | (_q["realized_vol_annual"]
                                       < 0.135).fillna(False)))
+                    # [2026-08-13] xHdamp(sol): CROSS-ASSET hurst sizing —
+                    # stakes scaled by SOL's hurst stream (causal join,
+                    # <=30min stale), clip((H-0.4)/0.2, 0.25, 1.0) with
+                    # form+params FROZEN from the SOL deploy (transfer
+                    # test, not a fit). Improves ALL FOUR ETH books
+                    # (base S 0.25->0.33 net +$1,304; +NOtrio 0.32->0.39;
+                    # +YESknife 0.43->0.48 DD -$825; combined 0.52->0.56)
+                    # where ETH's OWN hurst hurt all of them — the two
+                    # streams correlate only 0.19; SOL's is the better
+                    # market-wide chop detector and covers the full window
+                    # (ETH's own logs only from 08-07).
+                    try:
+                        _shs = pd.read_csv(
+                            ASSET_CSV_15M["SOL"],
+                            usecols=["logged_at", "hurst_exponent_5m"],
+                            low_memory=False)
+                        _shs["dt"] = pd.to_datetime(
+                            _shs["logged_at"], errors="coerce", utc=True,
+                            format="mixed")
+                        _shs["h"] = pd.to_numeric(
+                            _shs["hurst_exponent_5m"], errors="coerce")
+                        _shs = _shs.dropna(subset=["dt", "h"]).sort_values("dt")
+                        _sts = _shs["dt"].astype("int64").values / 1e9
+                        _qts = _q["dt"].astype("int64").values / 1e9
+                        _si = np.searchsorted(_sts, _qts, side="right") - 1
+                        _sh = np.where(_si >= 0,
+                                       _shs["h"].values[np.clip(_si, 0, None)],
+                                       np.nan)
+                        _sage = _qts - np.where(_si >= 0,
+                                                _sts[np.clip(_si, 0, None)],
+                                                np.nan)
+                        _q["h_sol"] = np.where(_sage <= 1800, _sh, np.nan)
+                    except Exception:
+                        _q["h_sol"] = np.nan
                     for _vnE, _mE, _dshE in [
                             ("g+k (5 gates)", _okE, "dash"),
                             ("g+k +hurst", _okE & _hu_okE, "dot"),
                             ("g+k +path", _okE & _pa_okE, "longdashdot"),
                             ("g+k +NOtrio", _okE & _n3_okE, "dashdot"),
-                            ("g+k +YESknife", _okE & _kn_okE, "solid")]:
+                            ("g+k +YESknife", _okE & _kn_okE, "solid"),
+                            ("g+k xHdamp(sol)", _okE, "longdash")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",
                                         _gkE["p_market"],
@@ -1692,6 +1727,11 @@ with tab_15m_shadow:
                         _gpE = pd.Series(
                             np.where(_gwE, _gsE * (1 - _gcE) / _gcE, -_gsE)
                             - (_gsE / _gcE) * _gfE, index=_gkE.index)
+                        if _vnE == "g+k xHdamp(sol)":
+                            _gpE = _gpE * np.clip(
+                                (pd.to_numeric(_gkE["h_sol"],
+                                               errors="coerce") - 0.4) / 0.2,
+                                0.25, 1.0).fillna(1.0)
                         if len(_gkE):
                             _fig15.add_trace(go.Scatter(
                                 x=[_cfg15["start"]] + list(_gkE["dt"]),

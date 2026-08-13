@@ -1588,10 +1588,28 @@ with tab_15m_shadow:
                            * pd.to_numeric(_q.get("pm_path_vr3"),
                                            errors="coerce")) > 0).fillna(False),
                         True)
+                    # [2026-08-13] +NOtrio variant: 5 gates + three NO-side
+                    # blocks BORROWED from the other assets' validated
+                    # stacks (marginal sweep on the post-swap book, n=307):
+                    #   SOL pm>0.8 band     — blkWR 14%, +$1,821, n=21
+                    #   BTC sk5>76 & chg5>0 — blkWR 20%, +$1,636, n=15
+                    #   BTC chg1h>0 & sk1h 30-70 — blkWR 20%, +$1,213, n=10
+                    # Union w/ pm-path-family overlap removed: 29-36 blk,
+                    # +$2,927, boot p=0.092, 2/3 weeks — MODEST/DIRECTIONAL,
+                    # not significant; forward reads 08-18/08-25 decide.
+                    # Deliberately NOT the drawdown fix: the 08-12/13 dip is
+                    # oversold-YES-in-chop, and every gate that rescues it
+                    # blocked winners pre-dip (streak flip, not structure).
+                    _n3_okE = ~(_noE & (_pmE > 0.8))
+                    _n3_okE &= ~(_noE & (_sk5E > 76)
+                                 & (_q["chg_5m"].fillna(0) > 0))
+                    _n3_okE &= ~(_noE & (_q["chg_1h"].fillna(0) > 0)
+                                 & (_sk1hE >= 30) & (_sk1hE < 70))
                     for _vnE, _mE, _dshE in [
                             ("g+k (5 gates)", _okE, "dash"),
                             ("g+k +hurst", _okE & _hu_okE, "dot"),
-                            ("g+k +path", _okE & _pa_okE, "longdashdot")]:
+                            ("g+k +path", _okE & _pa_okE, "longdashdot"),
+                            ("g+k +NOtrio", _okE & _n3_okE, "dashdot")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",
                                         _gkE["p_market"],

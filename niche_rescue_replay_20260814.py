@@ -39,11 +39,28 @@ fee = 0.07 * df["p_market"] * (1 - df["p_market"])
 df["edge_yes"] = df["p"] - df["p_market"] - fee
 df["edge_no"] = df["p_market"] - df["p"] - fee
 res = df[df["resolved_yes"].notna()]
+# [2026-08-14 addendum, same day] RESCUE-C: the mean-reversion rescue the
+# original sweep COULD NOT SEE — the archive logs no MR columns (stoch/rsi/
+# dprice/kalman all absent; Phase-2 coverage failure), so they were
+# reconstructed from the archive's own spot stream per Phase 3. z_spot_6h =
+# (spot - 6h rolling mean)/6h rolling std, causal. Discovery: z>1.5 ->
+# n=239, 64% WR, +$6,218, p=0.000, 3/3 wks, topday 22%. Partially distinct
+# from RESCUE-B (135/239 overlap; C-only +$2,664): liquidation pressure and
+# price extension are two mechanisms converging on NO-into-stretched-tape.
+# Union B|C: n=419, +$10,539, 3/3 wks — the composite candidate.
+with np.errstate(divide="ignore", invalid="ignore"):
+    _ss = pd.Series(df["spot"].values, index=pd.DatetimeIndex(df["dt"]))
+    _rl = _ss.rolling("6h")
+    df["z_spot_6h"] = ((_ss - _rl.mean()) / _rl.std()).values
 BOOKS = {
     "RESCUE-A": (res["p_market"].between(0.35, 0.65) & (df["edge_yes"] >= 0.03)
                  & (df["edge_yes"] < 0.06) & (df["adx_1h"] >= 22), "yes"),
     "RESCUE-B": (res["p_market"].between(0.20, 0.80) & (df["edge_no"] >= 0.06)
                  & (df["liq_bias"] >= 1.0), "no"),
+    "RESCUE-C": (res["p_market"].between(0.20, 0.80) & (df["edge_no"] >= 0.06)
+                 & (df["z_spot_6h"] > 1.5), "no"),
+    "RESCUE-B|C": (res["p_market"].between(0.20, 0.80) & (df["edge_no"] >= 0.06)
+                   & ((df["liq_bias"] >= 1.0) | (df["z_spot_6h"] > 1.5)), "no"),
 }
 for name, (mask, side) in BOOKS.items():
     q = res[mask.reindex(res.index).fillna(False)].sort_values("dt") \

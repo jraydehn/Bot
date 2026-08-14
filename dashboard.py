@@ -40,10 +40,13 @@ ASSET_DISPLAY_FROM = {
                                     # isolated from the pre-fix period's HMM-decode etc. noise.
 }
 ASSET_DISPLAY_FROM_15M = {
-    "BTC": "2026-08-12 16:55:51",  # cleared 2026-08-13 per user request — clean run of the
-                                    # BTC 15m PAPER book display. Prior: 2026-07-28 06:53:02
-                                    # (fee-audit gate package live: no_midhigh/no_deep/
-                                    # yes_thrust gates + fee-aware Kelly).
+    "BTC": "2026-08-14 03:06:00",  # cleared 2026-08-14 per user request — fresh run of the
+                                    # PROMOTED DUAL v2 paper book (prod g+k 12 kelly +
+                                    # SHADOW/mktanchor flat $100; mkt-fav arm retired from
+                                    # paper, keeps tab benchmark + witness roles). Explicit
+                                    # user override of the shadow's pre-registered 08-18
+                                    # read. Prior cutoffs: 2026-08-12 16:55:51 (DUAL v1),
+                                    # 2026-07-28 06:53:02 (fee-audit gate package).
     "ETH": "2026-08-12 19:05:00",  # cleared 2026-08-12 per user request — fresh run of
                                     # the PROMOTED paper book (exact-replica decision path
                                     # live 19:05 UTC: production model + 5 survivor gates,

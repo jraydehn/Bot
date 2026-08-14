@@ -3284,18 +3284,21 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 except Exception:
                     pass
             sig["p_gbdt"] = _lgbm_shadows.get(ticker, "")
+            # [2026-08-14 DUAL v2] the flat arm now trades the SHADOW
+            # (mktanchor) value — the same one logged to p_gbdt this scan.
             _repP, _repM = _replica_decide_btc(
                 p_model_yes, p_market, sig, offset_pct,
                 _liq_signal.liq_score if _liq_signal is not None else None,
                 skip_p=ticker in _REPLICA_TRADED,
-                skip_m=ticker in _REPLICA_TRADED_MF)
+                skip_m=ticker in _REPLICA_TRADED_MF,
+                p_anchor=_lgbm_shadows.get(ticker))
             _blocked_edge = 0.0
             if isinstance(_repP, tuple) and _repP[0] == "blocked":
                 _blocked_edge = round(float(_repP[1]), 4)
                 _REPLICA_TRADED.add(ticker)
                 _repP = None
             _wrote = False
-            for _bk, _rep in (("prod", _repP), ("mktfav", _repM)):
+            for _bk, _rep in (("prod", _repP), ("shadow", _repM)):
                 if _rep is None:
                     continue
                 _rside, _redge, _rstake = _rep
@@ -3312,7 +3315,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     p_market=p_market, p_model=p_model_yes,
                     raw_edge=round(_redge, 4), side=_rside, decision="trade",
                     sig=sig,
-                    kelly_fraction=(0.0 if _bk == "mktfav" else round(
+                    kelly_fraction=(0.0 if _bk == "shadow" else round(
                         _redge / max(1 - p_market if _rside == "yes"
                                      else p_market, 0.01), 4)),
                     bet_fraction=round(_rstake / 2500.0, 4),
@@ -3321,7 +3324,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
                     is_live=is_live, fee_est=_rfee)
                 append_row(row, asset=asset)
-                (_REPLICA_TRADED_MF if _bk == "mktfav"
+                (_REPLICA_TRADED_MF if _bk == "shadow"
                  else _REPLICA_TRADED).add(ticker)
                 _wrote = True
             # scan record: a pass row when nothing traded, or when the
@@ -5005,8 +5008,9 @@ _REPLICA_SEEDED: set = set()
 
 
 def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
-                        skip_p=False, skip_m=False):
-    """[2026-08-12 BTC DUAL REPLICA] The two promoted BTC shadow books,
+                        skip_p=False, skip_m=False, p_anchor=None):
+    """[2026-08-14 DUAL v2 PROMOTION — explicit user override of the
+    shadow's pre-registered 08-18 read] The BTC paper DUAL's two books,
     decided independently (no arbitration — user architecture).
 
     Book P — production g+k: symmetric fee-adjusted edge >= 0.04 on the
@@ -5015,10 +5019,14 @@ def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
     (side, edge, stake), ("blocked", edge) on a post-edge gate block
     (consumes the contract — keep="first" dedup), or None.
 
-    Book M — mkt-fav k1.8: z-expansion of the MARKET probability
-    (favorite-longshot bias, k frozen from SOL), edge >= 0.04, flat $100.
-    Model-free benchmark; no gates, so no blocked case. Returns
-    (side, edge, 100.0) or None."""
+    Book S (was mkt-fav) — SHADOW/mktanchor arm: p_anchor = the
+    market-anchored challenger's value (needs a pm-history observation,
+    so it prices LATER scans — near-disjoint with book P's first-scan
+    trades: 8 shared contracts vs mkt-fav's 56 over the A/B window).
+    Symmetric fee-adjusted edge >= 0.04, flat $100, no gates. Window
+    case for the swap: DUAL v2 S 0.62/DD $784 vs v1 0.58/$1,652.
+    mkt-fav leaves the paper DUAL but keeps its tab benchmark + witness
+    roles. Returns (side, edge, 100.0) or None."""
     try:
         p = float(p_yes); pm = float(p_market)
     except (TypeError, ValueError):
@@ -5091,12 +5099,16 @@ def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
                 P = (side, edge, stake) if stake > 0 else None
 
     M = None
-    if not skip_m:
-        pmf = float(norm.cdf(1.8 * norm.ppf(min(max(pm, 0.01), 0.99))))
-        eyM, enM = pmf - pm - fee, pm - pmf - fee
-        sideM, edgeM = ("yes", eyM) if eyM >= enM else ("no", enM)
-        if edgeM >= 0.04:
-            M = (sideM, edgeM, 100.0)
+    if not skip_m and p_anchor is not None:
+        try:
+            pa = float(p_anchor)
+        except (TypeError, ValueError):
+            pa = None
+        if pa is not None and 0.0 < pa < 1.0:
+            eyM, enM = pa - pm - fee, pm - pa - fee
+            sideM, edgeM = ("yes", eyM) if eyM >= enM else ("no", enM)
+            if edgeM >= 0.04:
+                M = (sideM, edgeM, 100.0)
     return P, M
 
 

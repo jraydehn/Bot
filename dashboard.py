@@ -1583,6 +1583,45 @@ with tab_15m_shadow:
                         _prod_gk = _gk15[["contract_ticker", "dt",
                                           "side"]].copy()
                         _prod_gk["pnl"] = _gp15.values
+                        # [2026-08-14] xMFconv (user directive: mkt-fav as
+                        # the kelly SIZER — flat-kelly hits the 10% cap on
+                        # ~every trade, so sizing carried no information).
+                        # PRE-DECLARED tiers on mkt-fav's stance toward the
+                        # trade: x1.00 convicted co-sign (WR 94% vs BE 77%),
+                        # x0.75 lean-agree, x0.50 lean-object, x0.25
+                        # convicted objection (WR 20% at-par — the
+                        # fade-the-favorite lottery sleeve, trimmed not
+                        # killed). Window: S 0.53->0.99, DD 557->511, net
+                        # -$1,600 (almost all = the pm-0.93 13:1 winner cut
+                        # to quarter-stake — the declared trade-off).
+                        # Multipliers declared 08-14, not fitted; forward
+                        # race referees.
+                        _pmfq = _gk15["p_mktfav"]
+                        _eyq = _pmfq - _gk15["p_market"] - _gf
+                        _enq = _gk15["p_market"] - _pmfq - _gf
+                        _mfsd = np.where(_eyq >= _enq, "yes", "no")
+                        _mfed = np.maximum(_eyq, _enq)
+                        _agq = _mfsd == _gk15["side"]
+                        _tier = np.where(_agq & (_mfed >= 0.04), 1.00,
+                                np.where(_agq, 0.75,
+                                np.where(_mfed < 0.04, 0.50, 0.25)))
+                        _gsC = _gs * _tier
+                        _gpC = pd.Series(
+                            np.where(_gw, _gsC * (1 - _gc) / _gc, -_gsC)
+                            - (_gsC / _gc) * _gf, index=_gk15.index)
+                        if len(_gk15):
+                            _fig15.add_trace(go.Scatter(
+                                x=[_cfg15["start"]] + list(_gk15["dt"]),
+                                y=[0.0] + list(_gpC.cumsum()),
+                                name="production g+k xMFconv",
+                                line=dict(color=_clr, width=1.5,
+                                          dash="dashdot")))
+                        _cumC = _gpC.cumsum()
+                        _ddC = (float((_cumC.cummax() - _cumC).max())
+                                if len(_gk15) else 0.0)
+                        _row15["g+k xMFconv"] = (
+                            f"${_gpC.sum():+,.0f} (n={len(_gk15)}, "
+                            f"DD ${_ddC:,.0f})")
                 # [2026-08-05] ETH gated+kelly: the 5 live gates that SURVIVED
                 # marginal testing (Y_stoch5m44, Y_stoch1h_mid[rsi<35 rescue],
                 # N_daily_sw, N_consec, N_downcandle). REJECTED as inverted on

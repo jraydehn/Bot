@@ -2058,6 +2058,50 @@ with tab_sol_hourly_ab:
                     _figab.add_trace(go.Scatter(
                         x=_rq["dt"], y=_rq["would_pnl_net"].cumsum(), name=_lbl,
                         line=dict(color=_clr, width=2)))
+                    # [2026-08-14] niche v1 xHdamp(sol): the FROZEN
+                    # cross-asset hurst sizing (same params as the SOL/ETH
+                    # 15m deploys) as a racing overlay. Chop trades
+                    # (solH<0.5) went 1/7 (-$498, p=0.011); modulator
+                    # +$1,506 -> +$1,892 with zero trades dropped. The
+                    # niche needs a trending tape — coheres with its
+                    # buy-the-fear thesis. Display-only variant; the
+                    # runner is untouched.
+                    if _aname == "BTC" and _lbl == "niche v1":
+                        try:
+                            _shn = pd.read_csv(
+                                ASSET_CSV_15M["SOL"],
+                                usecols=["logged_at", "hurst_exponent_5m"],
+                                low_memory=False)
+                            _shn["dt"] = pd.to_datetime(
+                                _shn["logged_at"], errors="coerce",
+                                utc=True, format="mixed")
+                            _shn["h"] = pd.to_numeric(
+                                _shn["hurst_exponent_5m"], errors="coerce")
+                            _shn = _shn.dropna(
+                                subset=["dt", "h"]).sort_values("dt")
+                            _nts = _shn["dt"].astype("int64").values / 1e9
+                            _qts = _rq["dt"].astype("int64").values / 1e9
+                            _ni = np.searchsorted(_nts, _qts,
+                                                  side="right") - 1
+                            _nh = np.where(
+                                _ni >= 0,
+                                _shn["h"].values[np.clip(_ni, 0, None)],
+                                np.nan)
+                            _nage = _qts - np.where(
+                                _ni >= 0, _nts[np.clip(_ni, 0, None)],
+                                np.nan)
+                            _nh = np.where(_nage <= 1800, _nh, np.nan)
+                            _nmul = pd.Series(
+                                np.clip((_nh - 0.4) / 0.2, 0.25, 1.0),
+                                index=_rq.index).fillna(1.0)
+                            _hp = _rq["would_pnl_net"] * _nmul
+                            _figab.add_trace(go.Scatter(
+                                x=_rq["dt"], y=_hp.cumsum(),
+                                name="niche v1 xHdamp(sol)",
+                                line=dict(color=_clr, width=1.5,
+                                          dash="dash")))
+                        except Exception:
+                            pass
                     _wr = float(pd.to_numeric(_rq["would_win"],
                                               errors="coerce").mean())
                     _be = (float(_rq["p_market"].mean())

@@ -1501,6 +1501,15 @@ with tab_15m_shadow:
                 if _a15 == "BTC" and _lbl == "mkt-fav k1.8":
                     _mfav_book = _q[["contract_ticker", "dt", "side"]].copy()
                     _mfav_book["pnl"] = _pnl.values
+                # [2026-08-14] shadow book captured for DUAL v2 (user
+                # proposal: prod g+k + SHADOW as the pair — near-disjoint by
+                # construction, shadow trades later scans; overlap 8 vs
+                # mkt-fav's 56; window S 0.62/DD $784 vs 0.58/$1,652).
+                # Paper-runner arm swap waits on the shadow's own
+                # pre-registered 08-18 read.
+                if _a15 == "BTC" and _lbl == "shadow":
+                    _shad_book = _q[["contract_ticker", "dt", "side"]].copy()
+                    _shad_book["pnl"] = _pnl.values
                 if _a15 == "BTC" and _lbl != "mkt-fav k1.8":
                     _yes15 = _q["side"] == "yes"
                     _no15 = ~_yes15
@@ -1793,6 +1802,36 @@ with tab_15m_shadow:
                             "n": len(_Pd),
                             "WR/BE": "—",
                             "maxDD": f"${_ddd:,.0f}",
+                        })
+                    # [2026-08-14] DUAL v2 (user proposal): prod g+k +
+                    # SHADOW instead of mkt-fav. Near-disjoint pair (8
+                    # shared contracts vs mkt-fav's 56 — shadow needs
+                    # pm-history so it trades LATER scans than the
+                    # first-scan g+k book). Window: S 0.62 / DD $784 vs
+                    # current DUAL 0.58 / $1,652. Races on the tab; the
+                    # PAPER arm swap waits on shadow's pre-registered
+                    # 08-18 decision read (no early promotion).
+                    _rows_d2 = ([(rr["dt"], rr["pnl"])
+                                 for _, rr in _Ad.iterrows()]
+                                + [(rr["dt"], rr["pnl"])
+                                   for _, rr in _shad_book.iterrows()])
+                    _Pd2 = pd.DataFrame(_rows_d2, columns=["dt", "pnl"]
+                                        ).sort_values("dt")
+                    if len(_Pd2):
+                        _fig15.add_trace(go.Scatter(
+                            x=[_cfg15["start"]] + list(_Pd2["dt"]),
+                            y=[0.0] + list(_Pd2["pnl"].cumsum()),
+                            name="DUAL v2 (prod+shadow)",
+                            line=dict(color="#00c076", width=2,
+                                      dash="dot")))
+                        _cumd2 = _Pd2["pnl"].cumsum()
+                        _ddd2 = float((_cumd2.cummax() - _cumd2).max())
+                        _rows15.append({
+                            "book": "DUAL v2 (prod+shadow)",
+                            "net": f"${_Pd2['pnl'].sum():+,.0f}",
+                            "n": len(_Pd2),
+                            "WR/BE": "—",
+                            "maxDD": f"${_ddd2:,.0f}",
                         })
                 except Exception:
                     pass

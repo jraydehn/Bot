@@ -1928,7 +1928,7 @@ with tab_sol_hourly_ab:
         ("BTC", "2026-08-04", RESULTS_DIR / "paper_trades.csv",
          [("vol-tail", RESULTS_DIR / "paper_trades_btc_hourly_voltail.csv",
            "#b57edc", "tail"),
-          ("niche v1", RESULTS_DIR / "paper_trades_btc_hourly_niche.csv",
+          ("niche v1 ★PAPER (promoted 08-14)", RESULTS_DIR / "paper_trades_btc_hourly_niche.csv",
            "#f0a500", "dir"),
           ("niche v2", RESULTS_DIR / "paper_trades_btc_hourly_niche_v2.csv",
            "#00c076", "dir")]),
@@ -2066,7 +2066,7 @@ with tab_sol_hourly_ab:
                     # niche needs a trending tape — coheres with its
                     # buy-the-fear thesis. Display-only variant; the
                     # runner is untouched.
-                    if _aname == "BTC" and _lbl == "niche v1":
+                    if _aname == "BTC" and _lbl.startswith("niche v1"):
                         try:
                             _shn = pd.read_csv(
                                 ASSET_CSV_15M["SOL"],

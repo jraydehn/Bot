@@ -1928,14 +1928,19 @@ with tab_sol_hourly_ab:
         # this tab; both forward-positive since 07-28: v1 +$1,506/81 all
         # weeks green, v2 +$490/133 with wk33 +$1,761 its best). Their
         # 08-11 v1-vs-v2 review rides forward with visible books now.
-        ("BTC", "2026-08-04", RESULTS_DIR / "paper_trades.csv",
+        # [2026-08-14] BTC/ETH windows moved back 08-04 -> 07-28 (the niche
+        # books' true forward start): the 08-04 start (set for voltail
+        # go-live) was amputating niche v2's -$1,291 first week — tab showed
+        # +$1,802 vs the real +$490 (user caught it). Voltail unaffected
+        # (no rows before 08-04).
+        ("BTC", "2026-07-28", RESULTS_DIR / "paper_trades.csv",
          [("vol-tail", RESULTS_DIR / "paper_trades_btc_hourly_voltail.csv",
            "#b57edc", "tail"),
           ("niche v1 ★PAPER (promoted 08-14)", RESULTS_DIR / "paper_trades_btc_hourly_niche.csv",
            "#f0a500", "dir"),
           ("niche v2", RESULTS_DIR / "paper_trades_btc_hourly_niche_v2.csv",
            "#00c076", "dir")]),
-        ("ETH", "2026-08-04", RESULTS_DIR / "paper_trades_eth.csv",
+        ("ETH", "2026-07-28", RESULTS_DIR / "paper_trades_eth.csv",
          [("vol-tail", RESULTS_DIR / "paper_trades_eth_hourly_voltail.csv",
            "#b57edc", "tail"),
           ("niche v2", RESULTS_DIR / "paper_trades_eth_hourly_niche_v2.csv",

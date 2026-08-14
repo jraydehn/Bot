@@ -2053,16 +2053,6 @@ with tab_sol_hourly_ab:
                     else:
                         _b[_c] = np.nan
                 _b = _b[_b["dt"] >= _abst]
-                # [2026-08-14] PAPER-BOOK display clear (user request at
-                # promotion): the promoted ★PAPER book's display starts
-                # fresh at the clear timestamp. Scoped to the paper book
-                # ONLY — the other challenger windows keep their A/B
-                # start (the 08-12 lesson: clearing comparison windows is
-                # never implied by a paper-display clear). The CSV keeps
-                # the full record for the reads.
-                if "★PAPER" in _lbl:
-                    _b = _b[_b["dt"] >= pd.Timestamp("2026-08-14 05:31:36",
-                                                     tz="UTC")]
                 if _kind == "tail":
                     _res = _b[_b["would_pnl_net"].notna()]
                 elif "side" in _b.columns:

@@ -1668,7 +1668,15 @@ with tab_15m_shadow:
                                     & (_q["offset_pct"] < 0).fillna(False))
                                    | (_q["realized_vol_annual"]
                                       < 0.135).fillna(False)))
-                    # [2026-08-13] xHdamp(sol): CROSS-ASSET hurst sizing —
+                    # [2026-08-13 rehosted same-day, user call] xHdamp(sol) could
+                    # not win as a STANDALONE on the weakest host (base) —
+                    # repurposed onto the leading +YESknife stack before any
+                    # retirement, per the second-life rule. Composes with
+                    # every competitor on fresh data (+NOtrio S .31->.38;
+                    # +YESknife S .42->.47 DD 3,339->2,514; combined
+                    # .51->.55). Forward race vs its host is a PURE sizing
+                    # A/B (identical trades). Original note:
+                    # xHdamp(sol): CROSS-ASSET hurst sizing —
                     # stakes scaled by SOL's hurst stream (causal join,
                     # <=30min stale), clip((H-0.4)/0.2, 0.25, 1.0) with
                     # form+params FROZEN from the SOL deploy (transfer
@@ -1708,7 +1716,7 @@ with tab_15m_shadow:
                             ("g+k +path", _okE & _pa_okE, "longdashdot"),
                             ("g+k +NOtrio", _okE & _n3_okE, "dashdot"),
                             ("g+k +YESknife", _okE & _kn_okE, "solid"),
-                            ("g+k xHdamp(sol)", _okE, "longdash")]:
+                            ("g+k +knife xHdamp", _okE & _kn_okE, "longdash")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",
                                         _gkE["p_market"],
@@ -1727,7 +1735,7 @@ with tab_15m_shadow:
                         _gpE = pd.Series(
                             np.where(_gwE, _gsE * (1 - _gcE) / _gcE, -_gsE)
                             - (_gsE / _gcE) * _gfE, index=_gkE.index)
-                        if _vnE == "g+k xHdamp(sol)":
+                        if _vnE == "g+k +knife xHdamp":
                             _gpE = _gpE * np.clip(
                                 (pd.to_numeric(_gkE["h_sol"],
                                                errors="coerce") - 0.4) / 0.2,

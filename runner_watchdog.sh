@@ -33,6 +33,15 @@ check "paper_trade_runner_15m.py --asset ETH" logs/eth15m_paper_twin.log \
       "python3 -u paper_trade_runner_15m.py --asset ETH --bankroll 2500.0 --loop"
 check "paper_trade_runner_15m.py --asset SOL" logs/paper_sol.log \
       "python3 -u paper_trade_runner_15m.py --asset SOL --bankroll 2500.0 --loop"
+# [2026-08-14] niche runners added — BTC v1 froze-alive ~30h and v2 ~14h
+# unnoticed BECAUSE they were never in this watchdog (the exact failure
+# mode it exists for). Hourly cadence: logs should tick every few min.
+check "btc_hourly_niche_runner.py" logs/btc_hourly_niche.log \
+      "python3 -u btc_hourly_niche_runner.py"
+check "hourly_niche_runner_v2.py --asset BTC" logs/btc_hourly_niche_v2.log \
+      "python3 -u hourly_niche_runner_v2.py --asset BTC"
+check "hourly_niche_runner_v2.py --asset ETH" logs/eth_hourly_niche_v2.log \
+      "python3 -u hourly_niche_runner_v2.py --asset ETH"
 check "btc_hourly_voltail_runner.py" results/btc_hourly_voltail_runner.log \
       "python3 -u btc_hourly_voltail_runner.py"
 check "eth_hourly_voltail_runner.py" results/eth_hourly_voltail_runner.log \

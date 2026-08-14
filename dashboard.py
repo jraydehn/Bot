@@ -1920,12 +1920,23 @@ with tab_sol_hourly_ab:
         # deployable). Runners + CSVs keep accruing; their 08-13/14
         # retirement read happens off-dashboard.
         ("SOL", "2026-07-30", RESULTS_DIR / "paper_trades_sol.csv", []),
+        # [2026-08-14] niche v1/v2 books ADDED TO DISPLAY (user believed the
+        # hourly seat was empty — the live niche challengers were never on
+        # this tab; both forward-positive since 07-28: v1 +$1,506/81 all
+        # weeks green, v2 +$490/133 with wk33 +$1,761 its best). Their
+        # 08-11 v1-vs-v2 review rides forward with visible books now.
         ("BTC", "2026-08-04", RESULTS_DIR / "paper_trades.csv",
          [("vol-tail", RESULTS_DIR / "paper_trades_btc_hourly_voltail.csv",
-           "#b57edc", "tail")]),
+           "#b57edc", "tail"),
+          ("niche v1", RESULTS_DIR / "paper_trades_btc_hourly_niche.csv",
+           "#f0a500", "dir"),
+          ("niche v2", RESULTS_DIR / "paper_trades_btc_hourly_niche_v2.csv",
+           "#00c076", "dir")]),
         ("ETH", "2026-08-04", RESULTS_DIR / "paper_trades_eth.csv",
          [("vol-tail", RESULTS_DIR / "paper_trades_eth_hourly_voltail.csv",
-           "#b57edc", "tail")]),
+           "#b57edc", "tail"),
+          ("niche v2", RESULTS_DIR / "paper_trades_eth_hourly_niche_v2.csv",
+           "#00c076", "dir")]),
     ]
     for _aname, _astart, _prod_csv, _chals in _AB_CFG:
         st.markdown(f"<div style='font-size:1.0rem;font-weight:700;color:#fff;"
@@ -2036,8 +2047,11 @@ with tab_sol_hourly_ab:
                 _b = _b[_b["dt"] >= _abst]
                 if _kind == "tail":
                     _res = _b[_b["would_pnl_net"].notna()]
-                else:
+                elif "side" in _b.columns:
                     _res = _b[(_b["side"] == "yes") & _b["would_pnl_net"].notna()]
+                else:
+                    # niche books are YES-only by design (no side column)
+                    _res = _b[_b["would_pnl_net"].notna()]
                 _pend = int(_b["would_pnl_net"].isna().sum())
                 if len(_res):
                     _rq = _res.sort_values("dt")

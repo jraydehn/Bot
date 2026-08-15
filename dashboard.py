@@ -1496,6 +1496,18 @@ with tab_15m_shadow:
                 _s["edge"] = np.maximum(_ey, _en)
                 _q = _s[_s["edge"] >= 0.04].sort_values("dt").drop_duplicates(
                     "contract_ticker", keep="first")
+                # [2026-08-15] BTC universal regime guard, mirrors the
+                # relaxed runner gate: NO trades blocked when z_drift_6h
+                # > 2.5 (extreme uptrend; validated sim WR 6.3%). Before
+                # the relax these scans were never LOGGED, so no
+                # historical row in the A/B window is affected — this only
+                # governs newly-visible extreme-uptrend scans, keeping
+                # every tab book in lockstep with the paper DUAL.
+                if _a15 == "BTC":
+                    _zdq = pd.to_numeric(_q.get("z_drift_6h"),
+                                         errors="coerce")
+                    _q = _q[~((_q["side"] == "no")
+                              & (_zdq > 2.5).fillna(False))]
                 _cost = np.where(_q["side"] == "yes", _q["p_market"],
                                  1 - _q["p_market"])
                 _win = np.where(_q["side"] == "yes", _q["resolved_yes"] == 1,

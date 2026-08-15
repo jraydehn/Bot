@@ -2992,10 +2992,19 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     #   z_drift > 2.5 blocked: n=16, WR=6.3%, PnL=-$539  → 15 losses avoided, 1 win sacrificed.
     #   All bets kept (z_drift ≤ 2.5): n=189, WR=37.6%, PnL=+$667 vs baseline +$128.
     # Backup: paper_trade_runner_15m_pre_zdrift_no_gate_20260530.py
+    # [2026-08-15 RELAXED, user call] The full-scan skip also starved the
+    # logs (no pass rows -> every A/B book blind in extreme uptrends, and
+    # the YES side / shadow arm never got to trade a regime they might
+    # handle fine). Now: scanning + logging CONTINUE, and only NO-side
+    # trades are blocked this cycle (the validated danger). The same NO
+    # guard is applied to the dashboard book constructions so paper and
+    # tab stay in lockstep on the newly-visible scans.
+    _zdrift_extreme = False
     if asset.upper() == "BTC" and _z_drift_6h is not None and _z_drift_6h > 2.5:
-        print(f"  [z_drift_no_gate] SKIP SCAN — z_drift_6h={_z_drift_6h:+.4f} > 2.5 "
-              f"(extreme uptrend: model p_no unreliable, sim WR=6.3% in this regime)")
-        return
+        _zdrift_extreme = True
+        print(f"  [z_drift_no_gate] NO-BLOCK cycle (relaxed 08-15): "
+              f"z_drift_6h={_z_drift_6h:+.4f} > 2.5 — scans logged, YES "
+              f"allowed, NO blocked")
 
     # ── Pass 1: evaluate all contracts, pick the single best edge ─────────────
     # For each contract determine the better side (YES or NO), then among all
@@ -3292,6 +3301,16 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 skip_p=ticker in _REPLICA_TRADED,
                 skip_m=ticker in _REPLICA_TRADED_MF,
                 p_anchor=_lgbm_shadows.get(ticker))
+            # [2026-08-15] extreme-uptrend NO guard (relaxed z_drift gate):
+            # NO results from either arm are blocked this cycle. Arm P uses
+            # blocked-consumption (matches the dashboard g+k gate); arm M
+            # consumes without trading (matches keep-first + NO-filter).
+            if _zdrift_extreme:
+                if isinstance(_repP, tuple) and _repP[0] == "no":
+                    _repP = ("blocked", _repP[1])
+                if isinstance(_repM, tuple) and _repM[0] == "no":
+                    _REPLICA_TRADED_MF.add(ticker)
+                    _repM = None
             _blocked_edge = 0.0
             if isinstance(_repP, tuple) and _repP[0] == "blocked":
                 _blocked_edge = round(float(_repP[1]), 4)

@@ -252,6 +252,12 @@ def load_trades(asset: str) -> pd.DataFrame:
             df_1h.loc[df_1h["decision"] == "trade", "decision"] = "benchmark"
             _nv = pd.read_csv(RESULTS_DIR / "paper_trades_btc_hourly_niche.csv",
                               low_memory=False)
+            # normalize EXACTLY like _load_csv — raw string logged_at mixed
+            # into the tz-aware column caused the display-cutoff TypeError
+            _nv["logged_at"] = pd.to_datetime(
+                _nv["logged_at"], format="mixed", utc=True,
+                errors="coerce").dt.tz_convert("America/Los_Angeles")
+            _nv = _nv[_nv["logged_at"].notna()]
             _nv = _nv.rename(columns={"p_model": "p_yes_model"})
             _nv["side"] = "yes"
             _nv["decision"] = "trade"

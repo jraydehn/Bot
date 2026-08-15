@@ -1988,9 +1988,15 @@ with tab_15m_shadow:
                             })
                 except Exception:
                     pass
-            _fig15.update_layout(height=320, margin=dict(l=0, r=0, t=48, b=0),
+            # [2026-08-15] legend separated from the plot: with 9+ books the
+            # horizontal legend wraps to 3-4 rows and was spilling onto the
+            # traces (t=48 fit one row). Rows grow upward from y=1.02 into
+            # a 150px top margin; height raised so the plot area is
+            # unchanged.
+            _fig15.update_layout(height=430, margin=dict(l=0, r=0, t=150, b=0),
                                  legend=dict(orientation="h", yanchor="bottom",
-                                             y=1.02, xanchor="left", x=0))
+                                             y=1.02, xanchor="left", x=0,
+                                             font=dict(size=10)))
             st.plotly_chart(_fig15, use_container_width=True)
             st.dataframe(pd.DataFrame(_rows15), hide_index=True,
                          use_container_width=True)

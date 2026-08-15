@@ -27,10 +27,12 @@ ASSET_DISPLAY_FROM = {
     # [cleared 2026-07-28 per user request — fresh read from the last hourly
     # runner restart (fee-true accounting + HMM-state archive logging live;
     # decision logic unchanged). Prior cutoff was 2026-06-18 06:18:28.]
-    # [cleared 2026-08-14 per user request — BTC hourly paper display fresh
-    # from the niche v1 seat promotion. ETH/SOL untouched. Prior BTC cutoff
-    # was 2026-07-28 22:15:13.]
-    "BTC": "2026-08-14 05:31:36",
+    # [2026-08-15: BTC cutoff ROLLED BACK to the niche book's forward start.
+    # The 08-14 05:31 fresh-run cutoff + the paper-seat swap (production ->
+    # benchmark) left the hourly section EMPTY (niche hadn't traded yet) —
+    # user did not want that. Main tab now shows the promoted book's full
+    # record from 07-28.]
+    "BTC": "2026-07-28 12:00:00",
     "ETH": "2026-07-28 22:15:13",
     "SOL": "2026-07-28 22:15:13",
     "BTC_OLD": "2026-07-21 17:27:13",  # cleared 2026-07-21 — ported 9 structural/infra bug

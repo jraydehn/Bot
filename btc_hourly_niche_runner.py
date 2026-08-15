@@ -181,6 +181,18 @@ def main() -> None:
             resolve_pending(arch)
         except Exception as e:
             print(f"  [error] loop failed (continuing): {e}")
+        # [2026-08-15] heartbeat: these runners are silent on uneventful
+        # cycles, so the log-mtime watchdog (30min) churn-restarted them
+        # while idle. One [hb] line per ~10min keeps mtime honest —
+        # silence now means FROZEN, not quiet.
+        global _last_hb
+        try:
+            _last_hb
+        except NameError:
+            _last_hb = 0
+        if time.time() - _last_hb >= 600:
+            print("[hb]", flush=True)
+            _last_hb = time.time()
         time.sleep(LOOP_SEC)
 
 

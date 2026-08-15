@@ -1442,6 +1442,11 @@ with tab_15m_shadow:
             _books15 = [("production", "p_model_15m", "#4f8bf9"),
                         ("shadow", "p_gbdt", "#f0a500"),
                         ("blend 50/50", "p_blend", "#b57edc")]
+            # [2026-08-14] BTC: blend book RETIRED from display (user call —
+            # seat given to DUAL v3c below; the blend was an early-harness
+            # construct never in contention). ETH keeps its blend line.
+            if _a15 == "BTC":
+                _books15 = [b for b in _books15 if b[0] != "blend 50/50"]
             # [2026-08-05 pm] BTC-only BENCHMARK book: z-expansion applied to
             # the MARKET probability (k=1.8 frozen from SOL, no fitting) —
             # the favorite-longshot bias trade. Backtest 06-01+: +$6,243,
@@ -1560,6 +1565,7 @@ with tab_15m_shadow:
                             "n": len(_q), "WR/BE": "—",
                             "maxDD": f"${float((_php.cumsum().cummax() - _php.cumsum()).max()):,.0f}",
                         })
+                        _shad_book["pnl_h"] = _php.values
                     except Exception:
                         pass
                 if _a15 == "BTC" and _lbl != "mkt-fav k1.8":
@@ -1674,6 +1680,7 @@ with tab_15m_shadow:
                         _row15["g+k xMFconv"] = (
                             f"${_gpC.sum():+,.0f} (n={len(_gk15)}, "
                             f"DD ${_ddC:,.0f})")
+                        _prod_gk["pnl_mf"] = _gpC.values
                 # [2026-08-05] ETH gated+kelly: the 5 live gates that SURVIVED
                 # marginal testing (Y_stoch5m44, Y_stoch1h_mid[rsi<35 rescue],
                 # N_daily_sw, N_consec, N_downcandle). REJECTED as inverted on
@@ -1924,6 +1931,37 @@ with tab_15m_shadow:
                             "WR/BE": "—",
                             "maxDD": f"${_ddd2:,.0f}",
                         })
+                    # [2026-08-14] DUAL v3c (user call, takes the blend's
+                    # seat): 12-gate g+k arm sized by xMFconv (mkt-fav
+                    # conviction tiers) + shadow arm sized by xHdamp
+                    # (SOL-hurst). Window: +$5,494 / S 0.99 / DD $765 vs
+                    # v2's +$8,749 / 0.77 / $948 — the risk-first
+                    # composition and the registered GO-LIVE shape (halves
+                    # net for ~double Sharpe). Races v2 on the tab; paper
+                    # adoption decisions at the 08-18 read.
+                    if ("pnl_mf" in getattr(_prod_gk, "columns", [])
+                            and "pnl_h" in getattr(_shad_book, "columns", [])):
+                        _rows_d3 = ([(rr["dt"], rr["pnl_mf"])
+                                     for _, rr in _prod_gk.iterrows()]
+                                    + [(rr["dt"], rr["pnl_h"])
+                                       for _, rr in _shad_book.iterrows()])
+                        _Pd3 = pd.DataFrame(_rows_d3, columns=["dt", "pnl"]
+                                            ).sort_values("dt")
+                        if len(_Pd3):
+                            _fig15.add_trace(go.Scatter(
+                                x=[_cfg15["start"]] + list(_Pd3["dt"]),
+                                y=[0.0] + list(_Pd3["pnl"].cumsum()),
+                                name="DUAL v3c (MFconv + shadow xHdamp)",
+                                line=dict(color="#b57edc", width=2,
+                                          dash="dash")))
+                            _cumd3 = _Pd3["pnl"].cumsum()
+                            _rows15.append({
+                                "book": "DUAL v3c (MFconv + shadow xHdamp)",
+                                "net": f"${_Pd3['pnl'].sum():+,.0f}",
+                                "n": len(_Pd3),
+                                "WR/BE": "—",
+                                "maxDD": f"${float((_cumd3.cummax() - _cumd3).max()):,.0f}",
+                            })
                 except Exception:
                     pass
             _fig15.update_layout(height=320, margin=dict(l=0, r=0, t=48, b=0),

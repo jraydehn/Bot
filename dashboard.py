@@ -1516,6 +1516,52 @@ with tab_15m_shadow:
                 if _a15 == "BTC" and _lbl == "shadow":
                     _shad_book = _q[["contract_ticker", "dt", "side"]].copy()
                     _shad_book["pnl"] = _pnl.values
+                    # [2026-08-14] shadow xHdamp(sol): the FROZEN
+                    # cross-asset hurst sizing on the SHADOW book (5th
+                    # book, same params). Earlier "hurst dead on BTC" was
+                    # tested on prod/mkt-fav only — the shadow's later-scan
+                    # population responds: S 0.23->0.39, DD 988->625, net
+                    # +$399, and wk33 flips -430 -> +105. Prod-cosign gate
+                    # tested and NOT stacked (composed S 0.37 < 0.39 —
+                    # hurst subsumes the zero-margin disagreement bucket).
+                    try:
+                        _shs2 = pd.read_csv(
+                            ASSET_CSV_15M["SOL"],
+                            usecols=["logged_at", "hurst_exponent_5m"],
+                            low_memory=False)
+                        _shs2["dt"] = pd.to_datetime(
+                            _shs2["logged_at"], errors="coerce", utc=True,
+                            format="mixed")
+                        _shs2["h"] = pd.to_numeric(
+                            _shs2["hurst_exponent_5m"], errors="coerce")
+                        _shs2 = _shs2.dropna(
+                            subset=["dt", "h"]).sort_values("dt")
+                        _s2t = _shs2["dt"].astype("int64").values / 1e9
+                        _q2t = _q["dt"].astype("int64").values / 1e9
+                        _i2 = np.searchsorted(_s2t, _q2t, side="right") - 1
+                        _h2 = np.where(
+                            _i2 >= 0,
+                            _shs2["h"].values[np.clip(_i2, 0, None)], np.nan)
+                        _a2 = _q2t - np.where(
+                            _i2 >= 0, _s2t[np.clip(_i2, 0, None)], np.nan)
+                        _hm2 = pd.Series(
+                            np.clip((np.where(_a2 <= 1800, _h2, np.nan)
+                                     - 0.4) / 0.2, 0.25, 1.0),
+                            index=_q.index).fillna(1.0)
+                        _php = _pnl * _hm2
+                        _fig15.add_trace(go.Scatter(
+                            x=[_cfg15["start"]] + list(_q["dt"]),
+                            y=[0.0] + list(_php.cumsum()),
+                            name="shadow xHdamp(sol)",
+                            line=dict(color=_clr, width=1.5, dash="dash")))
+                        _rows15.append({
+                            "book": "shadow xHdamp(sol)",
+                            "net": f"${_php.sum():+,.0f}",
+                            "n": len(_q), "WR/BE": "—",
+                            "maxDD": f"${float((_php.cumsum().cummax() - _php.cumsum()).max()):,.0f}",
+                        })
+                    except Exception:
+                        pass
                 if _a15 == "BTC" and _lbl != "mkt-fav k1.8":
                     _yes15 = _q["side"] == "yes"
                     _no15 = ~_yes15

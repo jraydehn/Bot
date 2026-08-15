@@ -243,33 +243,6 @@ def load_trades(asset: str) -> pd.DataFrame:
 
     if not df_1h.empty:
         df_1h["timeframe"] = "1h"
-    # [2026-08-14] BTC hourly PAPER SEAT = niche v1 (promoted). The main
-    # tab's hourly trades must show the PROMOTED book, not the production
-    # benchmark (user caught the discrepancy: production trades were
-    # displaying as "paper" post-clear). Production rows stay loaded for
-    # signal panels but their trades are relabeled 'benchmark' so paper
-    # PnL/trade views show niche v1 only.
-    if asset == "BTC" and not df_1h.empty:
-        try:
-            df_1h.loc[df_1h["decision"] == "trade", "decision"] = "benchmark"
-            _nv = pd.read_csv(RESULTS_DIR / "paper_trades_btc_hourly_niche.csv",
-                              low_memory=False)
-            # normalize EXACTLY like _load_csv — raw string logged_at mixed
-            # into the tz-aware column caused the display-cutoff TypeError
-            _nv["logged_at"] = pd.to_datetime(
-                _nv["logged_at"], format="mixed", utc=True,
-                errors="coerce").dt.tz_convert("America/Los_Angeles")
-            _nv = _nv[_nv["logged_at"].notna()]
-            _nv = _nv.rename(columns={"p_model": "p_yes_model"})
-            _nv["side"] = "yes"
-            _nv["decision"] = "trade"
-            _nv["timeframe"] = "1h"
-            _nv["bet_amount"] = pd.to_numeric(_nv.get("stake"),
-                                              errors="coerce").fillna(100.0)
-            _nv["net_edge"] = _nv.get("fee_adj_edge")
-            df_1h = pd.concat([df_1h, _nv], ignore_index=True, sort=False)
-        except Exception:
-            pass
     if not df_15m.empty:
         # Normalise 15m column names to match hourly dashboard expectations
         df_15m = df_15m.rename(columns={

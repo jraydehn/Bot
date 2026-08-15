@@ -27,12 +27,12 @@ ASSET_DISPLAY_FROM = {
     # [cleared 2026-07-28 per user request — fresh read from the last hourly
     # runner restart (fee-true accounting + HMM-state archive logging live;
     # decision logic unchanged). Prior cutoff was 2026-06-18 06:18:28.]
-    # [2026-08-15: BTC cutoff ROLLED BACK to the niche book's forward start.
-    # The 08-14 05:31 fresh-run cutoff + the paper-seat swap (production ->
-    # benchmark) left the hourly section EMPTY (niche hadn't traded yet) —
-    # user did not want that. Main tab now shows the promoted book's full
-    # record from 07-28.]
-    "BTC": "2026-07-28 12:00:00",
+    # [2026-08-15 FINAL per user: BTC hourly paper = niche v1 book, displayed
+    # FROM THE PROMOTION START (08-13 22:31 UTC). NOTE: the niche runner was
+    # frozen 08-14 03:14 -> 08-15 16:45 UTC (watchdog cron was TCC-blocked),
+    # so the display will be sparse until it resumes trading — that is
+    # correct, not missing data.]
+    "BTC": "2026-08-13 22:31:00",
     "ETH": "2026-07-28 22:15:13",
     "SOL": "2026-07-28 22:15:13",
     "BTC_OLD": "2026-07-21 17:27:13",  # cleared 2026-07-21 — ported 9 structural/infra bug
@@ -243,6 +243,28 @@ def load_trades(asset: str) -> pd.DataFrame:
 
     if not df_1h.empty:
         df_1h["timeframe"] = "1h"
+    # [2026-08-15 FINAL] BTC hourly PAPER = niche v1 (promoted 08-13).
+    # Production trades relabeled 'benchmark' (rows stay for signal
+    # panels); niche trades appended, normalized like _load_csv.
+    if asset == "BTC" and not df_1h.empty:
+        try:
+            df_1h.loc[df_1h["decision"] == "trade", "decision"] = "benchmark"
+            _nv = pd.read_csv(RESULTS_DIR / "paper_trades_btc_hourly_niche.csv",
+                              low_memory=False)
+            _nv["logged_at"] = pd.to_datetime(
+                _nv["logged_at"], format="mixed", utc=True,
+                errors="coerce").dt.tz_convert("America/Los_Angeles")
+            _nv = _nv[_nv["logged_at"].notna()]
+            _nv = _nv.rename(columns={"p_model": "p_yes_model"})
+            _nv["side"] = "yes"
+            _nv["decision"] = "trade"
+            _nv["timeframe"] = "1h"
+            _nv["bet_amount"] = pd.to_numeric(_nv.get("stake"),
+                                              errors="coerce").fillna(100.0)
+            _nv["net_edge"] = _nv.get("fee_adj_edge")
+            df_1h = pd.concat([df_1h, _nv], ignore_index=True, sort=False)
+        except Exception:
+            pass
     if not df_15m.empty:
         # Normalise 15m column names to match hourly dashboard expectations
         df_15m = df_15m.rename(columns={

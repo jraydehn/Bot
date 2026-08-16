@@ -52,9 +52,18 @@ with np.errstate(divide="ignore", invalid="ignore"):
     _ss = pd.Series(df["spot"].values, index=pd.DatetimeIndex(df["dt"]))
     _rl = _ss.rolling("6h")
     df["z_spot_6h"] = ((_ss - _rl.mean()) / _rl.std()).values
+# [2026-08-16 addendum] RESCUE-D from the user-directed regime-interaction
+# grid (162 combos; markov-bullish seeds all failed — survivors uniformly
+# point at OVERSOLD context, thesis-coherent): WEAK edges (0.00-0.03, a
+# tier below the near-miss rescue) become winners when spot is stretched
+# >1 sigma BELOW its 6h mean. Discovery: n=54, 67% WR, +$1,436, p=0.017,
+# 3/3 wks, topday 29%. Mirror of RESCUE-C — the dislocation pair:
+# stretched up -> NO fade; stretched down -> trust faint YES edges.
 BOOKS = {
     "RESCUE-A": (res["p_market"].between(0.35, 0.65) & (df["edge_yes"] >= 0.03)
                  & (df["edge_yes"] < 0.06) & (df["adx_1h"] >= 22), "yes"),
+    "RESCUE-D": (res["p_market"].between(0.35, 0.65) & (df["edge_yes"] >= 0.00)
+                 & (df["edge_yes"] < 0.03) & (df["z_spot_6h"] < -1.0), "yes"),
     "RESCUE-B": (res["p_market"].between(0.20, 0.80) & (df["edge_no"] >= 0.06)
                  & (df["liq_bias"] >= 1.0), "no"),
     "RESCUE-C": (res["p_market"].between(0.20, 0.80) & (df["edge_no"] >= 0.06)

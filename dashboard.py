@@ -1492,6 +1492,13 @@ with tab_15m_shadow:
             _books15 = [("production", "p_model_15m", "#4f8bf9"),
                         ("shadow", "p_gbdt", "#f0a500"),
                         ("blend 50/50", "p_blend", "#b57edc")]
+            # [2026-08-15] ETH refresh challenger RETIRED (5 second-life
+            # nulls; p_gbdt blank on new ETH rows). Its line stays as a
+            # frozen record; label marks the retirement. Seat reserved
+            # for the ~08-30 retrain candidate.
+            if _a15 == "ETH":
+                _books15 = [(("shadow (retired 08-15)" if n == "shadow"
+                              else n), c, k) for n, c, k in _books15]
             # [2026-08-14] BTC: blend book RETIRED from display (user call —
             # seat given to DUAL v3c below; the blend was an early-harness
             # construct never in contention). ETH keeps its blend line.

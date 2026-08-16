@@ -5827,16 +5827,19 @@ def main() -> None:
     # Log-only; decisions untouched; judged on forward paper from 08-05.
     global _ETH_SHADOW
     _ETH_SHADOW = None
+    # [2026-08-15 RETIRED, user call] The ETH refresh challenger is fully
+    # adjudicated dead — five second-life roles tested, five nulls
+    # (witness / ensemble / conviction-sizing / divergence signal /
+    # rescue; divergence-outcome corr −0.004). Root cause: shares
+    # production's 20 features, so it is blind wherever production is.
+    # p_gbdt goes blank on ETH rows from here; the frozen record stays in
+    # the CSV and on the tab. The seat is reserved for the ~08-30
+    # retrain candidate (pm-path + witness-stance + calibration payload —
+    # NEW information, not a new fit of the old features). SOL's p_gbdt
+    # companion is NOT touched (pending inverse-witness re-measure).
     if asset == "ETH":
-        try:
-            import btc15m_refresh_ensemble  # noqa: F401 — pickle class resolution
-            _shp = Path(__file__).parent / "models" / "lgbm_15m_eth_refresh_20260805.pkl"
-            with open(_shp, "rb") as _f:
-                _ETH_SHADOW = pickle.load(_f)
-            print(f"  [eth_refresh_shadow] Loaded ({len(_ETH_SHADOW['features'])} features, "
-                  f"5-seed ensemble) → p_gbdt column")
-        except Exception as _ere:
-            print(f"  [eth_refresh_shadow] load failed: {_ere}")
+        print("  [eth_refresh_shadow] RETIRED 2026-08-15 — p_gbdt blank; "
+              "seat reserved for the ~08-30 retrain candidate")
 
     if _is_live_or_dual:
         _live_csv = live_trading.get_live_csv_path(asset)

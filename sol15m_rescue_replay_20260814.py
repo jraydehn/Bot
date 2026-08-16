@@ -15,7 +15,9 @@ FREEZE = pd.Timestamp("2026-08-14 07:30", tz="UTC")
 df = pd.read_csv("results/paper_trades_sol15m.csv", low_memory=False)
 df["dt"] = pd.to_datetime(df["logged_at"], errors="coerce", utc=True, format="mixed")
 for c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes", "sol_persist_score",
-          "kalman_residual_15m", "z_drift_6h", "d45_vol_ratio"]:
+          "kalman_residual_15m", "z_drift_6h", "d45_vol_ratio",
+          "hurst_exponent_5m", "kalman_residual", "stoch_cross_1h",
+          "oi_chg_pct", "slope120_stoch_k_15m", "offset_pct", "stoch_k_1h"]:
     df[c] = pd.to_numeric(df.get(c), errors="coerce")
 SWAP = pd.Timestamp("2026-08-12 19:05", tz="UTC")
 df["p_slope"] = np.where(df["dt"] >= SWAP, df["p_model_15m"], df["p_gbdt"])
@@ -31,10 +33,32 @@ q = ab.sort_values("dt").drop_duplicates("contract_ticker", keep="first").copy()
 near = q["edge"].between(0.02, 0.04)
 pblk = (q["side"] == "yes") & (q["edge"] >= 0.04) \
     & ~(q["sol_persist_score"] >= 3).fillna(False)
+# [2026-08-16 addendum] From the user-directed 1,482-combo regime x signal
+# grid (2 survivors ~= noise floor; frozen on mechanism + continuity):
+#   RESC-3b: RESC-3 conditioned on 6h-markov Sideways — volume expansion
+#            INSIDE A RANGE is breakout-initiation (70% WR, +$1,636,
+#            p=0.006, 3/3wks, top 22%); explains raw RESC-3's wobble
+#            (same signal in trend = late-chasing). RESC-3 kept for
+#            comparison; 3b is the primary form at evaluation.
+#   RESC-4:  markov-blocked NO rescued by hurst>=0.6 & kalman_resid<0
+#            (persistent tape, price pinned under fair — the block
+#            misfires; n=40, 55% WR, +$1,957, p=0.018, 3/3wks). LOWER
+#            prior confidence: one validated signal overriding another.
+_m6 = q["markov_sol_6h"].astype(str)
+_mkv_no_blk = ((q["side"] == "no") & (q["edge"] >= 0.04)
+               & ~(q["p_market"] > 0.8)
+               & ((( _m6 == "Bull") & (q["offset_pct"].fillna(0) > -0.006))
+                  | ((q["markov_sol_4h"].astype(str) == "Sideways")
+                     & (q["stoch_k_1h"].fillna(50) < 90))))
 BOOKS = {
     "RESC-1 nearmiss&kalman<0": near & (q["kalman_residual_15m"] < 0).fillna(False),
     "RESC-2 persistblk&zd<0.59": pblk & (q["z_drift_6h"] < 0.59).fillna(False),
     "RESC-3 nearmiss&d45vr>=.18": near & (q["d45_vol_ratio"] >= 0.18).fillna(False),
+    "RESC-3b +6hSideways": (near & (q["d45_vol_ratio"] >= 0.18).fillna(False)
+                            & (_m6 == "Sideways")),
+    "RESC-4 mkvNO&H>=.6&kalm<0": (_mkv_no_blk
+                                  & (q["hurst_exponent_5m"] >= 0.6).fillna(False)
+                                  & (q["kalman_residual"] < 0).fillna(False)),
 }
 for nm, m in BOOKS.items():
     s = q[m]

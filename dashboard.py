@@ -155,8 +155,34 @@ thead tr th {{ background-color: #1f1f1f !important; color: #aaa !important; fon
 [data-testid="stTabs"] button {{ color: #888 !important; }}
 [data-testid="stTabs"] button[aria-selected="true"] {{ color: #4da6ff !important; border-bottom-color: #4da6ff !important; }}
 </style>
-<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
 """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# [2026-08-15] Live update WITHOUT page reloads. The old mechanism was a
+# <meta http-equiv="refresh"> tag — a full BROWSER reload every 60s (scroll
+# reset, flicker, tab bounce). Replaced with a st.fragment timer: every
+# REFRESH_SECONDS it checks the data files' mtimes and, ONLY when something
+# actually changed, triggers an in-place app rerun over the websocket —
+# Streamlit diffs the elements, so scroll position and the active tab are
+# preserved and nothing repaints unless its content changed. Quiet periods
+# cause zero re-renders at all.
+# ---------------------------------------------------------------------------
+@st.fragment(run_every=REFRESH_SECONDS)
+def _live_update():
+    import glob as _g, os as _os
+    _files = (_g.glob(str(RESULTS_DIR / "paper_trades*.csv"))
+              + _g.glob(str(RESULTS_DIR / "*backfill*.csv")))
+    try:
+        _sig = max(_os.path.getmtime(_f) for _f in _files)
+    except ValueError:
+        return
+    if st.session_state.get("_data_sig") is None:
+        st.session_state["_data_sig"] = _sig
+    elif _sig != st.session_state["_data_sig"]:
+        st.session_state["_data_sig"] = _sig
+        st.rerun(scope="app")
+
+_live_update()
 
 
 # ---------------------------------------------------------------------------
@@ -930,7 +956,7 @@ st.markdown(f"""
 </div>
 <div style="color:#555;font-size:0.78rem;margin-bottom:4px;">
   BTC · ETH · SOL Event Contracts &nbsp;|&nbsp; Live Signal Engine &nbsp;|&nbsp;
-  Updated: {now_str} &nbsp;|&nbsp; Auto-refresh: {REFRESH_SECONDS}s
+  Updated: {now_str} &nbsp;|&nbsp; live update on data change (no page reload)
 </div>
 """, unsafe_allow_html=True)
 

@@ -5168,8 +5168,8 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
         m6 = str(sig.get("markov_sol_6h") or "")
         m4 = str(sig.get("markov_sol_4h") or "")
         m1 = str(sig.get("markov_sol_1h") or "")
-        sc1 = _fv("stoch_cross_1h", 0.0) or 0.0
-        oi = _fv("oi_chg_pct", 0.0) or 0.0
+        sc1 = _fv("stoch_cross_1h", 0.0)
+        oi = _fv("oi_chg_pct", 0.0)
         zd = _fv("z_drift_6h")
         off = float(offset_pct)
         if side == "yes":
@@ -5194,9 +5194,9 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
                                           and slope_sk >= 40):
                 return blocked
             gn = ((m6 == "Bull" and off > -0.006)
-                  or (m4 == "Sideways" and (sk1 or 50.0) < 90.0))
+                  or (m4 == "Sideways" and sk1 < 90.0))
             rn = ((m6 == "Bull" and off <= -0.006)
-                  or (m4 == "Sideways" and (sk1 or 50.0) >= 90.0))
+                  or (m4 == "Sideways" and sk1 >= 90.0))
             if gn and not rn:
                 return blocked
             if zd is not None and zd < 0.65:
@@ -5209,7 +5209,7 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
                     return blocked
             except (TypeError, ValueError):
                 pass
-            if m1 == "Sideways" and pm >= 0.70 and (sk1 or 50.0) >= 70:
+            if m1 == "Sideways" and pm >= 0.70 and sk1 >= 70:
                 return blocked
             if m1 == "Sideways" and m4 == "Sideways" and pm >= 0.55:
                 return blocked
@@ -5220,19 +5220,23 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
         rsi1 = _fv("rsi_1h")
         cd15 = _fv("consec_dir_15m")
         d15 = _fv("dir_15m")
-        body = _fv("body_15m", 0.0) or 0.0
+        body = _fv("body_15m", 0.0)
         bp5 = _fv("bp_5m", 0.5)
         liq = _fv("liq_score")
+        # [2026-08-17 falsy-zero purge — THIRD strike of `x or default`:
+        # sk5=0.00 (deeply oversold) became 50 and the >=44 gate blocked
+        # a 19:1 winner (+$4,942 missed). _fv already defaults None/NaN
+        # and PRESERVES legitimate zeros; the extra `or` is the bug.]
         if side == "yes":
-            if (sk5 or 50.0) >= 44:
+            if sk5 >= 44:
                 return blocked
-            if 30.0 <= (sk1 or 50.0) < 70.0 and not (
+            if 30.0 <= sk1 < 70.0 and not (
                     rsi1 is not None and rsi1 < 35.0):
                 return blocked
         else:
             if md == "Sideways":
                 return blocked
-            if cd15 is not None and cd15 <= -1 and (sk15 or 50.0) <= 40:
+            if cd15 is not None and cd15 <= -1 and sk15 <= 40:
                 return blocked
             if d15 == -1 and pm >= 0.50:
                 rescue = (body > 0.60 and (bp5 if bp5 is not None else 0.5)

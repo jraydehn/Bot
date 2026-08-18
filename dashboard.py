@@ -1601,14 +1601,62 @@ with tab_15m_shadow:
                 if _a15 == "BTC" and _lbl == "shadow":
                     _shad_book = _q[["contract_ticker", "dt", "side"]].copy()
                     _shad_book["pnl"] = _pnl.values
-                    # [2026-08-14] shadow xHdamp(sol): the FROZEN
-                    # cross-asset hurst sizing on the SHADOW book (5th
-                    # book, same params). Earlier "hurst dead on BTC" was
-                    # tested on prod/mkt-fav only — the shadow's later-scan
-                    # population responds: S 0.23->0.39, DD 988->625, net
-                    # +$399, and wk33 flips -430 -> +105. Prod-cosign gate
-                    # tested and NOT stacked (composed S 0.37 < 0.39 —
-                    # hurst subsumes the zero-margin disagreement bucket).
+                    # [2026-08-18 SHADOW-KV PACKAGE — the leave-no-stone
+                    # gate search's product, user-wired same day] Two
+                    # gated shadow monitor books. History caveat:
+                    # kalman_velocity_15m / garch_vol_15m only log on BTC
+                    # from 08-18 (runner deploy) — blank history FAILS
+                    # OPEN, so the lines' pre-08-18 segment is gated only
+                    # by the (historically-logged) vol-contraction rule;
+                    # the fully-gated record accrues forward.
+                    #   +KVpkg  = drop kalman_vel_15m<1e-4 | YES&d15_rv<-0.012
+                    #             (the PAPER v2 arm's exact gate)
+                    #   kv|garch = drop kalman_vel_15m<1e-4 | garch_vol>=0.0769
+                    #             (window S 0.82/DD $103 on n=29 — carved,
+                    #             monitor-only until it earns n)
+                    try:
+                        _kvq = pd.to_numeric(
+                            _q.get("kalman_velocity_15m"), errors="coerce")
+                        _rvq = pd.to_numeric(
+                            _q.get("d15_realized_vol_annual"),
+                            errors="coerce")
+                        _gvq = pd.to_numeric(
+                            _q.get("garch_vol_15m"), errors="coerce")
+                        _kv_blk = (_kvq < 0.0001).fillna(False)
+                        _pkg_blk = _kv_blk | ((_q["side"] == "yes")
+                                              & (_rvq < -0.012).fillna(False))
+                        _gar_blk = _kv_blk | (_gvq >= 0.0769).fillna(False)
+                        for _bknm, _blkm, _dsh in [
+                                ("shadow +KVpkg (paper arm)", _pkg_blk, "solid"),
+                                ("shadow kv|garch", _gar_blk, "dot")]:
+                            _qb = _q[~np.asarray(_blkm, bool)]
+                            _pb = _pnl[~np.asarray(_blkm, bool)]
+                            if not len(_qb):
+                                continue
+                            _fig15.add_trace(go.Scatter(
+                                x=[_cfg15["start"]] + list(_qb["dt"]),
+                                y=[0.0] + list(_pb.cumsum()),
+                                name=_bknm,
+                                line=dict(color=_clr, width=1.5,
+                                          dash=_dsh)))
+                            _cb = _pb.cumsum()
+                            _rows15.append({
+                                "book": _bknm,
+                                "net": f"${_pb.sum():+,.0f}",
+                                "n": len(_qb), "WR/BE": "—",
+                                "maxDD": f"${float((_cb.cummax() - _cb).max()):,.0f}",
+                            })
+                        _shad_kv_book = _q[~np.asarray(_pkg_blk, bool)][
+                            ["contract_ticker", "dt", "side"]].copy()
+                        _shad_kv_book["pnl"] = _pnl[
+                            ~np.asarray(_pkg_blk, bool)].values
+                    except Exception:
+                        _shad_kv_book = _shad_book
+                    # [2026-08-14] shadow xHdamp(sol) — RETIRED FROM
+                    # DISPLAY 08-18 (user cleanup: case inverted with
+                    # melt-up data, S 0.12 vs raw 0.13). The sizing
+                    # computation stays: DUAL v3c (pre-registered round-1
+                    # leader) consumes _shad_book["pnl_h"].
                     try:
                         _shs2 = pd.read_csv(
                             ASSET_CSV_15M["SOL"],
@@ -1634,17 +1682,6 @@ with tab_15m_shadow:
                                      - 0.4) / 0.2, 0.25, 1.0),
                             index=_q.index).fillna(1.0)
                         _php = _pnl * _hm2
-                        _fig15.add_trace(go.Scatter(
-                            x=[_cfg15["start"]] + list(_q["dt"]),
-                            y=[0.0] + list(_php.cumsum()),
-                            name="shadow xHdamp(sol)",
-                            line=dict(color=_clr, width=1.5, dash="dash")))
-                        _rows15.append({
-                            "book": "shadow xHdamp(sol)",
-                            "net": f"${_php.sum():+,.0f}",
-                            "n": len(_q), "WR/BE": "—",
-                            "maxDD": f"${float((_php.cumsum().cummax() - _php.cumsum()).max()):,.0f}",
-                        })
                         _shad_book["pnl_h"] = _php.values
                     except Exception:
                         pass
@@ -1976,43 +2013,48 @@ with tab_15m_shadow:
                         _fig15.add_trace(go.Scatter(
                             x=[_cfg15["start"]] + list(_Pd["dt"]),
                             y=[0.0] + list(_Pd["pnl"].cumsum()),
-                            name="DUAL v1 ★PAPER (reverted 08-17)",
+                            name="DUAL v1 (prod+mktfav)",
                             line=dict(color="#00c076", width=2,
                                       dash="dash")))
                         _cumd = _Pd["pnl"].cumsum()
                         _ddd = float((_cumd.cummax() - _cumd).max())
                         _rows15.append({
-                            "book": "DUAL v1 ★PAPER (reverted 08-17)",
+                            "book": "DUAL v1 (prod+mktfav)",
                             "net": f"${_Pd['pnl'].sum():+,.0f}",
                             "n": len(_Pd),
                             "WR/BE": "—",
                             "maxDD": f"${_ddd:,.0f}",
                         })
-                    # [2026-08-14] DUAL v2: prod g+k + SHADOW instead of
-                    # mkt-fav. Held the paper seat 08-14..08-17, then
-                    # [2026-08-17 REVERTED to v1] — shadow arm bled
-                    # -$911/144 (60% WR) on paper while v1 led; even with
-                    # the forward-confirmed vol-contraction repair the
-                    # fixed shadow (+$87/118) lost to mkt-fav (+$735/261)
-                    # on the same window. Stays on the tab as a bench
-                    # book for the 08-25 read.
+                    # [2026-08-14] DUAL v2: prod g+k + SHADOW. Held the
+                    # seat 08-14..08-17 ungated (arm bled -$911/144),
+                    # reverted to v1 for hours, then [2026-08-18 RESTORED
+                    # + KV PACKAGE, user call after the exhaustive gate
+                    # search]: the flat arm is now the KV-gated shadow
+                    # (kalman_vel_15m<1e-4 | YES&d15_rv<-0.012 blocks).
+                    # This line uses the gated arm — matches the paper
+                    # book going forward (history: gate partially active,
+                    # see the monitor-book comment above). Raw-v2 line
+                    # removed in the same cleanup (dominated by
+                    # construction).
+                    _sb2 = (_shad_kv_book if "_shad_kv_book" in dict(locals())
+                            else _shad_book)
                     _rows_d2 = ([(rr["dt"], rr["pnl"])
                                  for _, rr in _Ad.iterrows()]
                                 + [(rr["dt"], rr["pnl"])
-                                   for _, rr in _shad_book.iterrows()])
+                                   for _, rr in _sb2.iterrows()])
                     _Pd2 = pd.DataFrame(_rows_d2, columns=["dt", "pnl"]
                                         ).sort_values("dt")
                     if len(_Pd2):
                         _fig15.add_trace(go.Scatter(
                             x=[_cfg15["start"]] + list(_Pd2["dt"]),
                             y=[0.0] + list(_Pd2["pnl"].cumsum()),
-                            name="DUAL v2 (prod+shadow)",
+                            name="DUAL v2+KV ★PAPER (restored 08-18)",
                             line=dict(color="#00c076", width=2,
                                       dash="dot")))
                         _cumd2 = _Pd2["pnl"].cumsum()
                         _ddd2 = float((_cumd2.cummax() - _cumd2).max())
                         _rows15.append({
-                            "book": "DUAL v2 (prod+shadow)",
+                            "book": "DUAL v2+KV ★PAPER (restored 08-18)",
                             "net": f"${_Pd2['pnl'].sum():+,.0f}",
                             "n": len(_Pd2),
                             "WR/BE": "—",

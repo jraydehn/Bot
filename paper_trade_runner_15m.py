@@ -806,6 +806,12 @@ CSV_COLUMNS = [
     "kalman_velocity_5m", "kalman_residual_5m", "hurst_exponent_5m", "ou_theta_5m",
     "kalman_velocity_15m", "kalman_residual_15m", "hurst_exponent_15m", "ou_theta_15m",
     "arima_forecast_15m",
+    # [2026-08-18 SHADOW-KV PACKAGE] BTC-only per-scan GARCH(1,1) 15m vol
+    # forecast + surprise (500-bar trailing fit on direct 15m klines) —
+    # inputs to the tab's shadow kv|garch monitor book. ensure_csv migrates
+    # existing files; all other CSV readers audited (dashboard reads
+    # generically, referees/seeding use explicit columns).
+    "garch_vol_15m", "garch_sur_15m",
     # [2026-07-20] Distinguishes a real Kalshi live order from a paper-twin
     # simulated row when both processes log to the same CSV concurrently
     # (added after the live+paper-twin pattern made every trade appear to be
@@ -3008,6 +3014,48 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                                                     _time_z.time())
         except Exception:
             sig["z_spot_6h_live"] = None
+    # [2026-08-18 SHADOW-KV PACKAGE] BTC: 15m Kalman family + GARCH(1,1)
+    # vol forecast, once per scan cycle on COMPLETED 15m bars fetched
+    # directly (the 1m resample spans only ~100 bars; the exhaustive
+    # shadow gate search validated Kalman on the last 80 and GARCH on a
+    # 500-bar trailing fit). Feeds the DUAL v2 shadow-arm gate package in
+    # _replica_decide_btc and the tab's monitor books. Fail-open: on any
+    # failure the keys stay blank and the arm trades ungated this cycle
+    # (matches the replay, where NaN never blocked).
+    if asset.upper() == "BTC":
+        try:
+            _b15d = fetch_recent_candles("15m", 520, asset="BTC")
+            if _b15d is not None and len(_b15d) >= 40:
+                _now15u = pd.Timestamp.now(tz="UTC")
+                _b15d = _b15d[_b15d.index + pd.Timedelta("15min") <= _now15u]
+            if _b15d is not None and len(_b15d) >= 40:
+                _khoB = _kalman_hurst_ou_at(_b15d.iloc[-80:])
+                sig["kalman_velocity_15m"] = _khoB["kalman_velocity"]
+                sig["kalman_residual_15m"] = _khoB["kalman_residual"]
+                sig["hurst_exponent_15m"] = _khoB["hurst_exponent"]
+                sig["ou_theta_15m"] = _khoB["ou_theta"]
+                _lrB = np.diff(np.log(
+                    _b15d["close"].values.astype(float)[-501:])) * 100
+                if len(_lrB) >= 200:
+                    import warnings as _warn_g
+                    from arch import arch_model as _arch_m
+                    with _warn_g.catch_warnings():
+                        _warn_g.simplefilter("ignore")
+                        _gm = _arch_m(_lrB, vol="Garch", p=1, q=1,
+                                      mean="Zero").fit(disp="off")
+                    _gfv = float(np.sqrt(
+                        _gm.forecast(horizon=1).variance.values[-1, 0]))
+                    sig["garch_vol_15m"] = round(_gfv, 5)
+                    sig["garch_sur_15m"] = round(
+                        float(np.std(_lrB[-12:], ddof=1)) / _gfv - 1.0, 4)
+                _kvP = sig.get("kalman_velocity_15m")
+                _gvP = sig.get("garch_vol_15m")
+                print(f"  [shadow_kv] kalman_vel_15m="
+                      f"{_kvP:+.6f} garch_vol_15m={_gvP}"
+                      if isinstance(_kvP, float) and _kvP == _kvP
+                      else "  [shadow_kv] insufficient bars this cycle")
+        except Exception as _e_kv:
+            print(f"  [shadow_kv] signal computation failed: {_e_kv}")
     _zdrift_extreme = False
     if asset.upper() == "BTC" and _z_drift_6h is not None and _z_drift_6h > 2.5:
         _zdrift_extreme = True
@@ -3302,13 +3350,22 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 except Exception:
                     pass
             sig["p_gbdt"] = _lgbm_shadows.get(ticker, "")
-            # [2026-08-17 DUAL v1 REVERT] flat arm back to mkt-fav k1.8;
-            # shadow still logs to p_gbdt above but no longer trades.
+            # [2026-08-18 DUAL v2 RESTORED + KV PACKAGE] flat arm trades
+            # the SHADOW value gated by the package (see
+            # _replica_decide_btc docstring); package-blocked first looks
+            # consume the contract (keep-first, in-memory like the
+            # z-guard — not persisted across restarts).
             _repP, _repM = _replica_decide_btc(
                 p_model_yes, p_market, sig, offset_pct,
                 _liq_signal.liq_score if _liq_signal is not None else None,
                 skip_p=ticker in _REPLICA_TRADED,
-                skip_m=ticker in _REPLICA_TRADED_MF)
+                skip_m=ticker in _REPLICA_TRADED_MF,
+                p_anchor=_lgbm_shadows.get(ticker))
+            if isinstance(_repM, tuple) and _repM[0] == "blocked":
+                print(f"    [replica-shadow] KV-package BLOCK {ticker} "
+                      f"edge={_repM[1]:.3f} (consumed)")
+                _REPLICA_TRADED_MF.add(ticker)
+                _repM = None
             # [2026-08-15] extreme-uptrend NO guard (relaxed z_drift gate):
             # NO results from either arm are blocked this cycle. Arm P uses
             # blocked-consumption (matches the dashboard g+k gate); arm M
@@ -3325,7 +3382,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 _REPLICA_TRADED.add(ticker)
                 _repP = None
             _wrote = False
-            for _bk, _rep in (("prod", _repP), ("mktfav", _repM)):
+            for _bk, _rep in (("prod", _repP), ("shadow", _repM)):
                 if _rep is None:
                     continue
                 _rside, _redge, _rstake = _rep
@@ -3342,7 +3399,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     p_market=p_market, p_model=p_model_yes,
                     raw_edge=round(_redge, 4), side=_rside, decision="trade",
                     sig=sig,
-                    kelly_fraction=(0.0 if _bk == "mktfav" else round(
+                    kelly_fraction=(0.0 if _bk == "shadow" else round(
                         _redge / max(1 - p_market if _rside == "yes"
                                      else p_market, 0.01), 4)),
                     bet_fraction=round(_rstake / 2500.0, 4),
@@ -3351,7 +3408,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
                     is_live=is_live, fee_est=_rfee)
                 append_row(row, asset=asset)
-                (_REPLICA_TRADED_MF if _bk == "mktfav"
+                (_REPLICA_TRADED_MF if _bk == "shadow"
                  else _REPLICA_TRADED).add(ticker)
                 _wrote = True
             # scan record: a pass row when nothing traded, or when the
@@ -5076,17 +5133,17 @@ _REPLICA_SEEDED: set = set()
 
 
 def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
-                        skip_p=False, skip_m=False):
-    """[2026-08-17 DUAL v1 REVERT — shadow arm bled -$911/144 (60% WR)
-    on paper 08-14..08-17 while the tab's DUAL-independent (v1) line
-    led; user exercised the Read-#1 revert clause early. The bleed was
-    NOT the relaxed z>2.5 stream (+$166) but ordinary z 1-2.5 trades;
-    the pre-registered vol-contraction YES block forward-confirmed
-    (would have cut -$983 of it) yet even FIXED shadow made +$87/118 vs
-    mkt-fav's +$735/261 on the same window, so repair lost to revert.
-    Shadow keeps logging to p_gbdt for the 08-25 read; it no longer
-    trades paper money.] The BTC paper DUAL's two books, decided
-    independently (no arbitration — user architecture).
+                        skip_p=False, skip_m=False, p_anchor=None):
+    """[2026-08-18 DUAL v2 RESTORED + KV PACKAGE — user call after the
+    exhaustive shadow gate search. History: v2's ungated shadow arm bled
+    -$911/144 on paper 08-14..08-17 -> reverted to v1 (mkt-fav) for a few
+    hours 08-17 -> the leave-no-stone search (5,382 + 540 + 1,341 rules,
+    KC/Donchian/GARCH/ARIMA/Kalman/Hurst/OU reconstructed from bars)
+    found the package below; gated shadow ties mkt-fav on unseen data
+    (day-bootstrap P=0.48) and dominates the full window (S 0.56 vs
+    0.22, DD $370 vs $1,282). mkt-fav keeps racing as the DUAL v1 tab
+    line.] The BTC paper DUAL's two books, decided independently (no
+    arbitration — user architecture).
 
     Book P — production g+k: symmetric fee-adjusted edge >= 0.04 on the
     TRUE P(YES) (honest semantics; see caller comment), the 12
@@ -5094,9 +5151,17 @@ def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
     (side, edge, stake), ("blocked", edge) on a post-edge gate block
     (consumes the contract — keep="first" dedup), or None.
 
-    Book M — mkt-fav z-expansion: p' = Phi(1.8 * Phi^-1(pm)) (the
-    validated k=1.8 — do not raise), symmetric fee-adjusted edge
-    >= 0.04, flat $100, no gates. Returns (side, edge, 100.0) or
+    Book M — SHADOW/mktanchor arm + KV PACKAGE: p_anchor = the
+    market-anchored challenger's value; symmetric fee-adjusted edge
+    >= 0.04, flat $100. Gate package (block -> ("blocked", edge),
+    consumes the contract):
+      * kalman_velocity_15m < 1e-4 (either side; the search's most
+        consistent gate: blk -$2,689, 83% day-consistency, p=0.005,
+        pre/post-balanced)
+      * YES & d15_realized_vol_annual < -0.012 (the pre-registered
+        08-16 vol-contraction block, forward-confirmed on the bleed)
+    Missing signal values FAIL OPEN (replay-faithful: NaN never
+    blocked). Returns (side, edge, 100.0), ("blocked", edge), or
     None."""
     try:
         p = float(p_yes); pm = float(p_market)
@@ -5170,12 +5235,23 @@ def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
                 P = (side, edge, stake) if stake > 0 else None
 
     M = None
-    if not skip_m:
-        pmf = float(norm.cdf(1.8 * norm.ppf(min(max(pm, 0.01), 0.99))))
-        eyM, enM = pmf - pm - fee, pm - pmf - fee
-        sideM, edgeM = ("yes", eyM) if eyM >= enM else ("no", enM)
-        if edgeM >= 0.04:
-            M = (sideM, edgeM, 100.0)
+    if not skip_m and p_anchor is not None:
+        try:
+            pa = float(p_anchor)
+        except (TypeError, ValueError):
+            pa = None
+        if pa is not None and 0.0 < pa < 1.0:
+            eyM, enM = pa - pm - fee, pm - pa - fee
+            sideM, edgeM = ("yes", eyM) if eyM >= enM else ("no", enM)
+            if edgeM >= 0.04:
+                _kv15 = _fv("kalman_velocity_15m")
+                _d15rv = _fv("d15_realized_vol_annual")
+                if ((_kv15 is not None and _kv15 < 0.0001)
+                        or (sideM == "yes" and _d15rv is not None
+                            and _d15rv < -0.012)):
+                    M = ("blocked", edgeM)
+                else:
+                    M = (sideM, edgeM, 100.0)
     return P, M
 
 

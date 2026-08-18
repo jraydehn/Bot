@@ -59,7 +59,17 @@ with np.errstate(divide="ignore", invalid="ignore"):
 # >1 sigma BELOW its 6h mean. Discovery: n=54, 67% WR, +$1,436, p=0.017,
 # 3/3 wks, topday 29%. Mirror of RESCUE-C — the dislocation pair:
 # stretched up -> NO fade; stretched down -> trust faint YES edges.
+# [2026-08-18] NICHE-CAL: recalibrated rule from the fine-boundary audit
+# (user question "is it calibrated optimally?" — answer: no, three
+# boundaries): band shifted DOWN (0.32-0.35 slice = +13% margin, 3/3 wks,
+# stronger than most in-band), dead top cut (0.45-0.65: +2%/-10%), edge
+# capped at 0.20 (>0.20 = -28% margin, 0 wks — over-claiming). Spec:
+# pm [0.32, 0.45], edge [0.06, 0.20]. Races v1's rule on the same
+# referee clock; wire decision at 08-25.
 BOOKS = {
+    "NICHE-CAL pm.32-.45 e.06-.20": (res["p_market"].between(0.32, 0.45)
+                                     & (df["edge_yes"] >= 0.06)
+                                     & (df["edge_yes"] < 0.20), "yes"),
     "RESCUE-A": (res["p_market"].between(0.35, 0.65) & (df["edge_yes"] >= 0.03)
                  & (df["edge_yes"] < 0.06) & (df["adx_1h"] >= 22), "yes"),
     "RESCUE-D": (res["p_market"].between(0.35, 0.65) & (df["edge_yes"] >= 0.00)

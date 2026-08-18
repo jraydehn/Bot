@@ -1943,13 +1943,38 @@ with tab_15m_shadow:
                     # paper strategy now; +knife xHdamp keeps racing as
                     # the sizing candidate on the promoted stack's knife
                     # component.
+                    # [2026-08-18 DIP PACKAGE — ETH exhaustive gate
+                    # search, user option A] Paper replica now = COMBO +
+                    # chase-block (YES & chg_15m>=-0.0345) + knife1h
+                    # (bp_1h<0.11, either side). Raw COMBO keeps racing.
+                    # Monitor books (marginal, one change on the paper
+                    # stack): +volhot (garch_sur_1h>=-0.0848 — post-heavy
+                    # evidence, NOT wired) and +oidrop (YES &
+                    # d15_oi_chg_pct<-0.036 — split-consistent, watch).
+                    # garch_sur_1h logs from 08-18 (deploy) and is
+                    # BACKFILLED causally from 1h klines; NaN fails open.
+                    _dip_okE = ~((_yesE
+                                  & (_q["chg_15m"] >= -0.0345).fillna(False))
+                                 | (_q["bp_1h"] < 0.11).fillna(False))
+                    _vh_okE = ~(pd.to_numeric(
+                        _q.get("garch_sur_1h"), errors="coerce")
+                        >= -0.0848).fillna(False)
+                    _oi_okE = ~(_yesE & (pd.to_numeric(
+                        _q.get("d15_oi_chg_pct"), errors="coerce")
+                        < -0.036).fillna(False))
+                    _combE = _okE & _n3_okE & _kn_okE
                     for _vnE, _mE, _dshE in [
                             ("g+k (5 gates)", _okE, "dash"),
                             ("g+k +path", _okE & _pa_okE, "longdashdot"),
                             ("g+k +NOtrio", _okE & _n3_okE, "dashdot"),
                             ("g+k +YESknife", _okE & _kn_okE, "solid"),
-                            ("g+k COMBO ★PAPER", _okE & _n3_okE & _kn_okE,
+                            ("g+k COMBO", _combE, "solid"),
+                            ("COMBO+DIP ★PAPER", _combE & _dip_okE,
                              "solid"),
+                            ("‹mon› DIP +volhot",
+                             _combE & _dip_okE & _vh_okE, "dot"),
+                            ("‹mon› DIP +oidrop",
+                             _combE & _dip_okE & _oi_okE, "dot"),
                             ("g+k +knife xHdamp", _okE & _kn_okE, "longdash")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",

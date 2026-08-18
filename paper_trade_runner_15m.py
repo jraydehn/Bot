@@ -812,6 +812,11 @@ CSV_COLUMNS = [
     # existing files; all other CSV readers audited (dashboard reads
     # generically, referees/seeding use explicit columns).
     "garch_vol_15m", "garch_sur_15m",
+    # [2026-08-18 ETH DIP PACKAGE] ETH-only per-scan GARCH(1,1) 1h vol
+    # forecast + surprise — inputs to the tab's 'volhot' monitor book
+    # (block when garch_sur_1h >= -0.0848; post-heavy evidence, monitor
+    # only). Same migration/audit notes as the 15m pair above.
+    "garch_vol_1h", "garch_sur_1h",
     # [2026-07-20] Distinguishes a real Kalshi live order from a paper-twin
     # simulated row when both processes log to the same CSV concurrently
     # (added after the live+paper-twin pattern made every trade appear to be
@@ -3056,6 +3061,34 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                       else "  [shadow_kv] insufficient bars this cycle")
         except Exception as _e_kv:
             print(f"  [shadow_kv] signal computation failed: {_e_kv}")
+    # [2026-08-18 ETH DIP PACKAGE] ETH: GARCH(1,1) 1h vol forecast +
+    # surprise, once per scan on COMPLETED 1h bars fetched directly.
+    # Feeds the tab's 'volhot' MONITOR book only (post-heavy evidence —
+    # deliberately NOT wired into the replica). Fail-open like BTC's.
+    if asset.upper() == "ETH":
+        try:
+            _b1e = fetch_recent_candles("1h", 520, asset="ETH")
+            if _b1e is not None and len(_b1e) >= 40:
+                _now1u = pd.Timestamp.now(tz="UTC")
+                _b1e = _b1e[_b1e.index + pd.Timedelta("1h") <= _now1u]
+            if _b1e is not None and len(_b1e) >= 201:
+                _lrE = np.diff(np.log(
+                    _b1e["close"].values.astype(float)[-501:])) * 100
+                import warnings as _warn_e
+                from arch import arch_model as _arch_e
+                with _warn_e.catch_warnings():
+                    _warn_e.simplefilter("ignore")
+                    _gmE = _arch_e(_lrE, vol="Garch", p=1, q=1,
+                                   mean="Zero").fit(disp="off")
+                _gfE = float(np.sqrt(
+                    _gmE.forecast(horizon=1).variance.values[-1, 0]))
+                sig["garch_vol_1h"] = round(_gfE, 5)
+                sig["garch_sur_1h"] = round(
+                    float(np.std(_lrE[-12:], ddof=1)) / _gfE - 1.0, 4)
+                print(f"  [eth_garch] garch_vol_1h={sig['garch_vol_1h']} "
+                      f"sur={sig['garch_sur_1h']:+.3f}")
+        except Exception as _e_ge:
+            print(f"  [eth_garch] signal computation failed: {_e_ge}")
     _zdrift_extreme = False
     if asset.upper() == "BTC" and _z_drift_6h is not None and _z_drift_6h > 2.5:
         _zdrift_extreme = True
@@ -5381,7 +5414,22 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
         # sk5=0.00 (deeply oversold) became 50 and the >=44 gate blocked
         # a 19:1 winner (+$4,942 missed). _fv already defaults None/NaN
         # and PRESERVES legitimate zeros; the extra `or` is the bug.]
+        # [2026-08-18 DIP PACKAGE — ETH exhaustive gate search (7,227
+        # rules incl. bar-reconstructed families), user-wired same day.
+        # Mechanism: the combo book is a dip-buyer — it loses chasing
+        # non-dips and catching 1h-scale knives. knife1h (bp_1h<0.11,
+        # either side) is a different knife lens than YESknife's chg_1h
+        # (8/29 trade overlap). Both halves split-consistent pre/post
+        # 08-12; kept book day-bootstrap P=0.99 vs raw combo. Thresholds
+        # MINED on the window — 08-25 read is the first forward test;
+        # revert clause standard. Fail-open on missing values.]
+        bp1 = _fv("bp_1h")
+        if bp1 is not None and bp1 < 0.11:
+            return blocked
         if side == "yes":
+            chg15 = _fv("chg_15m")
+            if chg15 is not None and chg15 >= -0.0345:
+                return blocked
             if sk5 >= 44:
                 return blocked
             if 30.0 <= sk1 < 70.0 and not (

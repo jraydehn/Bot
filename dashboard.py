@@ -1341,8 +1341,15 @@ with tab_sol_shadow:
                                              dash=_vdash)))
                     _famdaily.setdefault(_vn, []).append(
                         _vp.groupby(_vq["dt"].dt.floor("D")).sum())
-                    _r[_vn] = (f"${_vp.sum():+,.0f} (n={len(_vq)}, "
+                    # [2026-08-17] companion-row cells self-identify: two
+                    # investigations were burned on reading a companion
+                    # variant cell as the paper book's (the rows share
+                    # identical column names). Any cell read in isolation
+                    # now carries its model row.
+                    _cell15 = (f"${_vp.sum():+,.0f} (n={len(_vq)}, "
                                f"DD ${_vdd:,.0f})")
+                    _r[_vn] = (f"‹comp› {_cell15}" if _lbl == "companion"
+                               else _cell15)
                 _rows.append(_r)
             # [2026-08-10] rank by the PRE-REGISTERED promotion metric:
             # pooled daily Sharpe (bucketed to 0.1 — differences inside

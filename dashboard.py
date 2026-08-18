@@ -1603,12 +1603,15 @@ with tab_15m_shadow:
                     _shad_book["pnl"] = _pnl.values
                     # [2026-08-18 SHADOW-KV PACKAGE — the leave-no-stone
                     # gate search's product, user-wired same day] Two
-                    # gated shadow monitor books. History caveat:
-                    # kalman_velocity_15m / garch_vol_15m only log on BTC
-                    # from 08-18 (runner deploy) — blank history FAILS
-                    # OPEN, so the lines' pre-08-18 segment is gated only
-                    # by the (historically-logged) vol-contraction rule;
-                    # the fully-gated record accrues forward.
+                    # gated shadow monitor books. kalman/garch history
+                    # BACKFILLED same day (user caught the forward-only
+                    # gap): causal completed-bar reconstruction from
+                    # Binance 15m klines, sweep-identical windows, blank
+                    # cells only, under the CSV lock — the lines show the
+                    # full gated history. HONESTY: that history is the kv
+                    # gate's own DISCOVERY window (only the volgate half
+                    # was pre-registered); the post-08-18 segment is its
+                    # first true forward test (08-25 read).
                     #   +KVpkg  = drop kalman_vel_15m<1e-4 | YES&d15_rv<-0.012
                     #             (the PAPER v2 arm's exact gate)
                     #   kv|garch = drop kalman_vel_15m<1e-4 | garch_vol>=0.0769

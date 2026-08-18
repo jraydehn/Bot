@@ -42,6 +42,10 @@ check "btc_hourly_niche_runner.py" logs/btc_hourly_niche.log \
 # no witness/hybrid value). ETH v2 stays — its book feeds the CORE referee.
 check "hourly_niche_runner_v2.py --asset ETH" logs/eth_hourly_niche_v2.log \
       "python3 -u hourly_niche_runner_v2.py --asset ETH"
+# [2026-08-18] ETH hourly YES-favorite paper book (model-free bias,
+# 3/3-window validated; tracker 08-18). Archive-tail pattern; [hb] lines.
+check "eth_hourly_fav_runner.py" logs/eth_hourly_fav.log \
+      "python3 -u eth_hourly_fav_runner.py"
 check "btc_hourly_voltail_runner.py" results/btc_hourly_voltail_runner.log \
       "python3 -u btc_hourly_voltail_runner.py"
 check "eth_hourly_voltail_runner.py" results/eth_hourly_voltail_runner.log \

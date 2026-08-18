@@ -52,7 +52,10 @@ ASSET_DISPLAY_FROM_15M = {
                                     # user override of the shadow's pre-registered 08-18
                                     # read. Prior cutoffs: 2026-08-12 16:55:51 (DUAL v1),
                                     # 2026-07-28 06:53:02 (fee-audit gate package).
-    "ETH": "2026-08-12 19:05:00",  # cleared 2026-08-12 per user request — fresh run of
+    # [cleared 2026-08-18 per user request — fresh run of the PROMOTED
+    # COMBO replica (NOtrio+YESknife joined the paper strategy at READ #1;
+    # runner restarted 03:18 UTC). Prior cutoff: 2026-08-12 19:05:00.]
+    "ETH": "2026-08-18 03:18:00",  # cleared 2026-08-12 per user request — fresh run of
                                     # the PROMOTED paper book (exact-replica decision path
                                     # live 19:05 UTC: production model + 5 survivor gates,
                                     # c4cd6a7). First trade shown: 19:23 UTC YES @0.395.

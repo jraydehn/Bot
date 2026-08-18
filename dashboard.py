@@ -1504,12 +1504,15 @@ with tab_15m_shadow:
                         ("shadow", "p_gbdt", "#f0a500"),
                         ("blend 50/50", "p_blend", "#b57edc")]
             # [2026-08-15] ETH refresh challenger RETIRED (5 second-life
-            # nulls; p_gbdt blank on new ETH rows). Its line stays as a
-            # frozen record; label marks the retirement. Seat reserved
-            # for the ~08-30 retrain candidate.
+            # nulls; p_gbdt blank on new ETH rows). [2026-08-18 user
+            # cleanup] Its frozen line AND the blend (which consumes the
+            # retired shadow's values — dead since 08-15) are REMOVED
+            # from display entirely: each book was dragging a full set of
+            # frozen variant sub-lines onto the chart. CSV history
+            # intact — the lines rebuild from data if ever re-added.
+            # Seat reserved for the ~08-30 retrain candidate.
             if _a15 == "ETH":
-                _books15 = [(("shadow (retired 08-15)" if n == "shadow"
-                              else n), c, k) for n, c, k in _books15]
+                _books15 = [b for b in _books15 if b[0] == "production"]
             # [2026-08-14] BTC: blend book RETIRED from display (user call —
             # seat given to DUAL v3c below; the blend was an early-harness
             # construct never in contention). ETH keeps its blend line.

@@ -2999,6 +2999,15 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     # trades are blocked this cycle (the validated danger). The same NO
     # guard is applied to the dashboard book constructions so paper and
     # tab stay in lockstep on the newly-visible scans.
+    # [2026-08-18] per-cycle live z_spot_6h for the wired SOL rescues
+    # (one append per scan cycle — the helper deques by wall time).
+    if asset.upper() == "SOL":
+        try:
+            import time as _time_z
+            sig["z_spot_6h_live"] = _z_spot_6h_live(asset, spot,
+                                                    _time_z.time())
+        except Exception:
+            sig["z_spot_6h_live"] = None
     _zdrift_extreme = False
     if asset.upper() == "BTC" and _z_drift_6h is not None and _z_drift_6h > 2.5:
         _zdrift_extreme = True
@@ -5021,6 +5030,47 @@ _PM_HIST: dict = {}
 _PM_HIST_LOADED: set = set()
 
 
+# [2026-08-18] live z_spot_6h for the wired SOL rescues: rolling 6h
+# mean/std of the runner's own scan-stream spot (the same construction
+# the referee uses on logged rows). Seeded from the CSV tail on first
+# use; needs >=10 points inside 6h else returns None (rescue fail-closed).
+_ZSPOT_HIST: dict = {}
+
+
+def _z_spot_6h_live(asset, spot, now_ts):
+    import collections
+    key = asset.upper()
+    dq = _ZSPOT_HIST.get(key)
+    if dq is None:
+        dq = collections.deque()
+        try:
+            import csv as _csvm
+            with open(_csv_path(asset)) as _fh:
+                rows = list(_csvm.DictReader(_fh))[-200:]
+            for _r in rows:
+                try:
+                    _ts = pd.Timestamp(_r["logged_at"]).timestamp()
+                    _sp = float(_r["spot"])
+                    if now_ts - _ts <= 6 * 3600:
+                        dq.append((_ts, _sp))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        _ZSPOT_HIST[key] = dq
+    dq.append((now_ts, float(spot)))
+    while dq and now_ts - dq[0][0] > 6 * 3600:
+        dq.popleft()
+    if len(dq) < 10:
+        return None
+    vals = [v for _, v in dq]
+    mu = sum(vals) / len(vals)
+    sd = (sum((v - mu) ** 2 for v in vals) / len(vals)) ** 0.5
+    if sd <= 0:
+        return None
+    return (float(spot) - mu) / sd
+
+
 _REPLICA_TRADED: set = set()
 _REPLICA_TRADED_MF: set = set()   # BTC mkt-fav book's own consumption set
 _REPLICA_SEEDED: set = set()
@@ -5175,6 +5225,29 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
         if side == "yes":
             persist = _fv("sol_persist_score")
             if not (persist is not None and persist >= 3):
+                # [2026-08-18 WIRED RESCUES per user ("no harm on paper"):
+                # RESC-2 (zd<0.59; 4/4wks +$2,576) and RESC-5 (z_spot<-1 &
+                # d45_vwap rising; 4/4wks +$3,201, permutation-calibrated).
+                # Rescued trades BYPASS the remaining YES gates — matching
+                # the referee books exactly (the composed-gates trap killed
+                # a SOL rescue in June; not repeating it). Paper sizing
+                # conventions apply (kelly + hurst damp). Revert at 08-25
+                # if either referee stream goes negative.
+                _vw45 = _fv("d45_vwap_dist")
+                _zs = sig.get("z_spot_6h_live")
+                _r2 = zd is not None and zd < 0.59
+                _r5 = (_zs is not None and _zs < -1.0
+                       and _vw45 is not None and _vw45 >= 0.07)
+                if _r2 or _r5:
+                    kel = (p - pm - fee) / (1 - pm)
+                    stake = round(2500.0 * max(0.0, min(kel, 0.10)), 2)
+                    _h = _fv("hurst_exponent_5m")
+                    _hm = (1.0 if _h is None
+                           else max(0.25, min(1.0, (_h - 0.4) / 0.2)))
+                    stake = round(stake * _hm, 2)
+                    if stake <= 0:
+                        return blocked
+                    return side, edge, stake
                 return blocked
             gy = ((m6 == "Bull" and sc1 != 0) or m4 == "Sideways"
                   or (m1 == "Sideways" and oi < 0.0535))

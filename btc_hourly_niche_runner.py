@@ -41,7 +41,13 @@ STATE = BASE / "results" / ".btc_hourly_niche_state.json"
 MODEL = BASE / "models" / "btc_hourly_lgbm_niche_20260728.pkl"
 
 EDGE_MIN = 0.06
-PM_LO, PM_HI = 0.35, 0.65
+# [2026-08-18 NICHE-CAL wired per user: band floor was misplaced
+# (0.32-0.35 = +13% margin/3wks excluded), band top dead (0.45-0.65),
+# edge>0.20 over-claims (-28% margin). Referee book: n=72, 54% WR vs
+# 38% BE, +$2,523, 3/3 wks. Revert at 08-25 if the live rule's referee
+# stream out-ranks it. Prior: PM 0.35-0.65, no edge cap.]
+PM_LO, PM_HI = 0.32, 0.45
+EDGE_MAX = 0.20
 STAKE = 100.0
 TAIL_BYTES = 2_000_000  # ~6k archive rows, >> one loop of new scans
 LOOP_SEC = 120
@@ -154,9 +160,9 @@ def main() -> None:
                     p = model.predict_proba(cand[FEATS])[:, 1]
                     fee = 0.07 * cand["p_market"] * (1 - cand["p_market"])
                     edge = p - cand["p_market"] - fee
-                    hits = cand[edge >= EDGE_MIN].copy()
-                    hits["p_model"] = p[edge >= EDGE_MIN]
-                    hits["fee_adj_edge"] = edge[edge >= EDGE_MIN]
+                    hits = cand[(edge >= EDGE_MIN) & (edge < EDGE_MAX)].copy()
+                    hits["p_model"] = p[(edge >= EDGE_MIN) & (edge < EDGE_MAX)]
+                    hits["fee_adj_edge"] = edge[(edge >= EDGE_MIN) & (edge < EDGE_MAX)]
                     hits = hits.sort_values("dt").drop_duplicates("contract_ticker", keep="first")
                     for _, r in hits.iterrows():
                         append_trade({

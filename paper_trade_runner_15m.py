@@ -3302,14 +3302,13 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 except Exception:
                     pass
             sig["p_gbdt"] = _lgbm_shadows.get(ticker, "")
-            # [2026-08-14 DUAL v2] the flat arm now trades the SHADOW
-            # (mktanchor) value — the same one logged to p_gbdt this scan.
+            # [2026-08-17 DUAL v1 REVERT] flat arm back to mkt-fav k1.8;
+            # shadow still logs to p_gbdt above but no longer trades.
             _repP, _repM = _replica_decide_btc(
                 p_model_yes, p_market, sig, offset_pct,
                 _liq_signal.liq_score if _liq_signal is not None else None,
                 skip_p=ticker in _REPLICA_TRADED,
-                skip_m=ticker in _REPLICA_TRADED_MF,
-                p_anchor=_lgbm_shadows.get(ticker))
+                skip_m=ticker in _REPLICA_TRADED_MF)
             # [2026-08-15] extreme-uptrend NO guard (relaxed z_drift gate):
             # NO results from either arm are blocked this cycle. Arm P uses
             # blocked-consumption (matches the dashboard g+k gate); arm M
@@ -3326,7 +3325,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 _REPLICA_TRADED.add(ticker)
                 _repP = None
             _wrote = False
-            for _bk, _rep in (("prod", _repP), ("shadow", _repM)):
+            for _bk, _rep in (("prod", _repP), ("mktfav", _repM)):
                 if _rep is None:
                     continue
                 _rside, _redge, _rstake = _rep
@@ -3343,7 +3342,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     p_market=p_market, p_model=p_model_yes,
                     raw_edge=round(_redge, 4), side=_rside, decision="trade",
                     sig=sig,
-                    kelly_fraction=(0.0 if _bk == "shadow" else round(
+                    kelly_fraction=(0.0 if _bk == "mktfav" else round(
                         _redge / max(1 - p_market if _rside == "yes"
                                      else p_market, 0.01), 4)),
                     bet_fraction=round(_rstake / 2500.0, 4),
@@ -3352,7 +3351,7 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
                     is_live=is_live, fee_est=_rfee)
                 append_row(row, asset=asset)
-                (_REPLICA_TRADED_MF if _bk == "shadow"
+                (_REPLICA_TRADED_MF if _bk == "mktfav"
                  else _REPLICA_TRADED).add(ticker)
                 _wrote = True
             # scan record: a pass row when nothing traded, or when the
@@ -5077,10 +5076,17 @@ _REPLICA_SEEDED: set = set()
 
 
 def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
-                        skip_p=False, skip_m=False, p_anchor=None):
-    """[2026-08-14 DUAL v2 PROMOTION — explicit user override of the
-    shadow's pre-registered 08-18 read] The BTC paper DUAL's two books,
-    decided independently (no arbitration — user architecture).
+                        skip_p=False, skip_m=False):
+    """[2026-08-17 DUAL v1 REVERT — shadow arm bled -$911/144 (60% WR)
+    on paper 08-14..08-17 while the tab's DUAL-independent (v1) line
+    led; user exercised the Read-#1 revert clause early. The bleed was
+    NOT the relaxed z>2.5 stream (+$166) but ordinary z 1-2.5 trades;
+    the pre-registered vol-contraction YES block forward-confirmed
+    (would have cut -$983 of it) yet even FIXED shadow made +$87/118 vs
+    mkt-fav's +$735/261 on the same window, so repair lost to revert.
+    Shadow keeps logging to p_gbdt for the 08-25 read; it no longer
+    trades paper money.] The BTC paper DUAL's two books, decided
+    independently (no arbitration — user architecture).
 
     Book P — production g+k: symmetric fee-adjusted edge >= 0.04 on the
     TRUE P(YES) (honest semantics; see caller comment), the 12
@@ -5088,14 +5094,10 @@ def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
     (side, edge, stake), ("blocked", edge) on a post-edge gate block
     (consumes the contract — keep="first" dedup), or None.
 
-    Book S (was mkt-fav) — SHADOW/mktanchor arm: p_anchor = the
-    market-anchored challenger's value (needs a pm-history observation,
-    so it prices LATER scans — near-disjoint with book P's first-scan
-    trades: 8 shared contracts vs mkt-fav's 56 over the A/B window).
-    Symmetric fee-adjusted edge >= 0.04, flat $100, no gates. Window
-    case for the swap: DUAL v2 S 0.62/DD $784 vs v1 0.58/$1,652.
-    mkt-fav leaves the paper DUAL but keeps its tab benchmark + witness
-    roles. Returns (side, edge, 100.0) or None."""
+    Book M — mkt-fav z-expansion: p' = Phi(1.8 * Phi^-1(pm)) (the
+    validated k=1.8 — do not raise), symmetric fee-adjusted edge
+    >= 0.04, flat $100, no gates. Returns (side, edge, 100.0) or
+    None."""
     try:
         p = float(p_yes); pm = float(p_market)
     except (TypeError, ValueError):
@@ -5168,16 +5170,12 @@ def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
                 P = (side, edge, stake) if stake > 0 else None
 
     M = None
-    if not skip_m and p_anchor is not None:
-        try:
-            pa = float(p_anchor)
-        except (TypeError, ValueError):
-            pa = None
-        if pa is not None and 0.0 < pa < 1.0:
-            eyM, enM = pa - pm - fee, pm - pa - fee
-            sideM, edgeM = ("yes", eyM) if eyM >= enM else ("no", enM)
-            if edgeM >= 0.04:
-                M = (sideM, edgeM, 100.0)
+    if not skip_m:
+        pmf = float(norm.cdf(1.8 * norm.ppf(min(max(pm, 0.01), 0.99))))
+        eyM, enM = pmf - pm - fee, pm - pmf - fee
+        sideM, edgeM = ("yes", eyM) if eyM >= enM else ("no", enM)
+        if edgeM >= 0.04:
+            M = (sideM, edgeM, 100.0)
     return P, M
 
 

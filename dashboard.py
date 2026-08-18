@@ -46,11 +46,12 @@ ASSET_DISPLAY_FROM = {
 }
 ASSET_DISPLAY_FROM_15M = {
     "BTC": "2026-08-14 03:06:00",  # cleared 2026-08-14 per user request — fresh run of the
-                                    # PROMOTED DUAL v2 paper book (prod g+k 12 kelly +
-                                    # SHADOW/mktanchor flat $100; mkt-fav arm retired from
-                                    # paper, keeps tab benchmark + witness roles). Explicit
-                                    # user override of the shadow's pre-registered 08-18
-                                    # read. Prior cutoffs: 2026-08-12 16:55:51 (DUAL v1),
+                                    # then-promoted DUAL v2 paper book (prod g+k 12 kelly +
+                                    # SHADOW/mktanchor flat $100). [2026-08-17] seat REVERTED
+                                    # to DUAL v1 (prod + mkt-fav k1.8 flat) — shadow arm bled
+                                    # -$911/144; cutoff NOT moved (user did not ask to clear;
+                                    # display spans both eras, arm swap visible in the flat
+                                    # trades). Prior cutoffs: 2026-08-12 16:55:51 (DUAL v1),
                                     # 2026-07-28 06:53:02 (fee-audit gate package).
     # [cleared 2026-08-18 per user request — fresh run of the PROMOTED
     # COMBO replica (NOtrio+YESknife joined the paper strategy at READ #1;
@@ -1975,26 +1976,26 @@ with tab_15m_shadow:
                         _fig15.add_trace(go.Scatter(
                             x=[_cfg15["start"]] + list(_Pd["dt"]),
                             y=[0.0] + list(_Pd["pnl"].cumsum()),
-                            name="DUAL independent",
+                            name="DUAL v1 ★PAPER (reverted 08-17)",
                             line=dict(color="#00c076", width=2,
                                       dash="dash")))
                         _cumd = _Pd["pnl"].cumsum()
                         _ddd = float((_cumd.cummax() - _cumd).max())
                         _rows15.append({
-                            "book": "DUAL (independent)",
+                            "book": "DUAL v1 ★PAPER (reverted 08-17)",
                             "net": f"${_Pd['pnl'].sum():+,.0f}",
                             "n": len(_Pd),
                             "WR/BE": "—",
                             "maxDD": f"${_ddd:,.0f}",
                         })
-                    # [2026-08-14] DUAL v2 (user proposal): prod g+k +
-                    # SHADOW instead of mkt-fav. Near-disjoint pair (8
-                    # shared contracts vs mkt-fav's 56 — shadow needs
-                    # pm-history so it trades LATER scans than the
-                    # first-scan g+k book). Window: S 0.62 / DD $784 vs
-                    # current DUAL 0.58 / $1,652. Races on the tab; the
-                    # PAPER arm swap waits on shadow's pre-registered
-                    # 08-18 decision read (no early promotion).
+                    # [2026-08-14] DUAL v2: prod g+k + SHADOW instead of
+                    # mkt-fav. Held the paper seat 08-14..08-17, then
+                    # [2026-08-17 REVERTED to v1] — shadow arm bled
+                    # -$911/144 (60% WR) on paper while v1 led; even with
+                    # the forward-confirmed vol-contraction repair the
+                    # fixed shadow (+$87/118) lost to mkt-fav (+$735/261)
+                    # on the same window. Stays on the tab as a bench
+                    # book for the 08-25 read.
                     _rows_d2 = ([(rr["dt"], rr["pnl"])
                                  for _, rr in _Ad.iterrows()]
                                 + [(rr["dt"], rr["pnl"])

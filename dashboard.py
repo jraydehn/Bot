@@ -1217,10 +1217,8 @@ with tab_sol_shadow:
                         ("gk zd65", _v2_ok & _mkv_ok & _zd_ok65 & _off_ok,
                          "dot", 1.0),
 
-                        ("gk vrM+zd65", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
-                         "longdashdot", 1.0),
-                        ("gk combo+damp", _v2_ok & _mkv_vr & _zd_ok65 & _off_ok,
-                         "dot", 1.0),
+                        # [2026-08-18 READ #1] vrM+zd65 & combo+damp RETIRED
+                        # (vrM collapsed: S 0.03 / DD $5,243 continuous).
                         ("gk zd65+path", _v2_ok & _mkv_ok & _zd_ok65 & _off_ok
                          & np.where(_q["side"] == "no",
                                     ~((_q["pm_path_drift"]
@@ -1377,8 +1375,7 @@ with tab_sol_shadow:
                     break
             _fams = st.multiselect(
                 "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
-                ["flat $100", "gk zd65",
-                 "gk vrM+zd65", "gk combo+damp", "gk zd65+path",
+                ["flat $100", "gk zd65", "gk zd65+path",
                  "gk zd65+path 1/h", "gk zd65+path+SW", "gk +SW xHdamp"],
                 default=_top2, key="solsh_fams")
             for _fam, _x, _y, _nm, _ln in _traces:
@@ -1893,12 +1890,19 @@ with tab_15m_shadow:
                         _q["h_sol"] = np.where(_sage <= 1800, _sh, np.nan)
                     except Exception:
                         _q["h_sol"] = np.nan
+                    # [2026-08-18 READ #1] +hurst RETIRED (pre-registered;
+                    # trailed base, blocked winners). COMBO promoted into
+                    # the paper replica per its fork — its line is the
+                    # paper strategy now; +knife xHdamp keeps racing as
+                    # the sizing candidate on the promoted stack's knife
+                    # component.
                     for _vnE, _mE, _dshE in [
                             ("g+k (5 gates)", _okE, "dash"),
-                            ("g+k +hurst", _okE & _hu_okE, "dot"),
                             ("g+k +path", _okE & _pa_okE, "longdashdot"),
                             ("g+k +NOtrio", _okE & _n3_okE, "dashdot"),
                             ("g+k +YESknife", _okE & _kn_okE, "solid"),
+                            ("g+k COMBO ★PAPER", _okE & _n3_okE & _kn_okE,
+                             "solid"),
                             ("g+k +knife xHdamp", _okE & _kn_okE, "longdash")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",

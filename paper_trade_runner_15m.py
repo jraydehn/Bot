@@ -5223,6 +5223,13 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
         body = _fv("body_15m", 0.0)
         bp5 = _fv("bp_5m", 0.5)
         liq = _fv("liq_score")
+        # [2026-08-18 READ #1 PROMOTION] NOtrio + YESknife join the replica
+        # per the pre-registered fork ("both gates lead -> promote the
+        # combo"): combo led the field at S 0.46/DD $3,589 with BOTH
+        # parents forward-positive since deploy (+$1,979 / +$1,561).
+        chg1h = _fv("chg_1h", 0.0)
+        chg5 = _fv("chg_5m", 0.0)
+        rv = _fv("realized_vol_annual")
         # [2026-08-17 falsy-zero purge — THIRD strike of `x or default`:
         # sk5=0.00 (deeply oversold) became 50 and the >=44 gate blocked
         # a 19:1 winner (+$4,942 missed). _fv already defaults None/NaN
@@ -5232,6 +5239,10 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
                 return blocked
             if 30.0 <= sk1 < 70.0 and not (
                     rsi1 is not None and rsi1 < 35.0):
+                return blocked
+            # YESknife v2: falling-knife OTM or dead-tape
+            if ((chg1h < -0.45 and float(offset_pct) < 0)
+                    or (rv is not None and rv < 0.135)):
                 return blocked
         else:
             if md == "Sideways":
@@ -5243,6 +5254,13 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
                           < 0.45 and not (liq is not None and liq == -2))
                 if not rescue:
                     return blocked
+            # NOtrio: pm band / overheat / mid-stoch riser
+            if pm > 0.8:
+                return blocked
+            if sk5 > 76 and chg5 > 0:
+                return blocked
+            if chg1h > 0 and 30.0 <= sk1 < 70.0:
+                return blocked
     else:
         return None
     kel = (p - pm - fee) / (1 - pm) if side == "yes" else (pm - p - fee) / pm

@@ -1652,6 +1652,35 @@ with tab_15m_shadow:
                                 "n": len(_qb), "WR/BE": "—",
                                 "maxDD": f"${float((_cb.cummax() - _cb).max()):,.0f}",
                             })
+                        # [2026-08-18 pre-registered ×EDGEconv — user call
+                        # after the deviation-conviction finding: the
+                        # anchored arm's margin is MONOTONE in its own
+                        # edge (+9/+10/+19/+22pp by edge band); mkt-fav's
+                        # tier inversion was a coarse proxy for this.
+                        # Constants DECLARED (not fitted): stake ×
+                        # clip(edge/0.08, 0.5, 2.0). Monitor only — wires
+                        # at 08-25 ONLY IF the KV arm itself confirms AND
+                        # this leads flat on Sharpe/DD. Never apply
+                        # mkt-fav conviction tiers to this arm (inverted;
+                        # see tracker 08-18).]
+                        _kvkeep = ~np.asarray(_pkg_blk, bool)
+                        _wE2 = np.clip(_q["edge"][_kvkeep] / 0.08, 0.5, 2.0)
+                        _pE2 = _pnl[_kvkeep] * _wE2
+                        _qE2 = _q[_kvkeep]
+                        if len(_qE2):
+                            _fig15.add_trace(go.Scatter(
+                                x=[_cfg15["start"]] + list(_qE2["dt"]),
+                                y=[0.0] + list(_pE2.cumsum()),
+                                name="‹mon› KVpkg ×EDGEconv",
+                                line=dict(color=_clr, width=1.5,
+                                          dash="dashdot")))
+                            _cE2 = _pE2.cumsum()
+                            _rows15.append({
+                                "book": "‹mon› KVpkg ×EDGEconv",
+                                "net": f"${_pE2.sum():+,.0f}",
+                                "n": len(_qE2), "WR/BE": "—",
+                                "maxDD": f"${float((_cE2.cummax() - _cE2).max()):,.0f}",
+                            })
                         _shad_kv_book = _q[~np.asarray(_pkg_blk, bool)][
                             ["contract_ticker", "dt", "side"]].copy()
                         _shad_kv_book["pnl"] = _pnl[

@@ -17,8 +17,16 @@ df["dt"] = pd.to_datetime(df["logged_at"], errors="coerce", utc=True, format="mi
 for c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes", "sol_persist_score",
           "kalman_residual_15m", "z_drift_6h", "d45_vol_ratio",
           "hurst_exponent_5m", "kalman_residual", "stoch_cross_1h",
-          "oi_chg_pct", "slope120_stoch_k_15m", "offset_pct", "stoch_k_1h"]:
+          "oi_chg_pct", "slope120_stoch_k_15m", "offset_pct", "stoch_k_1h",
+          "d45_vwap_dist", "spot"]:
     df[c] = pd.to_numeric(df.get(c), errors="coerce")
+# z_spot_6h reconstructed on the full stream BEFORE windowing (causal)
+_ok = df["spot"].notna()
+_ss = pd.Series(df.loc[_ok, "spot"].values,
+                index=pd.DatetimeIndex(df.loc[_ok, "dt"]))
+_rl = _ss.rolling("6h")
+df["z_spot_6h"] = np.nan
+df.loc[_ok, "z_spot_6h"] = ((_ss - _rl.mean()) / _rl.std()).values
 SWAP = pd.Timestamp("2026-08-12 19:05", tz="UTC")
 df["p_slope"] = np.where(df["dt"] >= SWAP, df["p_model_15m"], df["p_gbdt"])
 start = FREEZE if "--forward" in sys.argv else pd.Timestamp("2026-07-29", tz="UTC")
@@ -56,6 +64,17 @@ BOOKS = {
     "RESC-3 nearmiss&d45vr>=.18": near & (q["d45_vol_ratio"] >= 0.18).fillna(False),
     "RESC-3b +6hSideways": (near & (q["d45_vol_ratio"] >= 0.18).fillna(False)
                             & (_m6 == "Sideways")),
+    # [2026-08-18] From the 34,496-test regime-sliced sweep (permutation
+    # null 2 vs 14 found in nearmiss; 1 vs 3 in persist-blocked). The z<-1
+    # dislocation-down regime keeps minting SOL rescues — new ingredient:
+    # confirmation-of-turn.
+    "RESC-5 persistblk&z<-1&vwapUp": (pblk
+        & (q["z_spot_6h"] < -1).fillna(False)
+        & (q["d45_vwap_dist"] >= 0.07).fillna(False)),
+    # RESC-6 REMOVED at freeze: the frozen >=0 threshold failed to
+    # reproduce the sweep's >=0.0002 cut (-$474 vs discovery +$2,109) —
+    # definition-fidelity failure, not forward decay. The nearmiss z<-1
+    # family is covered by RESC-1/RESC-5.
     "RESC-4 mkvNO&H>=.6&kalm<0": (_mkv_no_blk
                                   & (q["hurst_exponent_5m"] >= 0.6).fillna(False)
                                   & (q["kalman_residual"] < 0).fillna(False)),

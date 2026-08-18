@@ -1966,19 +1966,27 @@ with tab_15m_shadow:
                         _q.get("d15_oi_chg_pct"), errors="coerce")
                         < -0.036).fillna(False))
                     _combE = _okE & _n3_okE & _kn_okE
-                    for _vnE, _mE, _dshE in [
-                            ("g+k (5 gates)", _okE, "dash"),
-                            ("g+k +path", _okE & _pa_okE, "longdashdot"),
-                            ("g+k +NOtrio", _okE & _n3_okE, "dashdot"),
-                            ("g+k +YESknife", _okE & _kn_okE, "solid"),
-                            ("g+k COMBO", _combE, "solid"),
+                    # [2026-08-18 user] per-variant colors — with a single
+                    # book left every line inherited the book's blue and
+                    # was distinguishable only by dash. Paper = green
+                    # (matches the BTC tab's paper-line convention).
+                    for _vnE, _mE, _dshE, _clrE in [
+                            ("g+k (5 gates)", _okE, "dash", "#4f8bf9"),
+                            ("g+k +path", _okE & _pa_okE, "longdashdot",
+                             "#2bb3a3"),
+                            ("g+k +NOtrio", _okE & _n3_okE, "dashdot",
+                             "#f0a500"),
+                            ("g+k +YESknife", _okE & _kn_okE, "solid",
+                             "#e15759"),
+                            ("g+k COMBO", _combE, "solid", "#b57edc"),
                             ("COMBO+DIP ★PAPER", _combE & _dip_okE,
-                             "solid"),
+                             "solid", "#00c076"),
                             ("‹mon› DIP +volhot",
-                             _combE & _dip_okE & _vh_okE, "dot"),
+                             _combE & _dip_okE & _vh_okE, "dot", "#ff7eb6"),
                             ("‹mon› DIP +oidrop",
-                             _combE & _dip_okE & _oi_okE, "dot"),
-                            ("g+k +knife xHdamp", _okE & _kn_okE, "longdash")]:
+                             _combE & _dip_okE & _oi_okE, "dot", "#c49c48"),
+                            ("g+k +knife xHdamp", _okE & _kn_okE,
+                             "longdash", "#9aa0a6")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",
                                         _gkE["p_market"],
@@ -2006,8 +2014,8 @@ with tab_15m_shadow:
                             _fig15.add_trace(go.Scatter(
                                 x=[_cfg15["start"]] + list(_gkE["dt"]),
                                 y=[0.0] + list(_gpE.cumsum()),
-                                name=f"{_lbl} {_vnE}",
-                                line=dict(color=_clr, width=1.5,
+                                name=_vnE,
+                                line=dict(color=_clrE, width=1.5,
                                           dash=_dshE)))
                         _gcumE = _gpE.cumsum()
                         _gddE = (float((_gcumE.cummax() - _gcumE).max())

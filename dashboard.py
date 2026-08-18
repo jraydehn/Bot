@@ -1266,7 +1266,10 @@ with tab_sol_shadow:
                         # zero trades dropped, and never fully exits (robust
                         # to SOL hurst's 5-flips/11wks history). MODEST
                         # evidence — forward race decides.
-                        ("gk +SW xHdamp", _v2_ok & _mkv_ok & _zd_ok65
+                        # [2026-08-18] ★PAPER: xHdamp sizing promoted into
+                        # the SOL paper replica (user override of the 08-25
+                        # confirm; revert clause active).
+                        ("gk +SW xHdamp ★PAPER", _v2_ok & _mkv_ok & _zd_ok65
                          & _off_ok
                          & np.where(_q["side"] == "no",
                                     ~((_q["pm_path_drift"]
@@ -1306,7 +1309,7 @@ with tab_sol_shadow:
                     # SOL. Needs 15d of window history => multiplier is 1.0
                     # until ~08-14 on this tab: identical to vrM+zd65 till
                     # then, diverges only on live forward data.
-                    if _vn == "gk +SW xHdamp" and len(_vq):
+                    if _vn == "gk +SW xHdamp ★PAPER" and len(_vq):
                         _hmul = np.clip(
                             (pd.to_numeric(_vq["hurst_exponent_5m"],
                                            errors="coerce") - 0.4) / 0.2,
@@ -1376,7 +1379,7 @@ with tab_sol_shadow:
             _fams = st.multiselect(
                 "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
                 ["flat $100", "gk zd65", "gk zd65+path",
-                 "gk zd65+path 1/h", "gk zd65+path+SW", "gk +SW xHdamp"],
+                 "gk zd65+path 1/h", "gk zd65+path+SW", "gk +SW xHdamp ★PAPER"],
                 default=_top2, key="solsh_fams")
             for _fam, _x, _y, _nm, _ln in _traces:
                 if _fam in _fams:

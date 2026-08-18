@@ -5265,6 +5265,16 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
         return None
     kel = (p - pm - fee) / (1 - pm) if side == "yes" else (pm - p - fee) / pm
     stake = round(2500.0 * max(0.0, min(kel, 0.10)), 2)
+    # [2026-08-18 ×Hdamp PROMOTED into SOL paper sizing — explicit user
+    # override of the 08-25 confirmation (round-1: S 0.62 vs 0.39, DD $531
+    # vs $1,176). Frozen params from the original SOL deploy: stake ×
+    # clip((hurst−0.4)/0.2, 0.25, 1.0); missing hurst → 1.0 (fail-open,
+    # matches the tab's fillna). SOL-SCOPED ONLY. Revert clause: if the
+    # 08-25 read ranks flat above hurst-sized, sizing reverts.]
+    if a == "SOL":
+        _h = _fv("hurst_exponent_5m")
+        _hm = 1.0 if _h is None else max(0.25, min(1.0, (_h - 0.4) / 0.2))
+        stake = round(stake * _hm, 2)
     if stake <= 0:
         return None
     return side, edge, stake

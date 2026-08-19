@@ -136,7 +136,7 @@ def main() -> None:
     auth = load_auth_or_die("[fav]")
     st = load_state()
     traded = set(st["traded"])
-    print(f"[fav] ETH hourly YES-favorite paper runner up. rule: YES, "
+    print(f"[fav] SOL hourly YES-favorite paper runner up. rule: YES, "
           f"pm in [{PM_LO},{PM_HI}], flat ${STAKE:.0f}, model-free. "
           f"{len(traded)} tickers already traded.")
     last_hb = 0.0

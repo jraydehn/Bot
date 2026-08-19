@@ -12,7 +12,9 @@ import pandas as pd
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
-ARCH = BASE / "results" / "eth_scan_archive.csv"
+import sys as _sys
+ASSET = _sys.argv[1].lower() if len(_sys.argv) > 1 else "eth"
+ARCH = BASE / "results" / f"{ASSET}_scan_archive.csv"
 
 FEATS = ["tau_minutes", "offset_pct", "chg_30m", "chg_10m", "chg_5m", "bp_5m",
          "stoch_k", "vol_score", "vpin_score", "obi_score", "no_score",

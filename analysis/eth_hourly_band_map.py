@@ -9,7 +9,9 @@ import pandas as pd
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
-ARCH = BASE / "results" / "eth_scan_archive.csv"
+import sys as _sys
+ASSET = _sys.argv[1].lower() if len(_sys.argv) > 1 else "eth"
+ARCH = BASE / "results" / f"{ASSET}_scan_archive.csv"
 
 USE = ["logged_at", "contract_ticker", "close_ts", "p_market", "tau_minutes",
        "resolved_yes"]

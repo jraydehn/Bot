@@ -51,6 +51,13 @@ check "eth_hourly_fav_runner.py" logs/eth_hourly_fav.log \
 # rejected). First read ~09-01.
 check "eth_hourly_fav_rescues_runner.py" logs/eth_hourly_fav_rescues.log \
       "python3 -u eth_hourly_fav_rescues_runner.py"
+# [2026-08-19] SOL replication of the fav bias + rescue bands (band map
+# 3/3 windows + tick-stress; asset-specific rescue conditions B/C/M).
+# First reads ~09-01.
+check "sol_hourly_fav_runner.py" logs/sol_hourly_fav.log \
+      "python3 -u sol_hourly_fav_runner.py"
+check "sol_hourly_fav_rescues_runner.py" logs/sol_hourly_fav_rescues.log \
+      "python3 -u sol_hourly_fav_rescues_runner.py"
 check "btc_hourly_voltail_runner.py" results/btc_hourly_voltail_runner.log \
       "python3 -u btc_hourly_voltail_runner.py"
 check "eth_hourly_voltail_runner.py" results/eth_hourly_voltail_runner.log \

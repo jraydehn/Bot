@@ -165,9 +165,16 @@ def main() -> None:
                     m = new["p_market"].ge(lo) & new["p_market"].lt(hi) & cfn(new[ccol])
                     hits = new[m & ~new["contract_ticker"].isin(traded[bname])]
                     hits = hits.sort_values("dt").drop_duplicates("contract_ticker", keep="first")
-                    cap = (hi + 0.01) if side == "yes" else ((1 - lo) + 0.01)
                     for _, r in hits.iterrows():
-                        fill, ok = fill_for(auth, r["contract_ticker"], side, cap)
+                        # [2026-08-19] fee-aware fill cap (user directive):
+                        # anchor to the SIGNAL cost + the validated 1c slip
+                        # stress, not the band edge — B/C fee margins (~3.6/4pp)
+                        # clear fees at 1c but a band-edge cap could admit
+                        # multi-cent slippage on early-band signals.
+                        pm_sig = float(r["p_market"])
+                        cost_sig = pm_sig if side == "yes" else 1.0 - pm_sig
+                        fill, ok = fill_for(auth, r["contract_ticker"], side,
+                                            cost_sig + 0.01)
                         append_trade({
                             "logged_at": datetime.now(timezone.utc).isoformat(),
                             "band": bname, "side": side,

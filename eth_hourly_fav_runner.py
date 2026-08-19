@@ -152,8 +152,16 @@ def main() -> None:
                 hits = hits[~hits["contract_ticker"].isin(traded)]
                 hits = hits.sort_values("dt").drop_duplicates("contract_ticker", keep="first")
                 for _, r in hits.iterrows():
+                    # [2026-08-19] fee-aware fill cap (user directive): anchor
+                    # to the SIGNAL price, not the band cap. At fill=pm+1c the
+                    # 0.93+ buckets no longer clear the fee-inclusive breakeven
+                    # (0.93-0.95 +1.0pp, 0.95-0.97 -0.3pp vs 0.90-0.93 +5.3pp)
+                    # — top-bucket trades fill at mid or better only; the rest
+                    # keep the validated 1c allowance.
+                    pm_sig = float(r["p_market"])
+                    slip = 0.01 if pm_sig < 0.93 else 0.0
                     fill, ok = fill_for(auth, r["contract_ticker"], "yes",
-                                        PM_HI + 0.01)
+                                        pm_sig + slip)
                     append_trade({
                         "logged_at": datetime.now(timezone.utc).isoformat(),
                         "contract_ticker": r["contract_ticker"],

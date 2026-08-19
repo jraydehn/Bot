@@ -46,6 +46,11 @@ check "hourly_niche_runner_v2.py --asset ETH" logs/eth_hourly_niche_v2.log \
 # 3/3-window validated; tracker 08-18). Archive-tail pattern; [hb] lines.
 check "eth_hourly_fav_runner.py" logs/eth_hourly_fav.log \
       "python3 -u eth_hourly_fav_runner.py"
+# [2026-08-19] ETH hourly fav-RESCUES paper book (bands B/C outside the
+# fav range, sweep-validated w/ Aug confirm + 1c fill stress; A/D
+# rejected). First read ~09-01.
+check "eth_hourly_fav_rescues_runner.py" logs/eth_hourly_fav_rescues.log \
+      "python3 -u eth_hourly_fav_rescues_runner.py"
 check "btc_hourly_voltail_runner.py" results/btc_hourly_voltail_runner.log \
       "python3 -u btc_hourly_voltail_runner.py"
 check "eth_hourly_voltail_runner.py" results/eth_hourly_voltail_runner.log \

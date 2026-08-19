@@ -313,6 +313,10 @@ def load_trades(asset: str) -> pd.DataFrame:
                 _fv["logged_at"], format="mixed", utc=True,
                 errors="coerce").dt.tz_convert("America/Los_Angeles")
             _fv = _fv[_fv["logged_at"].notna()]
+            # [2026-08-19] live-fill accounting: unfilled attempts (filled=0)
+            # are recorded in the book but are not trades — exclude here.
+            if "filled" in _fv.columns:
+                _fv = _fv[pd.to_numeric(_fv["filled"], errors="coerce") == 1]
             _fv["side"] = "yes"
             _fv["decision"] = "trade"
             _fv["timeframe"] = "1h"

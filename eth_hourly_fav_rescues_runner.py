@@ -42,6 +42,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from hourly_live_fill import load_auth_or_die, fill_for
+
 BASE = Path(__file__).parent
 ARCHIVE = BASE / "results" / "eth_scan_archive.csv"
 BOOK = BASE / "results" / "paper_trades_eth_hourly_fav_rescues.csv"
@@ -58,7 +60,7 @@ BANDS = {
 }
 
 BOOK_COLS = ["logged_at", "band", "side", "contract_ticker", "close_ts",
-             "spot", "strike", "p_market", "tau_minutes", "stake",
+             "spot", "strike", "p_market", "fill_price", "filled", "tau_minutes", "stake",
              "resolved_yes", "would_win", "would_pnl", "fee_est", "would_pnl_net"]
 
 
@@ -117,13 +119,17 @@ def resolve_pending(arch: pd.DataFrame) -> None:
         if rv is None or (isinstance(rv, float) and rv != rv):
             continue
         rv = int(float(rv))
-        pm = float(book.at[i, "p_market"])
         stake = float(book.at[i, "stake"])
         side = str(book.at[i, "side"])
         win = (rv == 1) if side == "yes" else (rv == 0)
-        cost = pm if side == "yes" else 1.0 - pm
-        gross = round(stake * (1 - cost) / cost, 2) if win else -stake
-        fee = round((stake / cost) * 0.07 * pm * (1 - pm), 2)
+        filled = pd.to_numeric(book.at[i, "filled"], errors="coerce")
+        fill = pd.to_numeric(book.at[i, "fill_price"], errors="coerce")
+        if filled == 1 and fill == fill and 0 < fill < 1:
+            gross = round(stake * (1 - fill) / fill, 2) if win else -stake
+            fee = round((stake / fill) * 0.07 * fill * (1 - fill), 2)
+        else:  # signal fired but no executable fill — zero PnL row
+            gross = 0.0
+            fee = 0.0
         book.at[i, "resolved_yes"] = rv
         book.at[i, "would_win"] = int(win)
         book.at[i, "would_pnl"] = gross
@@ -142,6 +148,7 @@ def resolve_pending(arch: pd.DataFrame) -> None:
 
 def main() -> None:
     ensure_book()
+    auth = load_auth_or_die("[rescues]")
     st = load_state()
     traded = {b: set(st["traded"].get(b, [])) for b in BANDS}
     print(f"[rescues] ETH hourly fav-rescues paper runner up. bands: "
@@ -158,7 +165,9 @@ def main() -> None:
                     m = new["p_market"].ge(lo) & new["p_market"].lt(hi) & cfn(new[ccol])
                     hits = new[m & ~new["contract_ticker"].isin(traded[bname])]
                     hits = hits.sort_values("dt").drop_duplicates("contract_ticker", keep="first")
+                    cap = (hi + 0.01) if side == "yes" else ((1 - lo) + 0.01)
                     for _, r in hits.iterrows():
+                        fill, ok = fill_for(auth, r["contract_ticker"], side, cap)
                         append_trade({
                             "logged_at": datetime.now(timezone.utc).isoformat(),
                             "band": bname, "side": side,
@@ -166,13 +175,17 @@ def main() -> None:
                             "close_ts": r.get("close_ts", ""),
                             "spot": r["spot"], "strike": r["strike"],
                             "p_market": round(float(r["p_market"]), 4),
+                            "fill_price": round(fill, 4) if fill is not None else "",
+                            "filled": int(ok),
                             "tau_minutes": r["tau_minutes"], "stake": STAKE,
                             "resolved_yes": "", "would_win": "", "would_pnl": "",
                             "fee_est": "", "would_pnl_net": "",
                         })
                         traded[bname].add(r["contract_ticker"])
-                        print(f"  [TRADE:{bname}] {side.upper()} {r['contract_ticker']} "
-                              f"pm={r['p_market']:.3f} {ccol}={r[ccol]:.3g} "
+                        tag = "TRADE" if ok else "NOFILL"
+                        fs = f"{fill:.3f}" if fill is not None else "none"
+                        print(f"  [{tag}:{bname}] {side.upper()} {r['contract_ticker']} "
+                              f"pm={r['p_market']:.3f} cost={fs} {ccol}={r[ccol]:.3g} "
                               f"tau={r['tau_minutes']:.0f}m")
                 st["last_ts"] = str(new["dt"].max())
                 st["traded"] = {b: sorted(s)[-3000:] for b, s in traded.items()}

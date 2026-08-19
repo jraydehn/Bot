@@ -33,7 +33,12 @@ ASSET_DISPLAY_FROM = {
     # so the display will be sparse until it resumes trading — that is
     # correct, not missing data.]
     "BTC": "2026-08-13 22:31:00",
-    "ETH": "2026-07-28 22:15:13",
+    # [2026-08-19 per user: ETH hourly paper seat = YES-favorite book
+    # (eth_hourly_fav_runner, model-free bias, promoted at the post-crash
+    # fleet restart 01:50 UTC — model routes null x2, prior hourly book
+    # failing). Old production book relabeled 'benchmark' in load_trades.
+    # Prior cutoff: 2026-07-28 22:15:13.]
+    "ETH": "2026-08-19 01:50:00",
     "SOL": "2026-07-28 22:15:13",
     "BTC_OLD": "2026-07-21 17:27:13",  # cleared 2026-07-21 — ported 9 structural/infra bug
                                     # fixes (schema drift, degenerate ms/vd/of HMM decode,
@@ -293,6 +298,27 @@ def load_trades(asset: str) -> pd.DataFrame:
                                               errors="coerce").fillna(100.0)
             _nv["net_edge"] = _nv.get("fee_adj_edge")
             df_1h = pd.concat([df_1h, _nv], ignore_index=True, sort=False)
+        except Exception:
+            pass
+    # [2026-08-19] ETH hourly PAPER = YES-favorite book (promoted at the
+    # post-crash restart per user — model routes null x2, prior book
+    # failing). Same pattern as BTC/niche above; the fav book is
+    # model-free, so appended rows have no p_yes_model/net_edge.
+    if asset == "ETH" and not df_1h.empty:
+        try:
+            df_1h.loc[df_1h["decision"] == "trade", "decision"] = "benchmark"
+            _fv = pd.read_csv(RESULTS_DIR / "paper_trades_eth_hourly_fav.csv",
+                              low_memory=False)
+            _fv["logged_at"] = pd.to_datetime(
+                _fv["logged_at"], format="mixed", utc=True,
+                errors="coerce").dt.tz_convert("America/Los_Angeles")
+            _fv = _fv[_fv["logged_at"].notna()]
+            _fv["side"] = "yes"
+            _fv["decision"] = "trade"
+            _fv["timeframe"] = "1h"
+            _fv["bet_amount"] = pd.to_numeric(_fv.get("stake"),
+                                              errors="coerce").fillna(100.0)
+            df_1h = pd.concat([df_1h, _fv], ignore_index=True, sort=False)
         except Exception:
             pass
     if not df_15m.empty:
@@ -2231,7 +2257,12 @@ with tab_sol_hourly_ab:
          [("vol-tail", RESULTS_DIR / "paper_trades_eth_hourly_voltail.csv",
            "#b57edc", "tail"),
           ("niche v2", RESULTS_DIR / "paper_trades_eth_hourly_niche_v2.csv",
-           "#00c076", "dir")]),
+           "#00c076", "dir"),
+          # [2026-08-19] fav book promoted to the ETH hourly paper seat
+          # (see load_trades); shown here fee-net from its 08-18 launch.
+          ("fav ★PAPER (promoted 08-19)",
+           RESULTS_DIR / "paper_trades_eth_hourly_fav.csv",
+           "#f0a500", "dir")]),
     ]
     for _aname, _astart, _prod_csv, _chals in _AB_CFG:
         st.markdown(f"<div style='font-size:1.0rem;font-weight:700;color:#fff;"

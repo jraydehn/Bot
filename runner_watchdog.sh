@@ -38,6 +38,11 @@ check "paper_trade_runner_15m.py --asset SOL" logs/paper_sol.log \
 # mode it exists for). Hourly cadence: logs should tick every few min.
 check "btc_hourly_niche_runner.py" logs/btc_hourly_niche.log \
       "python3 -u btc_hourly_niche_runner.py"
+# [2026-08-20] niche REFRESH challenger (frozen model went silent 08-13,
+# staleness tell; refresh fires in drought, 6/6 seeds holdout-positive,
+# wf-July-fold caveat disclosed). Live-fill book. Read ~09-03.
+check "btc_hourly_niche_refresh_runner.py" logs/btc_hourly_niche_refresh.log \
+      "python3 -u btc_hourly_niche_refresh_runner.py"
 # [2026-08-18 READ] BTC niche v2 RETIRED (final +$178/136 vs v1 +$1,506/81;
 # no witness/hybrid value). ETH v2 stays — its book feeds the CORE referee.
 check "hourly_niche_runner_v2.py --asset ETH" logs/eth_hourly_niche_v2.log \

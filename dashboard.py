@@ -1632,8 +1632,13 @@ with tab_15m_shadow:
                 # Paper-runner arm swap waits on the shadow's own
                 # pre-registered 08-18 read.
                 if _a15 == "BTC" and _lbl == "shadow":
-                    _shad_book = _q[["contract_ticker", "dt", "side"]].copy()
+                    _shad_book = _q[["contract_ticker", "dt", "side",
+                                     "p_market"]
+                                    + (["spread"] if "spread" in _q.columns
+                                       else [])].copy()
                     _shad_book["pnl"] = _pnl.values
+                    _shad_book["win"] = np.asarray(_win, bool)
+                    _shad_book["stake"] = 100.0
                     # [2026-08-18 SHADOW-KV PACKAGE — the leave-no-stone
                     # gate search's product, user-wired same day] Two
                     # gated shadow monitor books. kalman/garch history
@@ -1711,10 +1716,14 @@ with tab_15m_shadow:
                                 "n": len(_qE2), "WR/BE": "—",
                                 "maxDD": f"${float((_cE2.cummax() - _cE2).max()):,.0f}",
                             })
-                        _shad_kv_book = _q[~np.asarray(_pkg_blk, bool)][
-                            ["contract_ticker", "dt", "side"]].copy()
-                        _shad_kv_book["pnl"] = _pnl[
-                            ~np.asarray(_pkg_blk, bool)].values
+                        _kvmask = ~np.asarray(_pkg_blk, bool)
+                        _shad_kv_book = _q[_kvmask][
+                            ["contract_ticker", "dt", "side", "p_market"]
+                            + (["spread"] if "spread" in _q.columns
+                               else [])].copy()
+                        _shad_kv_book["pnl"] = _pnl[_kvmask].values
+                        _shad_kv_book["win"] = np.asarray(_win, bool)[_kvmask]
+                        _shad_kv_book["stake"] = 100.0
                     except Exception:
                         _shad_kv_book = _shad_book
                     # [2026-08-14] shadow xHdamp(sol) — RETIRED FROM
@@ -1821,8 +1830,13 @@ with tab_15m_shadow:
                         f"DD ${_gdd15:,.0f})")
                     if _lbl == "production":
                         _prod_gk = _gk15[["contract_ticker", "dt",
-                                          "side"]].copy()
+                                          "side", "p_market"]
+                                         + (["spread"]
+                                            if "spread" in _gk15.columns
+                                            else [])].copy()
                         _prod_gk["pnl"] = _gp15.values
+                        _prod_gk["win"] = np.asarray(_gw, bool)
+                        _prod_gk["stake"] = np.asarray(_gs, float)
                         # [2026-08-14] xMFconv (user directive: mkt-fav as
                         # the kelly SIZER — flat-kelly hits the 10% cap on
                         # ~every trade, so sizing carried no information).
@@ -2158,6 +2172,79 @@ with tab_15m_shadow:
                             "WR/BE": "—",
                             "maxDD": f"${_ddd2:,.0f}",
                         })
+                    # [2026-08-20] GO-LIVE INFRASTRUCTURE MONITORS (user
+                    # build):
+                    # (a) ‹mon› DUALv2 barbell — drop mid-cost trades, keep
+                    #     cost<=0.20 | >=0.70 on both arms. The MIDDLE CUT
+                    #     is the only threshold-robust finding of the 08-20
+                    #     cost sweep (removed PnL negative in both eras at
+                    #     every boundary combo); band edges are plateau
+                    #     centers, not fitted peaks. Scored as a convexity
+                    #     book (ticket EV + carry) at 08-22/08-29.
+                    # (b) DUAL v2+KV (fill-true) — same trades repriced at
+                    #     the prices the LIVE order path actually pays
+                    #     (YES: ask+1c = pm+spread/2+0.01; NO: 1-bid =
+                    #     1-pm+spread/2; fee on fill; cost>=0.99 = no
+                    #     fill, $0). THIS is the go-live number the 08-22
+                    #     read should quote.
+                    try:
+                        _bb_rows, _ft_rows = [], []
+                        for _armf in (_prod_gk, _sb2):
+                            if not {"p_market", "win", "stake",
+                                    "pnl"}.issubset(
+                                        getattr(_armf, "columns", [])):
+                                continue
+                            _apm = pd.to_numeric(_armf["p_market"],
+                                                 errors="coerce").values
+                            _asp = pd.to_numeric(
+                                _armf["spread"], errors="coerce").fillna(
+                                    0.01).values if "spread" in \
+                                _armf.columns else np.full(len(_armf), 0.01)
+                            _ays = (_armf["side"] == "yes").values
+                            _amc = np.where(_ays, _apm, 1 - _apm)
+                            for _dtv, _pv in zip(
+                                    _armf["dt"][(_amc <= 0.20)
+                                                | (_amc >= 0.70)],
+                                    _armf["pnl"][(_amc <= 0.20)
+                                                 | (_amc >= 0.70)]):
+                                _bb_rows.append((_dtv, _pv))
+                            _cf = np.where(_ays, _apm + _asp / 2 + 0.01,
+                                           1 - _apm + _asp / 2)
+                            _stk = pd.to_numeric(_armf["stake"],
+                                                 errors="coerce").values
+                            _aw = _armf["win"].astype(bool).values
+                            _feef = (_stk / np.clip(_cf, 0.01, None)) \
+                                * 0.07 * _apm * (1 - _apm)
+                            _pf = np.where(
+                                _cf >= 0.99, 0.0,
+                                np.where(_aw, _stk * (1 - _cf) / _cf,
+                                         -_stk) - _feef)
+                            for _dtv, _pv in zip(_armf["dt"], _pf):
+                                _ft_rows.append((_dtv, _pv))
+                        for _nm, _rw, _clr2, _dsh2 in (
+                                ("‹mon› DUALv2 barbell (≤.20|≥.70)",
+                                 _bb_rows, "#e2586e", "dash"),
+                                ("DUAL v2+KV (fill-true live px)",
+                                 _ft_rows, "#00c076", "solid")):
+                            _Px = pd.DataFrame(
+                                _rw, columns=["dt", "pnl"]).sort_values("dt")
+                            if not len(_Px):
+                                continue
+                            _fig15.add_trace(go.Scatter(
+                                x=[_cfg15["start"]] + list(_Px["dt"]),
+                                y=[0.0] + list(_Px["pnl"].cumsum()),
+                                name=_nm,
+                                line=dict(color=_clr2, width=1.5,
+                                          dash=_dsh2)))
+                            _cx = _Px["pnl"].cumsum()
+                            _rows15.append({
+                                "book": _nm,
+                                "net": f"${_Px['pnl'].sum():+,.0f}",
+                                "n": len(_Px), "WR/BE": "—",
+                                "maxDD": f"${float((_cx.cummax() - _cx).max()):,.0f}",
+                            })
+                    except Exception:
+                        pass
                     # [2026-08-14] DUAL v3c (user call, takes the blend's
                     # seat): 12-gate g+k arm sized by xMFconv (mkt-fav
                     # conviction tiers) + shadow arm sized by xHdamp

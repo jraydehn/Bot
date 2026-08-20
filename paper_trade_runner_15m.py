@@ -3444,6 +3444,74 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 (_REPLICA_TRADED_MF if _bk == "shadow"
                  else _REPLICA_TRADED).add(ticker)
                 _wrote = True
+                # [2026-08-20] LIVE ORDER PATH for the DUAL v2+KV replica
+                # (go-live infrastructure build, user-approved): the legacy
+                # Pass-3 live block is unreachable for BTC — this branch
+                # `continue`s before it — so live orders for both arms are
+                # placed here. INERT until run_all_15m passes --live for
+                # BTC. Guard chain mirrors Pass 3 (cascading daily loss
+                # limit -> order params -> balance -> place_order -> live
+                # CSV log). Arm sizing: prod = kelly stake, shadow = flat
+                # $100 (_rstake already carries each).
+                if is_live and auth is not None:
+                    try:
+                        _lv_csv = live_trading.get_live_csv_path(asset)
+                        _lv_lim, _lv_why = cascading_daily_loss_limit(
+                            _csv_path(asset),
+                            base_limit=daily_loss_limit or 150.0)
+                        if _lv_lim != (daily_loss_limit or 150.0):
+                            print(f"    [loss_limit_cascade] {_lv_why}")
+                        if not live_trading.check_daily_loss_limit(
+                                _lv_lim, _lv_csv, series="15m"):
+                            print("  [live] Daily loss limit reached — "
+                                  "skipping live order.")
+                        else:
+                            _lv_price, _lv_count = \
+                                live_trading.compute_order_params(
+                                    side=_rside, bet_amount=_rstake,
+                                    bid=c.get("bid", p_market - 0.005),
+                                    ask=c.get("ask", p_market + 0.005),
+                                    max_contracts=500)
+                            if _lv_count == 0:
+                                print(f"  [live] ${_rstake:.2f} too small "
+                                      f"for one contract — skipping.")
+                            else:
+                                _lv_bal = live_trading.get_balance(auth)
+                                _lv_cost = _lv_count * (
+                                    _lv_price if _rside == "yes"
+                                    else (100 - _lv_price)) / 100.0
+                                if (_lv_bal is not None
+                                        and _lv_cost > _lv_bal):
+                                    print("  [live] Insufficient balance "
+                                          "— skipping order.")
+                                else:
+                                    _lv_res = live_trading.place_order(
+                                        auth=auth, ticker=ticker,
+                                        side=_rside, count=_lv_count,
+                                        yes_price=_lv_price)
+                                    live_trading.log_live_trade(
+                                        row={
+                                            "contract_ticker": ticker,
+                                            "spot": round(spot, 4),
+                                            "strike": round(floor_s, 4),
+                                            "offset_pct":
+                                                round(offset_pct, 4),
+                                            "p_market":
+                                                round(p_market, 4),
+                                            "p_yes_model":
+                                                round(p_model_yes, 4),
+                                            "net_edge": round(_redge, 4),
+                                            "bet_amount":
+                                                round(_lv_cost, 4),
+                                            "bankroll": bankroll,
+                                        },
+                                        order_result=_lv_res,
+                                        yes_price_cents=_lv_price,
+                                        count=_lv_count, side=_rside,
+                                        asset=asset, csv_path=_lv_csv)
+                    except Exception as _lvex:
+                        print(f"  [live] order path error ({_bk}): "
+                              f"{_lvex}")
             # scan record: a pass row when nothing traded, or when the
             # prod book's blocked-consumption marker would otherwise be
             # lost because only mkt-fav wrote a trade row.
@@ -5886,6 +5954,14 @@ def _build_row(
         "hurst_exponent_15m":   _f(sig.get("hurst_exponent_15m")),
         "ou_theta_15m":         _f(sig.get("ou_theta_15m")),
         "arima_forecast_15m":   _f(sig.get("arima_forecast_15m")),
+        # [2026-08-20] BUG FIX: garch_vol_15m/garch_sur_15m were computed
+        # into sig (BTC SHADOW-KV block) and declared in CSV_COLUMNS but
+        # never emitted here — blank on every live row since the 08-18
+        # deploy (the kv|garch monitor book was running on backfill only).
+        "garch_vol_15m":        _f(sig.get("garch_vol_15m")),
+        "garch_sur_15m":        _f(sig.get("garch_sur_15m")),
+        "garch_vol_1h":         _f(sig.get("garch_vol_1h")),
+        "garch_sur_1h":         _f(sig.get("garch_sur_1h")),
         "is_live":              1 if is_live else 0,
         "eth_regime_bos":       sig.get("eth_regime_bos", ""),
         "eth_bos_streak":       sig.get("eth_bos_streak", ""),

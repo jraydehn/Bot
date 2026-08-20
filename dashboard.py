@@ -2277,6 +2277,11 @@ with tab_sol_hourly_ab:
            RESULTS_DIR / "paper_trades_eth_hourly_fav.csv",
            "#f0a500", "dir")]),
     ]
+    def _maxdd(_pnls):
+        # peak-to-trough drawdown of the cumulative flat-$100 curve
+        _c = _pnls.cumsum()
+        return float((_c.cummax() - _c).max()) if len(_c) else 0.0
+
     for _aname, _astart, _prod_csv, _chals in _AB_CFG:
         st.markdown(f"<div style='font-size:1.0rem;font-weight:700;color:#fff;"
                     f"margin:14px 0 6px 0;'>{_aname} hourly — since {_astart}"
@@ -2372,7 +2377,8 @@ with tab_sol_hourly_ab:
                 _cols[0].metric("production: net (flat $100)",
                                 f"${_pq['pnl'].sum():+,.0f}",
                                 f"{len(_pq)} resolved · WR {_prw.mean():.0%} "
-                                f"vs BE {np.mean(_prc):.0%}{_gk_txt}")
+                                f"vs BE {np.mean(_prc):.0%} · "
+                                f"DD ${_maxdd(_pq['pnl']):,.0f}{_gk_txt}")
             else:
                 _cols[0].metric("production: net (flat $100)", "—", "collecting…")
             for _ci, (_lbl, _path, _clr, _kind) in enumerate(_chals, start=1):
@@ -2495,7 +2501,9 @@ with tab_sol_hourly_ab:
                     _cols[_ci].metric(f"{_lbl}: net (flat $100)",
                                       f"${_rq['would_pnl_net'].sum():+,.0f}",
                                       f"{len(_rq)} resolved · WR {_wr:.0%} vs "
-                                      f"BE {_be:.0%}{_gtxt} · {_pend} pending")
+                                      f"BE {_be:.0%} · "
+                                      f"DD ${_maxdd(_rq['would_pnl_net']):,.0f}"
+                                      f"{_gtxt} · {_pend} pending")
                 else:
                     _cols[_ci].metric(f"{_lbl}: net (flat $100)", "—",
                                       f"collecting… ({_pend} pending)")

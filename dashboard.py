@@ -2387,8 +2387,15 @@ with tab_sol_hourly_ab:
         # +$1,802 vs the real +$490 (user caught it). Voltail unaffected
         # (no rows before 08-04).
         ("BTC", "2026-07-28", RESULTS_DIR / "paper_trades.csv",
-         [("vol-tail", RESULTS_DIR / "paper_trades_btc_hourly_voltail.csv",
-           "#b57edc", "tail"),
+         # [2026-08-20 per user] vol-tail line REPLACED by the niche
+         # REFRESH challenger (frozen niche silent since 08-13; refresh
+         # 6/6 seeds holdout-positive, wf-July caveat, live-fill book,
+         # read ~09-03). Voltail RUNNER untouched — CSV accrues, its
+         # ~08-22 pre-registered read happens off-dashboard (v7/v8
+         # precedent).
+         [("niche REFRESH (live-fill)",
+           RESULTS_DIR / "paper_trades_btc_hourly_niche_refresh.csv",
+           "#b57edc", "dir"),
           ("niche v1 ★PAPER (promoted 08-14)", RESULTS_DIR / "paper_trades_btc_hourly_niche.csv",
            "#f0a500", "dir"),
           ("niche v2", RESULTS_DIR / "paper_trades_btc_hourly_niche_v2.csv",

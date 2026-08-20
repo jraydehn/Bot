@@ -1727,6 +1727,45 @@ with tab_15m_shadow:
                                 "n": len(_qE2), "WR/BE": "—",
                                 "maxDD": f"${float((_cE2.cummax() - _cE2).max()):,.0f}",
                             })
+                        # [2026-08-20 ‹mon› KV ×VOLdamp — pre-declared,
+                        # user sizing survey for the shadow arm] The only
+                        # monotone-STABLE sizing signals across split
+                        # halves of the KV-gated replay (n=114) are
+                        # calm-tape ones: realized_vol_annual and side-
+                        # aware pm-chase — the arm's OWN edge is NOT
+                        # stable-monotone there (temper xEDGEconv
+                        # expectations at its 08-25 read). Declared rule,
+                        # round constant, one change: stake ×0.5 when
+                        # realized_vol_annual >= 0.30 (fires ~33%; replay
+                        # per-trade sharpe pre 0.322->0.312 / post
+                        # 0.052->0.080 — weak-half improvement for small
+                        # strong-half cost). Monitor ONLY; read ~09-03;
+                        # never stack with xEDGEconv before both confirm.
+                        try:
+                            _rvVD = pd.to_numeric(
+                                _q.get("realized_vol_annual"),
+                                errors="coerce")
+                            _wVD = np.where((_rvVD >= 0.30).fillna(False),
+                                            0.5, 1.0)
+                            _kvk2 = ~np.asarray(_pkg_blk, bool)
+                            _pVD = _pnl[_kvk2] * _wVD[_kvk2]
+                            _qVD = _q[_kvk2]
+                            if len(_qVD):
+                                _fig15.add_trace(go.Scatter(
+                                    x=[_cfg15["start"]] + list(_qVD["dt"]),
+                                    y=[0.0] + list(_pVD.cumsum()),
+                                    name="‹mon› KV ×VOLdamp (×0.5 @rv≥.30)",
+                                    line=dict(color=_clr, width=1.5,
+                                              dash="dot")))
+                                _cVD = _pVD.cumsum()
+                                _rows15.append({
+                                    "book": "‹mon› KV ×VOLdamp",
+                                    "net": f"${_pVD.sum():+,.0f}",
+                                    "n": len(_qVD), "WR/BE": "—",
+                                    "maxDD": f"${float((_cVD.cummax() - _cVD).max()):,.0f}",
+                                })
+                        except Exception:
+                            pass
                         _kvmask = ~np.asarray(_pkg_blk, bool)
                         _shad_kv_book = _q[_kvmask][
                             ["contract_ticker", "dt", "side", "p_market"]

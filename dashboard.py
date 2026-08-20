@@ -2077,6 +2077,22 @@ with tab_15m_shadow:
                              _combE & _dip_okE & _vh_okE, "dot", "#ff7eb6"),
                             ("‹mon› DIP +oidrop",
                              _combE & _dip_okE & _oi_okE, "dot", "#c49c48"),
+                            # [2026-08-20 ‹mon› ×INVdamp — pre-declared,
+                            # user build] ETH 15m conviction is INVERTED
+                            # at the top: hi-edge tercile WR 21%/20% and
+                            # −$148/−$118 per trade in BOTH eras since the
+                            # 08-12 promotion, while plain kelly saturates
+                            # its 10% cap on 91% of trades — max stake on
+                            # the model's worst opinions. Constants
+                            # DECLARED not fitted: stake ×0.4 when fee-adj
+                            # edge >= 0.09, ×1.0 below. Inverse-conviction
+                            # findings are post-selection-inversion
+                            # cousins (house rule): monitor ONLY, pure
+                            # sizing A/B vs ★PAPER (identical trades);
+                            # score ~09-03 vs plain paper and xHdamp;
+                            # wire only if it leads.
+                            ("‹mon› PAPER ×INVdamp", _combE & _dip_okE,
+                             "dot", "#7bb662"),
                             ("g+k +knife xHdamp", _okE & _kn_okE,
                              "longdash", "#9aa0a6")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
@@ -2102,6 +2118,11 @@ with tab_15m_shadow:
                                 (pd.to_numeric(_gkE["h_sol"],
                                                errors="coerce") - 0.4) / 0.2,
                                 0.25, 1.0).fillna(1.0)
+                        if _vnE == "‹mon› PAPER ×INVdamp":
+                            _gpE = _gpE * np.where(
+                                pd.to_numeric(_gkE["edge"],
+                                              errors="coerce") >= 0.09,
+                                0.4, 1.0)
                         if len(_gkE):
                             _fig15.add_trace(go.Scatter(
                                 x=[_cfg15["start"]] + list(_gkE["dt"]),

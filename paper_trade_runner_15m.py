@@ -5315,7 +5315,16 @@ def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
                                     or (20 <= sk15 < 40)))
                        or (sk1 >= 95 and liq == -1))
             else:
-                hit = ((chg1h > 0 and 30 <= sk1 < 70)
+                # [2026-08-20] MID-COST NO BLOCK (user-approved bleed cut):
+                # NO with cost in (0.20, 0.50] — i.e. pm in [0.50, 0.80) —
+                # bleeds in EVERY model era (May-Jun −$457/390, Jul
+                # −$573/43, replica −$2,605/15 @ WR 13%), boundary-plateau
+                # stable, wins-blocked +$546 vs losses-blocked −$3,151 in
+                # the replica era. Anti-informative divergence fighting
+                # trending favorites. Tickets (pm>=0.80 → NO-cost<=0.20)
+                # and the favorites band are untouched.
+                hit = ((0.50 <= pm < 0.80)
+                       or (chg1h > 0 and 30 <= sk1 < 70)
                        or (m1 == "Sideways" and pm >= 0.70 and sk1 >= 70)
                        or (m1 == "Sideways" and m15 == "Sideways"
                            and pm >= 0.55)

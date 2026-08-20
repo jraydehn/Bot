@@ -1783,6 +1783,14 @@ with tab_15m_shadow:
                                    | ((_sk15q >= 20) & (_sk15q < 40))))
                     _ok15 &= ~(_yes15 & (_sk1hq >= 95)
                                & (_q["liq_score"] == -1).fillna(False))
+                    # [2026-08-20] mid-cost NO block mirror (runner gate
+                    # deployed ~04:50 UTC; era-robust bleed cut, see
+                    # _replica_decide_btc comment). dt-gated so displayed
+                    # history is NOT retroactively flattered — pre-deploy
+                    # rows keep the book's real record.
+                    _ok15 &= ~(_no15 & (_pm15 >= 0.50) & (_pm15 < 0.80)
+                               & (_q["dt"] >= pd.Timestamp(
+                                   "2026-08-20 04:50", tz="UTC")))
                     _ok15 &= ~(_no15 & (_q["chg_1h"].fillna(0) > 0)
                                & (_sk1hq >= 30) & (_sk1hq < 70))
                     _ok15 &= ~(_no15 & (_m1r == "Sideways")

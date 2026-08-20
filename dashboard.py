@@ -2239,7 +2239,16 @@ with tab_sol_hourly_ab:
         # [2026-08-06] v7/v8 removed from DISPLAY (user: nowhere near
         # deployable). Runners + CSVs keep accruing; their 08-13/14
         # retirement read happens off-dashboard.
-        ("SOL", "2026-07-30", RESULTS_DIR / "paper_trades_sol.csv", []),
+        # [2026-08-19 per user: SOL fav + rescues books added as CHALLENGER
+        # LINES only — seat and cutoff unchanged (production isn't failing);
+        # promotion question deferred to the ~09-01 read. Books are
+        # live-fill accounting from birth (no era mixing).]
+        ("SOL", "2026-07-30", RESULTS_DIR / "paper_trades_sol.csv",
+         [("fav (YES .80-.97, live-fill)",
+           RESULTS_DIR / "paper_trades_sol_hourly_fav.csv", "#f0a500", "dir"),
+          ("fav-rescues B/C/M (live-fill)",
+           RESULTS_DIR / "paper_trades_sol_hourly_fav_rescues.csv",
+           "#00c076", "mixed")]),
         # [2026-08-14] niche v1/v2 books ADDED TO DISPLAY (user believed the
         # hourly seat was empty — the live niche challengers were never on
         # this tab; both forward-positive since 07-28: v1 +$1,506/81 all
@@ -2368,6 +2377,10 @@ with tab_sol_hourly_ab:
                 _cols[0].metric("production: net (flat $100)", "—", "collecting…")
             for _ci, (_lbl, _path, _clr, _kind) in enumerate(_chals, start=1):
                 _b = pd.read_csv(_path, low_memory=False)
+                # [2026-08-19] live-fill books: filled=0 rows are recorded
+                # no-fill attempts (zero PnL), not trades — exclude.
+                if "filled" in _b.columns:
+                    _b = _b[pd.to_numeric(_b["filled"], errors="coerce") == 1]
                 _b["dt"] = pd.to_datetime(_b["logged_at"], errors="coerce", utc=True, format="mixed")
                 for _c in ["p_market", "would_pnl_net"]:
                     if _c in _b.columns:
@@ -2376,6 +2389,11 @@ with tab_sol_hourly_ab:
                         _b[_c] = np.nan
                 _b = _b[_b["dt"] >= _abst]
                 if _kind == "tail":
+                    _res = _b[_b["would_pnl_net"].notna()]
+                elif _kind == "mixed":
+                    # [2026-08-19] fav-rescue books log YES and NO bands —
+                    # both sides count (the plain side filter below is the
+                    # v7/v8-era YES-primary convention, wrong here).
                     _res = _b[_b["would_pnl_net"].notna()]
                 elif "side" in _b.columns:
                     _res = _b[(_b["side"] == "yes") & _b["would_pnl_net"].notna()]
@@ -2434,10 +2452,16 @@ with tab_sol_hourly_ab:
                             pass
                     _wr = float(pd.to_numeric(_rq["would_win"],
                                               errors="coerce").mean())
-                    _be = (float(_rq["p_market"].mean())
-                           if _rq["p_market"].notna().any()
-                           else float(pd.to_numeric(_rq.get("cost_ask"),
-                                                    errors="coerce").mean()))
+                    if _kind == "mixed" and "side" in _rq.columns:
+                        # side-aware breakeven: NO trades cost 1 - p_market
+                        _be = float(np.where(_rq["side"] == "no",
+                                             1 - _rq["p_market"],
+                                             _rq["p_market"]).mean())
+                    else:
+                        _be = (float(_rq["p_market"].mean())
+                               if _rq["p_market"].notna().any()
+                               else float(pd.to_numeric(_rq.get("cost_ask"),
+                                                        errors="coerce").mean()))
                     _gtxt = ""
                     if _kind == "tail":
                         # [2026-08-06] mean-cost "BE" is misleading when leg

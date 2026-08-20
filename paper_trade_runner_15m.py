@@ -5399,6 +5399,20 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
             return d
     sk1 = _fv("stoch_k_1h", 50.0)
     if a == "SOL":
+        # [2026-08-20] CHEAP-TICKET BLOCK (user-approved bleed cut): block
+        # BOTH sides at cost <= 0.20. Era-robust on the real book (4/4
+        # eras negative: −$380/104, −$555/20, −$151/3, −$275/2; WR 14.0%
+        # vs 15.4% implied = fee drag, no harvested upside — SOL
+        # mean-reverts, mirror-image of BTC where tickets are the
+        # engine). Slope-model's own ungated ticket stream: 588 tickets
+        # WR 9% −$18,119 over 3 wks. Rescue sweeps: 11/12 level rules
+        # and 9/9 slope rules reversed sel→confirm — unrescuable on
+        # current evidence. Blocked-consumption logs the population
+        # (full slope cols) for the pre-registered ~09-15 forward
+        # rescue read. Boundary real: 0.20-0.25 band is positive 3/4
+        # eras — do not widen.
+        if (pm if side == "yes" else 1 - pm) <= 0.20:
+            return blocked
         m6 = str(sig.get("markov_sol_6h") or "")
         m4 = str(sig.get("markov_sol_4h") or "")
         m1 = str(sig.get("markov_sol_1h") or "")

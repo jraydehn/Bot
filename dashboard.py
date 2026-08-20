@@ -1158,6 +1158,17 @@ with tab_sol_shadow:
                 _s["edge"] = np.maximum(_ey, _en)
                 _q = _s[_s["edge"] >= 0.04].sort_values("dt").drop_duplicates(
                     "contract_ticker", keep="first")
+                # [2026-08-20] cheap-ticket block mirror (runner gate in
+                # _replica_decide, live ~05:30 UTC): both sides at cost
+                # <= 0.20 are blocked-consumed. Applied AFTER keep-first
+                # dedup (matches blocked-consumption semantics) and
+                # dt-gated so displayed history is not retroactively
+                # flattered.
+                _tkc = np.where(_q["side"] == "yes", _q["p_market"],
+                                1 - _q["p_market"])
+                _q = _q[~((_tkc <= 0.20)
+                          & (_q["dt"] >= pd.Timestamp("2026-08-20 05:30",
+                                                      tz="UTC")))]
                 _cost = np.where(_q["side"] == "yes", _q["p_market"], 1 - _q["p_market"])
                 _win = np.where(_q["side"] == "yes", _q["resolved_yes"] == 1,
                                 _q["resolved_yes"] == 0)

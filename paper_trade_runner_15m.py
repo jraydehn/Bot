@@ -816,6 +816,12 @@ CSV_COLUMNS = [
     # never logged (garch-class gap, user-caught) — needed for the
     # dashboard's rescue replay and any RESC-5 audit.
     "z_spot_6h_live",
+    # [2026-08-21] PERMANENT per-model SOL streams (user rework): these
+    # columns NEVER change meaning across seat swaps — p_sol_old = the
+    # default/iso model, p_sol_slope = the slope model, logged every SOL
+    # scan regardless of which one decides. Seat swaps touch ONLY the
+    # deciding wiring, never these.
+    "p_sol_old", "p_sol_slope",
     # [2026-08-18 ETH DIP PACKAGE] ETH-only per-scan GARCH(1,1) 1h vol
     # forecast + surprise — inputs to the tab's 'volhot' monitor book
     # (block when garch_sur_1h >= -0.0848; post-heavy evidence, monitor
@@ -3147,6 +3153,9 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                                              model_override=_sol_prom)
         else:
             p_model_no  = compute_p_model_15m(spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
+        if asset.upper() == "SOL":
+            # permanent per-model stream: default model = old/iso
+            sig["p_sol_old"] = p_model_no
         if asset == "BTC" and _zdrift_15m is not None:
             p_model_yes = compute_p_yes_zdrift_15m(spot, floor_s, tau_min, sig, _zdrift_15m, p_market)
         else:
@@ -3198,6 +3207,8 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             _lgbm_shadows[ticker] = compute_p_model_15m(
                 spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
                 model_override=_sol_sh)
+            # permanent per-model stream: slope model
+            sig["p_sol_slope"] = _lgbm_shadows[ticker]
         elif asset.upper() == "BTC" and _btc_sh is not None:
             # [2026-08-05] BTC p_gbdt seat SWAPPED: market-anchored challenger
             # (train_btc15m_mktanchor_20260805.py — predicts outcome from
@@ -6000,6 +6011,8 @@ def _build_row(
         "garch_vol_1h":         _f(sig.get("garch_vol_1h")),
         "garch_sur_1h":         _f(sig.get("garch_sur_1h")),
         "z_spot_6h_live":       _f(sig.get("z_spot_6h_live")),
+        "p_sol_old":            _f(sig.get("p_sol_old")),
+        "p_sol_slope":          _f(sig.get("p_sol_slope")),
         "is_live":              1 if is_live else 0,
         "eth_regime_bos":       sig.get("eth_regime_bos", ""),
         "eth_bos_streak":       sig.get("eth_bos_streak", ""),

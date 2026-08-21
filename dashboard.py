@@ -1025,11 +1025,12 @@ with tab_sol_shadow:
     st.markdown(
         "<div style='color:#f0a500;font-size:0.78rem;margin-bottom:8px;'>"
         "SOL 15m model A/B on identical live scans since 2026-07-30 01:00 UTC. "
-        "ROLE SWAP 2026-08-12 18:00 UTC (slope model PROMOTED to the paper "
-        "decision path): from then on, blue/p_model_15m = the promoted slope "
-        "model (now deciding) and orange/p_gbdt = the demoted iso+z-expansion "
-        "model. Before then, the reverse. Books remain hypothetical replays "
-        "on identical scans."
+        "[2026-08-21 PER-MODEL REWORK] Rows are now MODELS, not columns: "
+        "blue/p_sol_old = the iso+z-expansion model (★DECIDING since the "
+        "08-21 re-swap; also decided pre-08-12), orange/p_sol_slope = the "
+        "slope model (decided 08-12→08-21). These streams NEVER change "
+        "meaning across seat swaps — totals are one model each. Books "
+        "remain hypothetical replays on identical scans."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -1075,7 +1076,8 @@ with tab_sol_shadow:
     try:
         _shp = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False)
         _shp["dt"] = pd.to_datetime(_shp["logged_at"], errors="coerce", utc=True, format="mixed")
-        for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes",
+        for _c in ["p_market", "p_model_15m", "p_gbdt", "p_sol_old",
+                   "p_sol_slope", "resolved_yes",
                    "sol_persist_score", "slope120_stoch_k_15m",
                    "stoch_cross_1h", "stoch_k_1h", "oi_chg_pct",
                    "offset_pct", "z_drift_6h", "vol_ratio_1h",
@@ -1155,8 +1157,14 @@ with tab_sol_shadow:
             # p_model_15m = old / slope / old across the two boundaries;
             # p_gbdt the mirror. The era_split dump splits only at the
             # 08-12 boundary — reads after 08-21 must also split there.
-            for _lbl, _col, _clr in [("deciding", "p_model_15m", "#4f8bf9"),
-                                     ("companion", "p_gbdt", "#f0a500")]:
+            # [2026-08-21 PER-MODEL REWORK, user call] rows were COLUMN
+            # streams (mixed models across seat swaps — three reads burned
+            # on the chimera). Now each row is ONE model, permanently:
+            # p_sol_old / p_sol_slope never change meaning. The ★DECIDING
+            # tag marks whichever currently drives the paper book.
+            for _lbl, _col, _clr in [
+                    ("old model ★DECIDING", "p_sol_old", "#4f8bf9"),
+                    ("slope model", "p_sol_slope", "#f0a500")]:
                 _s = _sh.dropna(subset=[_col]).copy()
                 _fee = 0.07 * _s["p_market"] * (1 - _s["p_market"])
                 _ey = _s[_col] - _s["p_market"] - _fee
@@ -1422,8 +1430,8 @@ with tab_sol_shadow:
                     # now carries its model row.
                     _cell15 = (f"${_vp.sum():+,.0f} (n={len(_vq)}, "
                                f"DD ${_vdd:,.0f})")
-                    _r[_vn] = (f"‹comp› {_cell15}" if _lbl == "companion"
-                               else _cell15)
+                    _r[_vn] = (f"‹slope› {_cell15}"
+                               if _lbl.startswith("slope") else _cell15)
                     # [2026-08-20] era-split mirror for the swap-boundary
                     # question (user: which MODEL is better — the rows are
                     # COLUMN streams, mixed models across the 08-12 18:00
@@ -1493,11 +1501,11 @@ with tab_sol_shadow:
                                 default=str, indent=1))
             except Exception:
                 pass
-            _dis = _sh.dropna(subset=["p_gbdt", "p_model_15m"])
-            _dis = _dis[(_dis["p_gbdt"] - _dis["p_model_15m"]).abs() >= 0.05]
+            _dis = _sh.dropna(subset=["p_sol_old", "p_sol_slope"])
+            _dis = _dis[(_dis["p_sol_old"] - _dis["p_sol_slope"]).abs() >= 0.05]
             if len(_dis):
                 _shadow_right = np.mean(
-                    np.where(_dis["p_gbdt"] > _dis["p_model_15m"],
+                    np.where(_dis["p_sol_slope"] > _dis["p_sol_old"],
                              _dis["resolved_yes"] == 1, _dis["resolved_yes"] == 0))
                 st.caption(f"Model disagreements ≥5pp: {len(_dis)} scans — shadow's side "
                            f"settled correct {_shadow_right:.0%} of the time.")
@@ -1565,7 +1573,8 @@ with tab_15m_shadow:
                     pd.to_numeric(_abp[_bc], errors="coerce"))
         except Exception:
             pass
-        for _c in ["p_market", "p_model_15m", "p_gbdt", "resolved_yes",
+        for _c in ["p_market", "p_model_15m", "p_gbdt", "p_sol_old",
+                   "p_sol_slope", "resolved_yes",
                    "offset_pct", "body_15m", "dir_15m", "stoch_k_5m",
                    "stoch_k_15m", "stoch_k_1h", "chg_5m", "chg_15m", "chg_1h",
                    "composite_p_up", "liq_score", "vol_ratio",

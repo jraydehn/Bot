@@ -3131,7 +3131,16 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # slope-shadow (user promotion after the 08-11 review + candidate
         # staging). Production model still computed below and logged to
         # p_gbdt (role swap) so the A/B record continues uninterrupted.
-        _sol_prom = globals().get("_SOL_SHADOW") if asset.upper() == "SOL" else None
+        # [2026-08-21 RE-SWAP, user call after the era-split read] The
+        # 08-12 slope promotion INVERTED immediately: post-swap the demoted
+        # old model beat the slope model on EVERY gate variant (zd65+path
+        # +4,253 vs +2,173; paper cfg +2,045 vs +1,308; tab-verified
+        # era-split, sol_shadow_tab_stats.json 08-21). OLD MODEL DECIDES
+        # AGAIN; slope returns to the p_gbdt companion stream. Third
+        # promoted-leader inversion on this seat — caveat on record: this
+        # re-swap itself promotes the current leader. Boundary 08-21
+        # ~04:15 UTC; never score across it blind.
+        _sol_prom = None
         if _sol_prom is not None:
             p_model_no = compute_p_model_15m(spot, floor_s, tau_min, sig,
                                              asset=asset, p_market=p_market,
@@ -3182,12 +3191,13 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         _sol_sh = globals().get("_SOL_SHADOW")
         _btc_sh = globals().get("_BTC_SHADOW")
         if asset.upper() == "SOL" and _sol_sh is not None:
-            # [2026-08-12 PROMOTION role swap] slope model now DECIDES (and
-            # logs to p_model_15m); p_gbdt carries the demoted production
-            # model so the A/B stream continues (labels on the SOL SHADOW
-            # tab: "production"=slope-decided book, "shadow"=old model).
+            # [2026-08-21 RE-SWAP] p_gbdt carries the SLOPE model again
+            # (demoted after its post-promotion inversion; see the re-swap
+            # comment at the decision block). The A/B stream continues
+            # with roles back to the pre-08-12 assignment.
             _lgbm_shadows[ticker] = compute_p_model_15m(
-                spot, floor_s, tau_min, sig, asset=asset, p_market=p_market)
+                spot, floor_s, tau_min, sig, asset=asset, p_market=p_market,
+                model_override=_sol_sh)
         elif asset.upper() == "BTC" and _btc_sh is not None:
             # [2026-08-05] BTC p_gbdt seat SWAPPED: market-anchored challenger
             # (train_btc15m_mktanchor_20260805.py — predicts outcome from

@@ -1116,6 +1116,7 @@ with tab_sol_shadow:
             # ranked, then the selector renders with the dynamic default.
             _figsh = go.Figure()
             _rows = []
+            _era_rows = []
             _traces = []
             _famdaily = {}
 
@@ -1148,6 +1149,12 @@ with tab_sol_shadow:
             # moment (p_model_15m — old model pre-18:00, slope after);
             # "companion" = the non-deciding comparison stream (p_gbdt).
             # Truthful across the swap boundary, unlike production/shadow.
+            # [2026-08-21 RE-SWAP ~04:15 UTC, user call] OLD model decides
+            # again (slope's post-promotion record lost to it on every
+            # variant — era-split verified). Column-model map now:
+            # p_model_15m = old / slope / old across the two boundaries;
+            # p_gbdt the mirror. The era_split dump splits only at the
+            # 08-12 boundary — reads after 08-21 must also split there.
             for _lbl, _col, _clr in [("deciding", "p_model_15m", "#4f8bf9"),
                                      ("companion", "p_gbdt", "#f0a500")]:
                 _s = _sh.dropna(subset=[_col]).copy()
@@ -1417,6 +1424,23 @@ with tab_sol_shadow:
                                f"DD ${_vdd:,.0f})")
                     _r[_vn] = (f"‹comp› {_cell15}" if _lbl == "companion"
                                else _cell15)
+                    # [2026-08-20] era-split mirror for the swap-boundary
+                    # question (user: which MODEL is better — the rows are
+                    # COLUMN streams, mixed models across the 08-12 18:00
+                    # role swap; un-flip: pre-swap deciding col = OLD
+                    # model, pre-swap companion col = SLOPE; post-swap
+                    # reversed). Same series the cell renders.
+                    try:
+                        _swb = pd.Timestamp("2026-08-12 18:00", tz="UTC")
+                        _prem = _vq["dt"] < _swb
+                        _era_rows.append({
+                            "row": _lbl, "variant": _vn,
+                            "pre_net": round(float(_vp[_prem].sum())),
+                            "pre_n": int(_prem.sum()),
+                            "post_net": round(float(_vp[~_prem].sum())),
+                            "post_n": int((~_prem).sum())})
+                    except Exception:
+                        pass
                 _rows.append(_r)
             # [2026-08-10] rank by the PRE-REGISTERED promotion metric:
             # pooled daily Sharpe (bucketed to 0.1 — differences inside
@@ -1457,6 +1481,18 @@ with tab_sol_shadow:
             st.plotly_chart(_figsh, use_container_width=True)
             st.dataframe(pd.DataFrame(_rows), hide_index=True,
                          use_container_width=True)
+            # [2026-08-20] debug mirror: dump this table verbatim at render
+            # so analysis quotes the TAB's numbers, not a hand replication
+            # (hand replicas drifted — user caught it).
+            try:
+                import json as _json
+                (RESULTS_DIR / "sol_shadow_tab_stats.json").write_text(
+                    _json.dumps({"rendered_at": str(pd.Timestamp.utcnow()),
+                                 "rows": _rows,
+                                 "era_split": _era_rows},
+                                default=str, indent=1))
+            except Exception:
+                pass
             _dis = _sh.dropna(subset=["p_gbdt", "p_model_15m"])
             _dis = _dis[(_dis["p_gbdt"] - _dis["p_model_15m"]).abs() >= 0.05]
             if len(_dis):

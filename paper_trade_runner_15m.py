@@ -812,6 +812,10 @@ CSV_COLUMNS = [
     # existing files; all other CSV readers audited (dashboard reads
     # generically, referees/seeding use explicit columns).
     "garch_vol_15m", "garch_sur_15m",
+    # [2026-08-20] z_spot_6h_live: drives RESC-5 live since 08-18 but was
+    # never logged (garch-class gap, user-caught) — needed for the
+    # dashboard's rescue replay and any RESC-5 audit.
+    "z_spot_6h_live",
     # [2026-08-18 ETH DIP PACKAGE] ETH-only per-scan GARCH(1,1) 1h vol
     # forecast + surprise — inputs to the tab's 'volhot' monitor book
     # (block when garch_sur_1h >= -0.0848; post-heavy evidence, monitor
@@ -5985,6 +5989,7 @@ def _build_row(
         "garch_sur_15m":        _f(sig.get("garch_sur_15m")),
         "garch_vol_1h":         _f(sig.get("garch_vol_1h")),
         "garch_sur_1h":         _f(sig.get("garch_sur_1h")),
+        "z_spot_6h_live":       _f(sig.get("z_spot_6h_live")),
         "is_live":              1 if is_live else 0,
         "eth_regime_bos":       sig.get("eth_regime_bos", ""),
         "eth_bos_streak":       sig.get("eth_bos_streak", ""),

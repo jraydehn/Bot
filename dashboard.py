@@ -1231,6 +1231,27 @@ with tab_sol_shadow:
                                   ~((_q["p_market"] > 0.8) |
                                     (_q["p_market"].between(0.5, 0.65)
                                      & ~(_q["slope120_stoch_k_15m"] >= 40))))
+                # [2026-08-20 BUG FIX — user caught via
+                # KXSOL15M-26AUG202015-15 (+$507 winner missing from the
+                # gated lines)] RESC-2/RESC-5 were wired into the RUNNER
+                # 08-18 04:27 UTC (4e3df45) but never ported here — every
+                # rescued YES since then was absent from the gated books.
+                # Exact port of RESC-2 (zd<0.59 rescues persist<3 YES;
+                # rescued trades BYPASS the markov/offset gates),
+                # dt-gated at the wire time. DISCLOSED GAP: RESC-5
+                # (z_spot_6h_live<-1 & d45_vwap>=0.07) is NOT replayable —
+                # z_spot_6h_live was never logged (runner logging fix
+                # deployed 08-21; RESC-5 replay can be added once the
+                # column accrues).
+                _rescY = np.asarray(
+                    (_q["side"] == "yes")
+                    & ~(_q["sol_persist_score"] >= 3).fillna(False)
+                    & (_zd6 < 0.59).fillna(False)
+                    & (_q["dt"] >= pd.Timestamp("2026-08-18 04:27",
+                                                tz="UTC")), bool)
+                _v2_ok = _v2_ok | _rescY
+                _off_ok = _off_ok | _rescY
+                _mkv_ok = _mkv_ok | _rescY
                 # [2026-08-05] regime-CONDITIONAL markov (gk vrM): apply the
                 # markov gate only when vol_ratio_1h < 1 (compressed/trending
                 # — where its blocks tested protective in every book/window);

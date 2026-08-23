@@ -1762,6 +1762,49 @@ with tab_15m_shadow:
                 if _a15 == "BTC" and _lbl == "mkt-fav k1.8":
                     _mfav_book = _q[["contract_ticker", "dt", "side"]].copy()
                     _mfav_book["pnl"] = _pnl.values
+                    # [2026-08-23 mkt-fav deep dive — user-approved monitor
+                    # lines] The raw book decayed forward (−$510 since
+                    # 08-05, wk 08-17 −$2,147). Full-history search
+                    # (project_btc15m_mktfav_deepdive_20260823): candidate
+                    # package blocks BOTH sides when ou_theta(1h)<2.2243 OR
+                    # tau<8.64min. Full-history kept book +$10,822 S 0.29
+                    # DD $1,295, 13/13 wks+, blocked bucket boot pT=0.007/
+                    # pW=0.015; both plateaus smooth, fire-rate era-
+                    # stationary. HONESTY: thresholds are discoveries on
+                    # the 05-25..08-23 window — post-08-23 is the first
+                    # true forward test (read ~09-01). Frozen constants;
+                    # NaN fails OPEN (replay-faithful). Shadow KV package
+                    # does NOT transfer to this book (blocks winners) —
+                    # tested, not wired.
+                    try:
+                        _ouq = pd.to_numeric(_q.get("ou_theta"),
+                                             errors="coerce")
+                        _tauq = pd.to_numeric(_q.get("tau_minutes"),
+                                              errors="coerce")
+                        _ou_blk = (_ouq < 2.2243).fillna(False)
+                        _outau_blk = _ou_blk | (_tauq < 8.64).fillna(False)
+                        for _mfnm, _mfblk, _mfdsh in [
+                                ("mkt-fav +OU", _ou_blk, "dot"),
+                                ("mkt-fav +OUtau", _outau_blk, "dash")]:
+                            _qm = _q[~np.asarray(_mfblk, bool)]
+                            _pm2 = _pnl[~np.asarray(_mfblk, bool)]
+                            if not len(_qm):
+                                continue
+                            _fig15.add_trace(go.Scatter(
+                                x=[_cfg15["start"]] + list(_qm["dt"]),
+                                y=[0.0] + list(_pm2.cumsum()),
+                                name=_mfnm,
+                                line=dict(color=_clr, width=1.5,
+                                          dash=_mfdsh)))
+                            _cm2 = _pm2.cumsum()
+                            _rows15.append({
+                                "book": _mfnm,
+                                "net": f"${_pm2.sum():+,.0f}",
+                                "n": len(_qm), "WR/BE": "—",
+                                "maxDD": f"${float((_cm2.cummax() - _cm2).max()):,.0f}",
+                            })
+                    except Exception:
+                        pass
                 # [2026-08-14] shadow book captured for DUAL v2 (user
                 # proposal: prod g+k + SHADOW as the pair — near-disjoint by
                 # construction, shadow trades later scans; overlap 8 vs

@@ -1528,11 +1528,17 @@ with tab_sol_shadow:
                 _top2.append(_k)
                 if len(_top2) == 2:
                     break
+            # [2026-08-23 BUG FIX, user-caught] options were HARDCODED, so
+            # any newly added variant that won the Sharpe ranking became a
+            # default missing from the options (dipRESC retro did exactly
+            # that). Options now derive from the live variant families —
+            # cannot desync again.
+            _fam_opts = (["flat $100"]
+                         + [k for k in _famdaily.keys() if k != "flat $100"])
+            _top2 = [k for k in _top2 if k in _fam_opts]
             _fams = st.multiselect(
                 "Lines on chart (default = top-2 by pooled Sharpe, DD tiebreak)",
-                ["flat $100", "gk zd65", "gk zd65+path",
-                 "gk zd65+path 1/h", "gk zd65+path+SW", "gk +SW xHdamp ★PAPER"],
-                default=_top2, key="solsh_fams")
+                _fam_opts, default=_top2, key="solsh_fams")
             for _fam, _x, _y, _nm, _ln in _traces:
                 if _fam in _fams:
                     _figsh.add_trace(go.Scatter(x=_x, y=_y, name=_nm,

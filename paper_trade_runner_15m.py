@@ -2451,7 +2451,11 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
         # test showed the BTC gates needing it are no-ops on ETH's gated
         # books (existing stack absorbs them); column banked for the
         # retrain era / future native ETH gates.
-        if asset in ("BTC", "ETH"):
+        # [2026-08-23] extended to SOL (user call after the 08-22 chop
+        # run: SOL's 6h/4h/1h markov stayed Bull through the whipsaw —
+        # too slow). Same frozen construction, SOL's own bars. LOG-ONLY;
+        # flap-frequency sizing candidate pre-registered for ~09-03.
+        if asset in ("BTC", "ETH", "SOL"):
             _df15m_reg = live_1m.resample("15min").agg({"close": "last"}).dropna().iloc[:-1]
             _rr15m_s = _df15m_reg["close"].pct_change(20)
             if pd.notna(_rr15m_s.iloc[-1]):
@@ -5458,7 +5462,18 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
                 # if either referee stream goes negative.
                 _vw45 = _fv("d45_vwap_dist")
                 _zs = sig.get("z_spot_6h_live")
-                _r2 = zd is not None and zd < 0.59
+                # [2026-08-23 DIP TIGHTENING, user-approved] RESC-2 now
+                # requires an ACTUAL dip: stoch_k_5m <= 30 (natural
+                # oversold constant, nothing swept). The 08-22 chop run
+                # (-$1,972/24) flowed 100% through untightened RESC-2;
+                # dip-qualified rescues stayed positive in BOTH eras
+                # (pre +$876/10, run +$272/7) while non-dip rescues held
+                # the losses (run -$2,244/17). Forgoes ~2/3 of melt-up-era
+                # rescue profit = the regime beta being removed. 08-25
+                # referee read + revert clause stand.
+                _sk5r = _fv("stoch_k_5m")
+                _r2 = (zd is not None and zd < 0.59
+                       and _sk5r is not None and _sk5r <= 30)
                 _r5 = (_zs is not None and _zs < -1.0
                        and _vw45 is not None and _vw45 >= 0.07)
                 if _r2 or _r5:

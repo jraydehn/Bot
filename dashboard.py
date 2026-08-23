@@ -1263,15 +1263,33 @@ with tab_sol_shadow:
                 # z_spot_6h_live was never logged (runner logging fix
                 # deployed 08-21; RESC-5 replay can be added once the
                 # column accrues).
-                _rescY = np.asarray(
+                # [2026-08-23 RESC-2 DIP TIGHTENING mirror] runner now
+                # requires stoch_k_5m<=30 for the rescue (the 08-22 chop
+                # run -$1,972 flowed 100% through non-dip rescues).
+                # Paper-line replay is dt-gated at the deploy (~04:20 UTC)
+                # so displayed history stays what the book traded; the
+                # ‹mon› dipRESC variant below shows the RETRO
+                # counterfactual (user request).
+                _v2_base, _off_base, _mkv_base = _v2_ok, _off_ok, _mkv_ok
+                _sk5q2 = pd.to_numeric(_q.get("stoch_k_5m"),
+                                       errors="coerce")
+                _dipq = (_sk5q2 <= 30).fillna(False)
+                _resc_core = np.asarray(
                     (_q["side"] == "yes")
                     & ~(_q["sol_persist_score"] >= 3).fillna(False)
                     & (_zd6 < 0.59).fillna(False)
                     & (_q["dt"] >= pd.Timestamp("2026-08-18 04:27",
                                                 tz="UTC")), bool)
-                _v2_ok = _v2_ok | _rescY
-                _off_ok = _off_ok | _rescY
-                _mkv_ok = _mkv_ok | _rescY
+                _rescY = _resc_core & np.asarray(
+                    (_q["dt"] < pd.Timestamp("2026-08-23 04:20", tz="UTC"))
+                    | _dipq, bool)
+                _v2_ok = _v2_base | _rescY
+                _off_ok = _off_base | _rescY
+                _mkv_ok = _mkv_base | _rescY
+                _rescY_R = _resc_core & np.asarray(_dipq, bool)
+                _v2R = _v2_base | _rescY_R
+                _offR = _off_base | _rescY_R
+                _mkvR = _mkv_base | _rescY_R
                 # [2026-08-05] regime-CONDITIONAL markov (gk vrM): apply the
                 # markov gate only when vol_ratio_1h < 1 (compressed/trending
                 # — where its blocks tested protective in every book/window);
@@ -1371,7 +1389,29 @@ with tab_sol_shadow:
                              & (_q["markov_sol_1h"].astype(str) == "Sideways")
                              & (_q["markov_sol_4h"].astype(str) == "Sideways")
                              & (_q["p_market"] >= 0.55)),
-                         "longdash", 0.8)]:
+                         "longdash", 0.8),
+                        # [2026-08-23] RETRO counterfactual of the paper
+                        # stack with the DIP-tightened rescue over FULL
+                        # history (user request) — paper line stays honest,
+                        # this line shows what the tightening would have
+                        # done all along.
+                        ("‹mon› PAPER dipRESC (retro)", _v2R & _mkvR
+                         & _zd_ok65 & _offR
+                         & np.where(_q["side"] == "no",
+                                    ~((_q["pm_path_drift"]
+                                       * _q["pm_path_vr3"]) > 0).fillna(False),
+                                    True)
+                         & ~((_q["side"] == "no")
+                             & (_q["markov_sol_1h"].astype(str) == "Sideways")
+                             & (_q["p_market"] >= 0.70)
+                             & (pd.to_numeric(_q["stoch_k_1h"],
+                                              errors="coerce").fillna(50)
+                                >= 70))
+                         & ~((_q["side"] == "no")
+                             & (_q["markov_sol_1h"].astype(str) == "Sideways")
+                             & (_q["markov_sol_4h"].astype(str) == "Sideways")
+                             & (_q["p_market"] >= 0.55)),
+                         "dot", 0.8)]:
                     _vq = _q[_vmask].copy()
                     # [2026-08-11] 1/h refinement: max one trade per
                     # underlying hour (same-hour 15m contracts share the
@@ -1395,7 +1435,7 @@ with tab_sol_shadow:
                     # SOL. Needs 15d of window history => multiplier is 1.0
                     # until ~08-14 on this tab: identical to vrM+zd65 till
                     # then, diverges only on live forward data.
-                    if _vn == "gk +SW xHdamp ★PAPER" and len(_vq):
+                    if _vn in ("gk +SW xHdamp ★PAPER", "‹mon› PAPER dipRESC (retro)") and len(_vq):
                         _hmul = np.clip(
                             (pd.to_numeric(_vq["hurst_exponent_5m"],
                                            errors="coerce") - 0.4) / 0.2,

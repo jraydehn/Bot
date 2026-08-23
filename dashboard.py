@@ -2582,7 +2582,7 @@ with tab_sol_hourly_ab:
         try:
             _abst = pd.Timestamp(_astart, tz="UTC")
             _figab = go.Figure()
-            _cols = st.columns(1 + len(_chals))
+            _hrows = []   # [2026-08-23] full stats table (user: no hover/cram)
             _pr = pd.read_csv(_prod_csv, low_memory=False)
             _pr["dt"] = pd.to_datetime(_pr["logged_at"], errors="coerce", utc=True,
                                        format="mixed")
@@ -2601,7 +2601,6 @@ with tab_sol_hourly_ab:
                 _figab.add_trace(go.Scatter(x=_pq["dt"], y=_pq["pnl"].cumsum(),
                                             name="production",
                                             line=dict(color="#4f8bf9", width=2)))
-                _gk_txt = ""
                 # [2026-08-06] SOL: minimal frozen gate — block trades when
                 # daily Markov = Sideways (hourly directional edge needs a
                 # trending daily regime). Only survivor of 6 pre-declared
@@ -2617,8 +2616,11 @@ with tab_sol_hourly_ab:
                             x=_gq["dt"], y=_gq["pnl"].cumsum(),
                             name="production mkv-gated",
                             line=dict(color="#4f8bf9", width=1.5, dash="dash")))
-                        _gk_txt = (f" · mkv-gated ${_gq['pnl'].sum():+,.0f} "
-                                   f"(n={len(_gq)})")
+                        _hrows.append({"book": "production mkv-gated",
+                            "net": f"${_gq['pnl'].sum():+,.0f}",
+                            "n": len(_gq), "WR/BE": "—",
+                            "maxDD": f"${_maxdd(_gq['pnl']):,.0f}",
+                            "pending": ""})
                 # [2026-08-06] BTC: same 6 frozen candidates replayed on the
                 # 645-trade book (07-01+). Sole survivor = cpu-disagree block
                 # (side contradicts composite_p_up): removes -$1,240, P>=0
@@ -2651,8 +2653,11 @@ with tab_sol_hourly_ab:
                             x=_gq["dt"], y=_gq["pnl"].cumsum(),
                             name="production oi+mkv-gated",
                             line=dict(color="#4f8bf9", width=1.5, dash="dash")))
-                        _gk_txt = (f" · oi+mkv-gated ${_gq['pnl'].sum():+,.0f} "
-                                   f"(n={len(_gq)})")
+                        _hrows.append({"book": "production oi+mkv-gated",
+                            "net": f"${_gq['pnl'].sum():+,.0f}",
+                            "n": len(_gq), "WR/BE": "—",
+                            "maxDD": f"${_maxdd(_gq['pnl']):,.0f}",
+                            "pending": ""})
                 if _aname == "BTC":
                     _cpub = pd.to_numeric(_pq["composite_p_up"],
                                           errors="coerce")
@@ -2665,8 +2670,11 @@ with tab_sol_hourly_ab:
                             x=_gq["dt"], y=_gq["pnl"].cumsum(),
                             name="production cpu-gated",
                             line=dict(color="#4f8bf9", width=1.5, dash="dash")))
-                        _gk_txt = (f" · cpu-gated ${_gq['pnl'].sum():+,.0f} "
-                                   f"(n={len(_gq)})")
+                        _hrows.append({"book": "production cpu-gated",
+                            "net": f"${_gq['pnl'].sum():+,.0f}",
+                            "n": len(_gq), "WR/BE": "—",
+                            "maxDD": f"${_maxdd(_gq['pnl']):,.0f}",
+                            "pending": ""})
                     # [2026-08-22] btc_mkv_sideways_gate RETRO line (user
                     # call): gate wired to the production paper runner +
                     # both niche runners same day (cross-asset frozen
@@ -2680,15 +2688,19 @@ with tab_sol_hourly_ab:
                             name="production mkv-gated ★LIVE-RULE",
                             line=dict(color="#4f8bf9", width=1.5,
                                       dash="dot")))
-                        _gk_txt += (f" · mkv-gated ${_gq2['pnl'].sum():+,.0f} "
-                                    f"(n={len(_gq2)})")
-                _cols[0].metric("production: net (flat $100)",
-                                f"${_pq['pnl'].sum():+,.0f}",
-                                f"{len(_pq)} resolved · WR {_prw.mean():.0%} "
-                                f"vs BE {np.mean(_prc):.0%} · "
-                                f"DD ${_maxdd(_pq['pnl']):,.0f}{_gk_txt}")
+                        _hrows.append({"book": "production mkv-gated ★LIVE-RULE",
+                            "net": f"${_gq2['pnl'].sum():+,.0f}",
+                            "n": len(_gq2), "WR/BE": "—",
+                            "maxDD": f"${_maxdd(_gq2['pnl']):,.0f}",
+                            "pending": ""})
+                _hrows.insert(0, {"book": "production",
+                    "net": f"${_pq['pnl'].sum():+,.0f}", "n": len(_pq),
+                    "WR/BE": f"{_prw.mean():.0%}/{np.mean(_prc):.0%}",
+                    "maxDD": f"${_maxdd(_pq['pnl']):,.0f}", "pending": ""})
             else:
-                _cols[0].metric("production: net (flat $100)", "—", "collecting…")
+                _hrows.insert(0, {"book": "production", "net": "—", "n": 0,
+                                  "WR/BE": "collecting…", "maxDD": "",
+                                  "pending": ""})
             for _ci, (_lbl, _path, _clr, _kind) in enumerate(_chals, start=1):
                 _b = pd.read_csv(_path, low_memory=False)
                 # [2026-08-19] live-fill books: filled=0 rows are recorded
@@ -2791,12 +2803,7 @@ with tab_sol_hourly_ab:
                             _aw = float(_wl["would_pnl_net"].mean())
                             _al = float(-_ll["would_pnl_net"].mean())
                             _be = _al / (_aw + _al)
-                            _gtxt = (f" (realized-payout BE; avg win "
-                                     f"${_aw:,.0f} / loss ${_al:,.0f})"
-                                     f" · {_rq['event'].nunique()} events")
-                        else:
-                            _gtxt = (f" (avg cost — no wins yet) · "
-                                     f"{_rq['event'].nunique()} events")
+                        _gtxt = f"{_rq['event'].nunique()} events"
                     elif "ctx_gates" in _rq.columns:
                         _gt = _rq[_rq["ctx_gates"].fillna("") == ""]
                         if len(_gt):
@@ -2804,8 +2811,12 @@ with tab_sol_hourly_ab:
                                 x=_gt["dt"], y=_gt["would_pnl_net"].cumsum(),
                                 name=f"{_lbl} gated",
                                 line=dict(color=_clr, width=1.5, dash="dash")))
-                        _gtxt = (f" · gated ${_gt['would_pnl_net'].sum():+,.0f} "
-                                 f"(n={len(_gt)})")
+                        _hrows.append({"book": f"{_lbl} gated",
+                            "net": f"${_gt['would_pnl_net'].sum():+,.0f}",
+                            "n": len(_gt), "WR/BE": "—",
+                            "maxDD": f"${_maxdd(_gt['would_pnl_net']):,.0f}",
+                            "pending": ""})
+                        _gtxt = ""
                     # [2026-08-22] books carrying markov_daily_regime (niche
                     # v1 + refresh, backfilled) get the RETRO mkv-gated line
                     # — the rule now live in their runners, shown over full
@@ -2820,21 +2831,30 @@ with tab_sol_hourly_ab:
                                 name=f"{_lbl} mkv-gated ★LIVE-RULE",
                                 line=dict(color=_clr, width=1.5,
                                           dash="dot")))
-                            _gtxt += (f" · mkv ${_gm['would_pnl_net'].sum():+,.0f} "
-                                      f"(n={len(_gm)})")
-                    _cols[_ci].metric(f"{_lbl}: net (flat $100)",
-                                      f"${_rq['would_pnl_net'].sum():+,.0f}",
-                                      f"{len(_rq)} resolved · WR {_wr:.0%} vs "
-                                      f"BE {_be:.0%} · "
-                                      f"DD ${_maxdd(_rq['would_pnl_net']):,.0f}"
-                                      f"{_gtxt} · {_pend} pending")
+                            _hrows.append({
+                                "book": f"{_lbl} mkv-gated ★LIVE-RULE",
+                                "net": f"${_gm['would_pnl_net'].sum():+,.0f}",
+                                "n": len(_gm), "WR/BE": "—",
+                                "maxDD": f"${_maxdd(_gm['would_pnl_net']):,.0f}",
+                                "pending": ""})
+                    _hrows.append({"book": _lbl,
+                        "net": f"${_rq['would_pnl_net'].sum():+,.0f}",
+                        "n": len(_rq),
+                        "WR/BE": f"{_wr:.0%}/{_be:.0%}" + (f" · {_gtxt}"
+                                                           if _gtxt else ""),
+                        "maxDD": f"${_maxdd(_rq['would_pnl_net']):,.0f}",
+                        "pending": _pend})
                 else:
-                    _cols[_ci].metric(f"{_lbl}: net (flat $100)", "—",
-                                      f"collecting… ({_pend} pending)")
+                    _hrows.append({"book": _lbl, "net": "—", "n": 0,
+                                   "WR/BE": "collecting…", "maxDD": "",
+                                   "pending": _pend})
             _figab.update_layout(height=260, margin=dict(l=0, r=0, t=8, b=0),
                                  legend=dict(orientation="h", yanchor="bottom",
                                              y=1.02, xanchor="left", x=0))
             st.plotly_chart(_figab, use_container_width=True)
+            st.dataframe(pd.DataFrame(_hrows), hide_index=True,
+                         use_container_width=True,
+                         height=38 * (len(_hrows) + 1) + 8)
         except Exception as _abex:
             st.warning(f"{_aname} hourly A/B error: {_abex}")
 

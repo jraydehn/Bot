@@ -5164,6 +5164,21 @@ def main() -> None:
                     _log_block("btc_no_kalman_resid_gate")
                     continue
 
+            # [2026-08-22 btc_mkv_sideways_gate, user-approved] Block ALL
+            # BTC hourly trades when daily Markov = Sideways. Cross-asset
+            # frozen rule (SOL 08-06 −$1,041/48 P=.07; ETH −$807/42 P=.04;
+            # pre-registered as the universal-hourly-gate candidate — BTC
+            # untestable until its Bull monoculture ended 08-21). BTC
+            # confirmation: the 08-22 niche run — 35/35 trades in
+            # Sideways, −$1,177 blocked entirely; pre-run BTC cost +$147/6.
+            # Niche v1 + refresh runners gated same day; production paper
+            # book carries it here as the third asset.
+            if args.asset == "BTC" and _markov_regime == "Sideways":
+                print(f"  [btc_mkv_sideways_gate] BLOCK {dec_c.side} "
+                      f"{c['ticker']} — daily Markov = Sideways")
+                _log_block("btc_mkv_sideways_gate")
+                continue
+
             # ITM NO gate disabled 2026-05-03 — NO means BTC stays above strike, not drops
             # if dec_c.side == "no" and offset_c <= 0:
             #     print(f"  [scan] Skipping {c['ticker']} — ITM NO (offset={offset_c*100:+.3f}%, price already above strike)")

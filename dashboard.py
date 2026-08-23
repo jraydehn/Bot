@@ -32,7 +32,12 @@ ASSET_DISPLAY_FROM = {
     # frozen 08-14 03:14 -> 08-15 16:45 UTC (watchdog cron was TCC-blocked),
     # so the display will be sparse until it resumes trading — that is
     # correct, not missing data.]
-    "BTC": "2026-08-13 22:31:00",
+    # [2026-08-22 cleared per user request — fresh read from the
+    # btc_mkv_sideways_gate deploy (gate live in production paper +
+    # niche v1 + refresh runners ~03:40 UTC 08-23; cross-asset frozen
+    # rule, BTC-confirmed by the 08-22 niche run −$1,177 35/35-Sideways).
+    # Prior cutoff: 2026-08-13 22:31:00 (niche v1 promotion start).]
+    "BTC": "2026-08-23 03:40:00",
     # [2026-08-19 per user: ETH hourly paper seat = YES-favorite book
     # (eth_hourly_fav_runner, model-free bias, promoted at the post-crash
     # fleet restart 01:50 UTC — model routes null x2, prior hourly book
@@ -1441,12 +1446,21 @@ with tab_sol_shadow:
                     try:
                         _swb = pd.Timestamp("2026-08-12 18:00", tz="UTC")
                         _prem = _vq["dt"] < _swb
+                        _dS = _vp.groupby(_vq["dt"].dt.floor("D")).sum()
+                        _dS = _dS[_dS != 0]
+                        _shp_ = (float(_dS.mean() / _dS.std())
+                                 if len(_dS) > 2 and _dS.std() > 0 else None)
                         _era_rows.append({
                             "row": _lbl, "variant": _vn,
                             "pre_net": round(float(_vp[_prem].sum())),
                             "pre_n": int(_prem.sum()),
                             "post_net": round(float(_vp[~_prem].sum())),
-                            "post_n": int((~_prem).sum())})
+                            "post_n": int((~_prem).sum()),
+                            "net": round(float(_vp.sum())),
+                            "dd": round(float(_vdd)),
+                            "daily_sharpe": (round(_shp_, 2)
+                                             if _shp_ is not None else None),
+                            "days": int(len(_dS))})
                     except Exception:
                         pass
                 _rows.append(_r)
@@ -2613,6 +2627,21 @@ with tab_sol_hourly_ab:
                             line=dict(color="#4f8bf9", width=1.5, dash="dash")))
                         _gk_txt = (f" · cpu-gated ${_gq['pnl'].sum():+,.0f} "
                                    f"(n={len(_gq)})")
+                    # [2026-08-22] btc_mkv_sideways_gate RETRO line (user
+                    # call): gate wired to the production paper runner +
+                    # both niche runners same day (cross-asset frozen
+                    # rule, BTC-confirmed by the 08-22 niche run). Shown
+                    # retroactively over the full window per user request.
+                    _mkvb = _pq["markov_regime_daily"].astype(str)
+                    _gq2 = _pq[_mkvb != "Sideways"]
+                    if len(_gq2):
+                        _figab.add_trace(go.Scatter(
+                            x=_gq2["dt"], y=_gq2["pnl"].cumsum(),
+                            name="production mkv-gated ★LIVE-RULE",
+                            line=dict(color="#4f8bf9", width=1.5,
+                                      dash="dot")))
+                        _gk_txt += (f" · mkv-gated ${_gq2['pnl'].sum():+,.0f} "
+                                    f"(n={len(_gq2)})")
                 _cols[0].metric("production: net (flat $100)",
                                 f"${_pq['pnl'].sum():+,.0f}",
                                 f"{len(_pq)} resolved · WR {_prw.mean():.0%} "
@@ -2737,6 +2766,22 @@ with tab_sol_hourly_ab:
                                 line=dict(color=_clr, width=1.5, dash="dash")))
                         _gtxt = (f" · gated ${_gt['would_pnl_net'].sum():+,.0f} "
                                  f"(n={len(_gt)})")
+                    # [2026-08-22] books carrying markov_daily_regime (niche
+                    # v1 + refresh, backfilled) get the RETRO mkv-gated line
+                    # — the rule now live in their runners, shown over full
+                    # history per user request.
+                    if "markov_daily_regime" in _rq.columns:
+                        _gm = _rq[_rq["markov_daily_regime"].astype(str)
+                                  != "Sideways"]
+                        if len(_gm):
+                            _figab.add_trace(go.Scatter(
+                                x=_gm["dt"],
+                                y=_gm["would_pnl_net"].cumsum(),
+                                name=f"{_lbl} mkv-gated ★LIVE-RULE",
+                                line=dict(color=_clr, width=1.5,
+                                          dash="dot")))
+                            _gtxt += (f" · mkv ${_gm['would_pnl_net'].sum():+,.0f} "
+                                      f"(n={len(_gm)})")
                     _cols[_ci].metric(f"{_lbl}: net (flat $100)",
                                       f"${_rq['would_pnl_net'].sum():+,.0f}",
                                       f"{len(_rq)} resolved · WR {_wr:.0%} vs "

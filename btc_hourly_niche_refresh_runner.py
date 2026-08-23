@@ -55,7 +55,9 @@ LOOP_SEC = 120
 
 BOOK_COLS = ["logged_at", "contract_ticker", "close_ts", "spot", "strike",
              "p_market", "fill_price", "filled", "p_model", "fee_adj_edge", "tau_minutes", "stake",
-             "resolved_yes", "would_win", "would_pnl", "fee_est", "would_pnl_net"]
+             "resolved_yes", "would_win", "would_pnl", "fee_est", "would_pnl_net",
+             # [2026-08-22] appended at END (column-order lesson 08-21)
+             "markov_daily_regime"]
 
 with open(MODEL, "rb") as f:
     _art = pickle.load(f)
@@ -171,6 +173,15 @@ def main() -> None:
                     hits["p_model"] = p[(edge >= EDGE_MIN) & (edge < EDGE_MAX)]
                     hits["fee_adj_edge"] = edge[(edge >= EDGE_MIN) & (edge < EDGE_MAX)]
                     hits = hits.sort_values("dt").drop_duplicates("contract_ticker", keep="first")
+                    # [2026-08-22 MKV-SIDEWAYS BLOCK — see v1 runner comment]
+                    _mkv = hits.get("markov_daily_regime")
+                    if _mkv is not None:
+                        _blk = hits[_mkv.astype(str) == "Sideways"]
+                        for _, _br in _blk.iterrows():
+                            traded.add(_br["contract_ticker"])
+                            print(f"  [mkv-block] {_br['contract_ticker']} "
+                                  f"daily=Sideways (consumed)")
+                        hits = hits[_mkv.astype(str) != "Sideways"]
                     for _, r in hits.iterrows():
                         pm_sig = float(r["p_market"])
                         fill, ok = fill_for(auth, r["contract_ticker"],
@@ -186,6 +197,7 @@ def main() -> None:
                             "p_model": round(float(r["p_model"]), 4),
                             "fee_adj_edge": round(float(r["fee_adj_edge"]), 4),
                             "tau_minutes": r["tau_minutes"], "stake": STAKE,
+                            "markov_daily_regime": r.get("markov_daily_regime", ""),
                             "resolved_yes": "", "would_win": "", "would_pnl": "",
                             "fee_est": "", "would_pnl_net": "",
                         })

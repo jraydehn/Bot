@@ -1790,6 +1790,12 @@ with tab_15m_shadow:
                             _pm2 = _pnl[~np.asarray(_mfblk, bool)]
                             if not len(_qm):
                                 continue
+                            # [2026-08-23 pm user call] +OUtau book feeds
+                            # the DUAL v1-OU line below (arm swap).
+                            if _mfnm == "mkt-fav +OUtau":
+                                _mfav_ou_book = _qm[["contract_ticker",
+                                                    "dt", "side"]].copy()
+                                _mfav_ou_book["pnl"] = _pm2.values
                             _fig15.add_trace(go.Scatter(
                                 x=[_cfg15["start"]] + list(_qm["dt"]),
                                 y=[0.0] + list(_pm2.cumsum()),
@@ -2407,10 +2413,21 @@ with tab_15m_shadow:
             if _a15 == "BTC":
                 try:
                     _Ad = _prod_gk.set_index("contract_ticker")
-                    _Bd = _mfav_book.set_index("contract_ticker")
-                    _bothd = set(_Ad.index) & set(_Bd.index)
-                    _oppd = {tt for tt in _bothd
-                             if _Ad.loc[tt, "side"] != _Bd.loc[tt, "side"]}
+                    # [2026-08-23 pm ARM SWAP (user call): DUAL v1's
+                    # mkt-fav arm was falling behind (raw book −$510
+                    # forward, wk 08-17 −$2,147). The displayed DUAL now
+                    # uses the OUtau-GATED mkt-fav arm (block ou_theta<
+                    # 2.2243 | tau<8.64 — the 08-23 deep-dive package;
+                    # frozen constants). Line RENAMED v1-OU so the
+                    # pre-swap v1 record isn't silently rewritten.
+                    # HONESTY: the gates are 08-23 discoveries — this
+                    # line's in-window history is retro; post-08-23 is
+                    # its forward record (same caveat as the arm's own
+                    # monitor lines, read ~09-01). Fallback: raw arm if
+                    # the gated book is unavailable.
+                    _Bd = (_mfav_ou_book
+                           if "_mfav_ou_book" in dict(locals())
+                           else _mfav_book).set_index("contract_ticker")
                     _rows_d = []
                     # [2026-08-12 corrected per user] FULL INDEPENDENCE:
                     # both books take every bet — no de-overlap, no
@@ -2425,13 +2442,13 @@ with tab_15m_shadow:
                         _fig15.add_trace(go.Scatter(
                             x=[_cfg15["start"]] + list(_Pd["dt"]),
                             y=[0.0] + list(_Pd["pnl"].cumsum()),
-                            name="DUAL v1 (prod+mktfav)",
+                            name="DUAL v1-OU (prod+mktfav+OUtau)",
                             line=dict(color="#00c076", width=2,
                                       dash="dash")))
                         _cumd = _Pd["pnl"].cumsum()
                         _ddd = float((_cumd.cummax() - _cumd).max())
                         _rows15.append({
-                            "book": "DUAL v1 (prod+mktfav)",
+                            "book": "DUAL v1-OU (prod+mktfav+OUtau)",
                             "net": f"${_Pd['pnl'].sum():+,.0f}",
                             "n": len(_Pd),
                             "WR/BE": "—",

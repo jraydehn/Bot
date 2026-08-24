@@ -2265,6 +2265,21 @@ with tab_15m_shadow:
                     _oi_okE = ~(_yesE & (pd.to_numeric(
                         _q.get("d15_oi_chg_pct"), errors="coerce")
                         < -0.036).fillna(False))
+                    # [2026-08-23 streak diagnosis — user-approved monitor,
+                    # verdict OPEN] YES-in-Sideways (the replica's Sideways
+                    # block is NO-side only). The two constructions
+                    # DISAGREE: on trades the runner actually took the
+                    # bucket bled −$3,750/87 (6 of 7 Sideways days) — but
+                    # that population is dominated by pre-DIP / pre-08-17-
+                    # falsy-zero-fix trades the current rules no longer
+                    # take. Under THIS tab's retro book (current rules all
+                    # along) the same bucket is +$8,760/49, carried by
+                    # cheap-YES dip lotteries incl. the +$4,942 19:1 the
+                    # bug missed (still +$1,559 with the top-3 hits
+                    # removed). Genuinely ambiguous → this line races
+                    # ★PAPER to adjudicate on forward data; decide at the
+                    # 08-25 DIP read or 09-03. Missing regime fails open.
+                    _sdwy_okE = ~(_yesE & (_mdE == "Sideways"))
                     _combE = _okE & _n3_okE & _kn_okE
                     # [2026-08-18 user] per-variant colors — with a single
                     # book left every line inherited the book's blue and
@@ -2301,6 +2316,8 @@ with tab_15m_shadow:
                             # wire only if it leads.
                             ("‹mon› PAPER ×INVdamp", _combE & _dip_okE,
                              "dot", "#7bb662"),
+                            ("‹mon› −YESsdwy", _combE & _dip_okE & _sdwy_okE,
+                             "dot", "#e8845b"),
                             ("g+k +knife xHdamp", _okE & _kn_okE,
                              "longdash", "#9aa0a6")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()

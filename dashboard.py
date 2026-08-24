@@ -2265,34 +2265,41 @@ with tab_15m_shadow:
                     _oi_okE = ~(_yesE & (pd.to_numeric(
                         _q.get("d15_oi_chg_pct"), errors="coerce")
                         < -0.036).fillna(False))
-                    # [2026-08-23 streak diagnosis — user-approved monitor,
-                    # verdict OPEN] YES-in-Sideways (the replica's Sideways
-                    # block is NO-side only). The two constructions
-                    # DISAGREE: on trades the runner actually took the
-                    # bucket bled −$3,750/87 (6 of 7 Sideways days) — but
-                    # that population is dominated by pre-DIP / pre-08-17-
-                    # falsy-zero-fix trades the current rules no longer
-                    # take. Under THIS tab's retro book (current rules all
-                    # along) the same bucket is +$8,760/49, carried by
-                    # cheap-YES dip lotteries incl. the +$4,942 19:1 the
-                    # bug missed (still +$1,559 with the top-3 hits
-                    # removed). Genuinely ambiguous → this line races
-                    # ★PAPER to adjudicate on forward data; decide at the
-                    # 08-25 DIP read or 09-03. Missing regime fails open.
-                    _sdwy_okE = ~(_yesE & (_mdE == "Sideways"))
+                    # [2026-08-23 pm CONSOLIDATION (user call): −YESsdwy
+                    # rebuilt as a LAYER, not a competing book.] The full
+                    # YES-Sideways block trailed ★PAPER badly (+$4,875 vs
+                    # +$13,634) because the bucket's cheap-YES dip
+                    # lotteries (cost<=0.15: +$7,229, incl. the +$4,942
+                    # 19:1) are exactly what the DIP book exists to catch;
+                    # the bleed lives in MID-COST Sideways YES (taken
+                    # trades −$2.9k at cost 0.35-0.65; retro flat-to-neg
+                    # >=0.30). Layer form: block YES & Sideways & cost >=
+                    # 0.35 — keeps the tail, trims the chop. Plateau
+                    # smooth 0.25-0.40 (all >= baseline S, DD better
+                    # everywhere); 0.35 declared = the pre-existing
+                    # cost-tercile boundary, not a fresh fit. Retro: net
+                    # +$15,041 S 0.48 DD $2,582 vs ★PAPER +$13,634 / 0.45
+                    # / $3,178. Races as monitor; decide at the 08-25 DIP
+                    # read or 09-03. Missing regime/cost fails open.
+                    _costE = np.where(_yesE, _q["p_market"],
+                                      1 - _q["p_market"])
+                    _sdwy_okE = ~(_yesE & (_mdE == "Sideways")
+                                  & (_costE >= 0.35))
                     _combE = _okE & _n3_okE & _kn_okE
                     # [2026-08-18 user] per-variant colors — with a single
                     # book left every line inherited the book's blue and
                     # was distinguishable only by dash. Paper = green
                     # (matches the BTC tab's paper-line convention).
+                    # [2026-08-23 pm FIELD CONSOLIDATION (user call):
+                    # lineage lines +path / +NOtrio / +YESknife retired
+                    # from display — their logic lives inside the promoted
+                    # COMBO and no pending decision reads on them. Kept:
+                    # g+k baseline (floor), COMBO (isolates DIP's
+                    # contribution), ★PAPER + its monitors, +knife xHdamp
+                    # (registered sizing race, pending). CSV history
+                    # intact — lines rebuild from masks if re-added.]
                     for _vnE, _mE, _dshE, _clrE in [
                             ("g+k (5 gates)", _okE, "dash", "#4f8bf9"),
-                            ("g+k +path", _okE & _pa_okE, "longdashdot",
-                             "#2bb3a3"),
-                            ("g+k +NOtrio", _okE & _n3_okE, "dashdot",
-                             "#f0a500"),
-                            ("g+k +YESknife", _okE & _kn_okE, "solid",
-                             "#e15759"),
                             ("g+k COMBO", _combE, "solid", "#b57edc"),
                             ("COMBO+DIP ★PAPER", _combE & _dip_okE,
                              "solid", "#00c076"),
@@ -2316,8 +2323,8 @@ with tab_15m_shadow:
                             # wire only if it leads.
                             ("‹mon› PAPER ×INVdamp", _combE & _dip_okE,
                              "dot", "#7bb662"),
-                            ("‹mon› −YESsdwy", _combE & _dip_okE & _sdwy_okE,
-                             "dot", "#e8845b"),
+                            ("‹mon› −YESsdwy≥.35", _combE & _dip_okE
+                             & _sdwy_okE, "dot", "#e8845b"),
                             ("g+k +knife xHdamp", _okE & _kn_okE,
                              "longdash", "#9aa0a6")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()

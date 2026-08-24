@@ -1888,6 +1888,10 @@ with tab_15m_shadow:
                         _wE2 = np.clip(_q["edge"][_kvkeep] / 0.08, 0.5, 2.0)
                         _pE2 = _pnl[_kvkeep] * _wE2
                         _qE2 = _q[_kvkeep]
+                        # [2026-08-24 user call] feeds the DUAL v3d line
+                        # (v3c's successor) below.
+                        _shadkv_edge_book = pd.DataFrame(
+                            {"dt": _qE2["dt"], "pnl": _pE2})
                         if len(_qE2):
                             _fig15.add_trace(go.Scatter(
                                 x=[_cfg15["start"]] + list(_qE2["dt"]),
@@ -1951,39 +1955,13 @@ with tab_15m_shadow:
                         _shad_kv_book["stake"] = 100.0
                     except Exception:
                         _shad_kv_book = _shad_book
-                    # [2026-08-14] shadow xHdamp(sol) — RETIRED FROM
-                    # DISPLAY 08-18 (user cleanup: case inverted with
-                    # melt-up data, S 0.12 vs raw 0.13). The sizing
-                    # computation stays: DUAL v3c (pre-registered round-1
-                    # leader) consumes _shad_book["pnl_h"].
-                    try:
-                        _shs2 = pd.read_csv(
-                            ASSET_CSV_15M["SOL"],
-                            usecols=["logged_at", "hurst_exponent_5m"],
-                            low_memory=False)
-                        _shs2["dt"] = pd.to_datetime(
-                            _shs2["logged_at"], errors="coerce", utc=True,
-                            format="mixed")
-                        _shs2["h"] = pd.to_numeric(
-                            _shs2["hurst_exponent_5m"], errors="coerce")
-                        _shs2 = _shs2.dropna(
-                            subset=["dt", "h"]).sort_values("dt")
-                        _s2t = _shs2["dt"].astype("int64").values / 1e9
-                        _q2t = _q["dt"].astype("int64").values / 1e9
-                        _i2 = np.searchsorted(_s2t, _q2t, side="right") - 1
-                        _h2 = np.where(
-                            _i2 >= 0,
-                            _shs2["h"].values[np.clip(_i2, 0, None)], np.nan)
-                        _a2 = _q2t - np.where(
-                            _i2 >= 0, _s2t[np.clip(_i2, 0, None)], np.nan)
-                        _hm2 = pd.Series(
-                            np.clip((np.where(_a2 <= 1800, _h2, np.nan)
-                                     - 0.4) / 0.2, 0.25, 1.0),
-                            index=_q.index).fillna(1.0)
-                        _php = _pnl * _hm2
-                        _shad_book["pnl_h"] = _php.values
-                    except Exception:
-                        pass
+                    # [2026-08-14] shadow xHdamp(sol) — retired from
+                    # display 08-18 (case inverted with melt-up data).
+                    # [2026-08-24] its pnl_h computation REMOVED with
+                    # DUAL v3c (the only consumer): the raw shadow arm
+                    # is dead (−$849 in-window) and ×Hdamp on the KV arm
+                    # is a wash (S 0.41 vs 0.42) — v3d (v3c's successor)
+                    # uses ×EDGEconv on the KV arm instead.
                 if _a15 == "BTC" and _lbl != "mkt-fav k1.8":
                     _yes15 = _q["side"] == "yes"
                     _no15 = ~_yes15
@@ -2110,6 +2088,27 @@ with tab_15m_shadow:
                             f"${_gpC.sum():+,.0f} (n={len(_gk15)}, "
                             f"DD ${_ddC:,.0f})")
                         _prod_gk["pnl_mf"] = _gpC.values
+                        # [2026-08-24 MFconvOU (user call, v3c salvage):
+                        # the mkt-fav STANCE is only trusted where the
+                        # 08-23 OU|tau package says the mkt-fav view is
+                        # valid (ou_theta>=2.2243 & tau>=8.64); gated-
+                        # silent -> neutral x0.50 (declared). Window
+                        # check: beats raw MFconv (+$8,087 vs +$7,495)
+                        # while risking 22% fewer dollars; co-sign tier
+                        # WR held 90.4%/83.3% across 08-15. Feeds the
+                        # DUAL v3d line below.
+                        _ouok15 = ~(((pd.to_numeric(
+                            _gk15.get("ou_theta"), errors="coerce")
+                            < 2.2243).fillna(False))
+                            | ((pd.to_numeric(
+                                _gk15.get("tau_minutes"), errors="coerce")
+                                < 8.64).fillna(False)))
+                        _tierOU = np.where(_ouok15, _tier, 0.50)
+                        _gsO = _gs * _tierOU
+                        _gpO = pd.Series(
+                            np.where(_gw, _gsO * (1 - _gc) / _gc, -_gsO)
+                            - (_gsO / _gc) * _gf, index=_gk15.index)
+                        _prod_gk["pnl_mfou"] = _gpO.values
                 # [2026-08-05] ETH gated+kelly: the 5 live gates that SURVIVED
                 # marginal testing (Y_stoch5m44, Y_stoch1h_mid[rsi<35 rescue],
                 # N_daily_sw, N_consec, N_downcandle). REJECTED as inverted on
@@ -2562,32 +2561,40 @@ with tab_15m_shadow:
                             })
                     except Exception:
                         pass
-                    # [2026-08-14] DUAL v3c (user call, takes the blend's
-                    # seat): 12-gate g+k arm sized by xMFconv (mkt-fav
-                    # conviction tiers) + shadow arm sized by xHdamp
-                    # (SOL-hurst). Window: +$5,494 / S 0.99 / DD $765 vs
-                    # v2's +$8,749 / 0.77 / $948 — the risk-first
-                    # composition and the registered GO-LIVE shape (halves
-                    # net for ~double Sharpe). Races v2 on the tab; paper
-                    # adoption decisions at the 08-18 read.
-                    if ("pnl_mf" in getattr(_prod_gk, "columns", [])
-                            and "pnl_h" in getattr(_shad_book, "columns", [])):
-                        _rows_d3 = ([(rr["dt"], rr["pnl_mf"])
+                    # [2026-08-24 DUAL v3d REPLACES v3c (user call after
+                    # the salvage analysis). v3c was dead by construction:
+                    # its shadow arm was the RAW ungated shadow (pre-KV,
+                    # −$849/S −0.08 in-window) — no sizing layer rescues
+                    # a dead arm. The SHAPE (fully conviction-sized DUAL:
+                    # trade net for Sharpe+DD — the registered GO-LIVE
+                    # shape) survives on modern arms: v3d = prod g+k ×
+                    # MFconvOU + shadow+KV ×EDGEconv. Offline window
+                    # check: +$12,126 / S 0.83 / DD $1,000 vs v2+KV
+                    # +$18,530 / 0.70 / $1,614. TWO-PART WIRE CONDITION
+                    # (declared): at 08-25/09-01 BOTH parents must earn
+                    # their own races AND v3d must lead v2+KV on S+DD —
+                    # else it dies with them. ×Hdamp on the KV arm was a
+                    # wash (S 0.41 vs 0.42) and retires with v3c.
+                    if ("pnl_mfou" in getattr(_prod_gk, "columns", [])
+                            and "_shadkv_edge_book" in dict(locals())
+                            and len(_shadkv_edge_book)):
+                        _rows_d3 = ([(rr["dt"], rr["pnl_mfou"])
                                      for _, rr in _prod_gk.iterrows()]
-                                    + [(rr["dt"], rr["pnl_h"])
-                                       for _, rr in _shad_book.iterrows()])
+                                    + [(rr["dt"], rr["pnl"])
+                                       for _, rr in
+                                       _shadkv_edge_book.iterrows()])
                         _Pd3 = pd.DataFrame(_rows_d3, columns=["dt", "pnl"]
                                             ).sort_values("dt")
                         if len(_Pd3):
                             _fig15.add_trace(go.Scatter(
                                 x=[_cfg15["start"]] + list(_Pd3["dt"]),
                                 y=[0.0] + list(_Pd3["pnl"].cumsum()),
-                                name="DUAL v3c (MFconv + shadow xHdamp)",
+                                name="DUAL v3d (MFconvOU + KV×EDGEconv)",
                                 line=dict(color="#b57edc", width=2,
                                           dash="dash")))
                             _cumd3 = _Pd3["pnl"].cumsum()
                             _rows15.append({
-                                "book": "DUAL v3c (MFconv + shadow xHdamp)",
+                                "book": "DUAL v3d (MFconvOU + KV×EDGEconv)",
                                 "net": f"${_Pd3['pnl'].sum():+,.0f}",
                                 "n": len(_Pd3),
                                 "WR/BE": "—",

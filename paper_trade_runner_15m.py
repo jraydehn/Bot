@@ -906,6 +906,10 @@ CSV_COLUMNS = [
     # +0.051 p=7e-4, halves +.051/+.052. Feature for the ~08-30 pm-momentum
     # retrain; NOT a decision input.
     "pm_path_drift", "pm_path_vr3", "pm_path_n",
+    # [2026-08-24] live composite_p_up under a NEW name — the original
+    # column stays None-frozen for gates/models (see the injection-site
+    # comment). Appended at END per the column-order lesson.
+    "composite_p_up_live",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -1071,7 +1075,12 @@ def fetch_composite_p_up(asset: str) -> Optional[float]:
         df = pd.read_csv(path, usecols=["logged_at", "composite_p_up"],
                          low_memory=False)
         df["composite_p_up"] = pd.to_numeric(df["composite_p_up"], errors="coerce")
-        df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True, errors="coerce")
+        # [2026-08-24] format="mixed" added (the 07-10 fetch_p_up_v2 fix,
+        # finally applied here): the hourly CSV carries two timestamp
+        # formats since ~06-26; without it every recent row coerced to NaT
+        # and this returned None forever — dead since 06-26.
+        df["logged_at"] = pd.to_datetime(df["logged_at"], utc=True,
+                                         errors="coerce", format="mixed")
         recent = df.dropna(subset=["composite_p_up", "logged_at"]).sort_values("logged_at")
         if recent.empty:
             return None
@@ -2431,9 +2440,22 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
     if _rv_ratio_15m is not None:
         print(f"  [rv_ratio] 2h/120h={_rv_ratio_15m:.4f}  (shadow only)")
 
-    # Inject composite_p_up from most recent hourly scan
+    # Inject composite_p_up from most recent hourly scan.
+    # [2026-08-24 SCOPED REVIVAL (user call "fix it" + measured deltas):
+    # the fetch's parse is FIXED (dead since 06-26) but the live value is
+    # routed to a NEW log-only key. Reactivating the old consumers
+    # measured HARMFUL on all 3 assets with backfilled cpu (07-20+ era):
+    # BTC m15-Bear rescue would add 142 trades for +$106 (noise) and the
+    # Sideways-body rescue 33 trades for −$2,452; ETH lowcpu gate would
+    # block +$171 of winners; SOL highcpu gate +$1,429 of winners. The
+    # 15m LGBMs also carry composite_p_up as a FEATURE and have served
+    # on the NaN state since 06-26 — feeding live values changes model
+    # inputs untested. So: gates + models keep the validated de-facto
+    # (None) behavior; composite_p_up_live accrues for future analysis /
+    # the ~08-30 retrain. Full reactivation = its own forward test.]
     composite_p_up = fetch_composite_p_up(asset)
-    sig["composite_p_up"] = composite_p_up  # None → neutral drift in model
+    sig["composite_p_up_live"] = composite_p_up
+    sig["composite_p_up"] = None  # consumers frozen (see above)
 
     # Markov regimes — BTC uses live_1m + yfinance; ETH/SOL use yfinance only (cached per hour)
     _markov_1h: Optional[str] = None
@@ -5904,6 +5926,7 @@ def _build_row(
         "nearest_res_dist_pct": _f(sig.get("nearest_res_dist_pct")),
         # composite / vol
         "composite_p_up":       _f(sig.get("composite_p_up")),
+        "composite_p_up_live":  _f(sig.get("composite_p_up_live")),
         "realized_vol_annual":  _f(sig.get("realized_vol_annual")),
         "vol_ratio_1h":         _f(sig.get("vol_ratio_1h"), 3),
         # 1h

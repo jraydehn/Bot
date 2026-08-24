@@ -2295,8 +2295,9 @@ with tab_15m_shadow:
                     # from display — their logic lives inside the promoted
                     # COMBO and no pending decision reads on them. Kept:
                     # g+k baseline (floor), COMBO (isolates DIP's
-                    # contribution), ★PAPER + its monitors, +knife xHdamp
-                    # (registered sizing race, pending). CSV history
+                    # contribution), ★PAPER + its monitors. +knife xHdamp
+                    # retired same day (option A+B below — its layer
+                    # re-seated on the ★PAPER base). CSV history
                     # intact — lines rebuild from masks if re-added.]
                     for _vnE, _mE, _dshE, _clrE in [
                             ("g+k (5 gates)", _okE, "dash", "#4f8bf9"),
@@ -2325,8 +2326,33 @@ with tab_15m_shadow:
                              "dot", "#7bb662"),
                             ("‹mon› −YESsdwy≥.35", _combE & _dip_okE
                              & _sdwy_okE, "dot", "#e8845b"),
-                            ("g+k +knife xHdamp", _okE & _kn_okE,
-                             "longdash", "#9aa0a6")]:
+                            # [2026-08-23 pm OPTION A+B (user call):
+                            # g+k +knife xHdamp RETIRED — dead base (its
+                            # +YESknife lineage left display) and worst
+                            # DD on the board ($5,482). The frozen SOL-
+                            # hurst layer transfers to the current stack
+                            # as a RISK TRIMMER: on every current book it
+                            # gives up ~8-12% net, cuts DD 25-32%, and
+                            # raises per-$ efficiency 6-9pp (★PAPER
+                            # $3,178→$2,393 DD, 44.4→50.3%/$). Re-seated
+                            # on the ★PAPER base so the 09-03 sizing read
+                            # compares ALL sizers on identical trades.
+                            # Params frozen from the SOL deploy — a
+                            # transfer, not a fit. The RUNNER keeps
+                            # trading plain kelly — these are display
+                            # seats only until a read wires a winner.
+                            ("‹mon› PAPER ×Hdamp", _combE & _dip_okE,
+                             "longdash", "#9aa0a6"),
+                            # Option B: composed ×INV×Hdamp — the two
+                            # sizers are near-orthogonal (model-edge vs
+                            # market-regime); window shape S 0.47 /
+                            # DD $1,282 vs flat 0.45/$3,178. WIRE
+                            # CONDITION (two-part, declared): at 09-03
+                            # BOTH parents must individually lead flat
+                            # AND the composition must lead each parent
+                            # on S+DD — else it dies with them.
+                            ("‹mon› ×INV×Hdamp", _combE & _dip_okE,
+                             "dashdot", "#5b8ee8")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",
                                         _gkE["p_market"],
@@ -2345,12 +2371,14 @@ with tab_15m_shadow:
                         _gpE = pd.Series(
                             np.where(_gwE, _gsE * (1 - _gcE) / _gcE, -_gsE)
                             - (_gsE / _gcE) * _gfE, index=_gkE.index)
-                        if _vnE == "g+k +knife xHdamp":
+                        if _vnE in ("‹mon› PAPER ×Hdamp",
+                                    "‹mon› ×INV×Hdamp"):
                             _gpE = _gpE * np.clip(
                                 (pd.to_numeric(_gkE["h_sol"],
                                                errors="coerce") - 0.4) / 0.2,
                                 0.25, 1.0).fillna(1.0)
-                        if _vnE == "‹mon› PAPER ×INVdamp":
+                        if _vnE in ("‹mon› PAPER ×INVdamp",
+                                    "‹mon› ×INV×Hdamp"):
                             _gpE = _gpE * np.where(
                                 pd.to_numeric(_gkE["edge"],
                                               errors="coerce") >= 0.09,

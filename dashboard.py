@@ -121,6 +121,8 @@ ASSET_CSV_15M = {
 EQUITY_MARKERS = {
     "SOL": [(pd.Timestamp("2026-08-25 02:15", tz="UTC"),
              "UNION→PAPER")],
+    "BTC": [(pd.Timestamp("2026-08-25 04:45", tz="UTC"),
+             "TRIPLE→PAPER")],
 }
 
 ASSET_SPOT_SOURCES = {
@@ -2567,13 +2569,13 @@ with tab_15m_shadow:
                         _fig15.add_trace(go.Scatter(
                             x=[_cfg15["start"]] + list(_Pd2["dt"]),
                             y=[0.0] + list(_Pd2["pnl"].cumsum()),
-                            name="DUAL v2+KV ★PAPER (restored 08-18)",
+                            name="DUAL v2+KV (paper pre-08-25)",
                             line=dict(color="#00c076", width=2,
                                       dash="dot")))
                         _cumd2 = _Pd2["pnl"].cumsum()
                         _ddd2 = float((_cumd2.cummax() - _cumd2).max())
                         _rows15.append({
-                            "book": "DUAL v2+KV ★PAPER (restored 08-18)",
+                            "book": "DUAL v2+KV (paper pre-08-25)",
                             "net": f"${_Pd2['pnl'].sum():+,.0f}",
                             "n": len(_Pd2),
                             "WR/BE": "—",
@@ -2690,7 +2692,7 @@ with tab_15m_shadow:
                                         _t3o_rows.append((_rr["dt"],
                                                           _rr["pnl"]))
                             for _nm3, _rw3, _dsh3 in (
-                                    ("TRIPLE dd (gk+KV+mfOUtau)",
+                                    ("TRIPLE dd ★PAPER (08-25)",
                                      _t3_rows, "solid"),
                                     ("‹mon› TRIPLE dd −opp",
                                      _t3o_rows, "dash")):

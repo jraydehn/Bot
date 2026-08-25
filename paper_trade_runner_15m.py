@@ -910,6 +910,11 @@ CSV_COLUMNS = [
     # column stays None-frozen for gates/models (see the injection-site
     # comment). Appended at END per the column-order lesson.
     "composite_p_up_live",
+    # [2026-08-25] BTC TRIPLE: explicit book tag on replica trade rows
+    # (prod / shadow / mktfav) — ends the flat-fingerprint guessing that
+    # caused the 08-13 dedup_guard fiascos. Blank on pass rows and other
+    # assets.
+    "dual_book",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -1005,16 +1010,28 @@ def append_row(row: dict, asset: str) -> None:
         # race against a concurrent live/twin append.
         if row.get("decision") == "trade" and csv_path.exists():
             try:
-                existing = pd.read_csv(csv_path,
-                                       usecols=["contract_ticker", "decision",
-                                                "side", "bet_amount",
-                                                "kelly_fraction"],
-                                       low_memory=False)
+                _guard_cols = ["contract_ticker", "decision", "side",
+                               "bet_amount", "kelly_fraction"]
+                try:
+                    existing = pd.read_csv(csv_path,
+                                           usecols=_guard_cols + ["dual_book"],
+                                           low_memory=False)
+                except ValueError:
+                    existing = pd.read_csv(csv_path, usecols=_guard_cols,
+                                           low_memory=False)
+                    existing["dual_book"] = ""
                 dup = existing[
                     (existing["decision"] == "trade")
                     & (existing["contract_ticker"] == row.get("contract_ticker"))
                     & (existing["side"] == row.get("side"))
                 ]
+                # [2026-08-25] explicit book tags end the flat-fingerprint
+                # ambiguity (shadow vs mktfav are BOTH flat $100): rows
+                # from DIFFERENT books are never duplicates.
+                _rbk = str(row.get("dual_book") or "")
+                if len(dup) > 0 and _rbk:
+                    _ebk = dup["dual_book"].fillna("").astype(str)
+                    dup = dup[(_ebk == "") | (_ebk == _rbk)]
                 # [2026-08-13] BTC DUAL replica: the prod (kelly) and
                 # mkt-fav (flat $100, kelly_fraction=0) books legitimately
                 # trade the same contract/side in the same scan — two real
@@ -3476,14 +3493,29 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     with open(_csv_path(asset)) as _fh:
                         for _r in list(_csvm.DictReader(_fh))[-300:]:
                             _tkr = _r.get("contract_ticker")
+                            _db = (_r.get("dual_book") or "").strip()
                             if _r.get("decision") == "trade":
+                                if _db == "mktfav":
+                                    _REPLICA_TRADED_MF3.add(_tkr)
+                                    continue
+                                if _db == "prod":
+                                    _REPLICA_TRADED.add(_tkr)
+                                    _REPLICA_P_TRADES.add(_tkr)
+                                    continue
+                                if _db == "shadow":
+                                    _REPLICA_TRADED_MF.add(_tkr)
+                                    continue
+                                # legacy rows (pre dual_book column)
                                 try:
                                     _isflat = (float(_r.get("bet_amount") or 0) == 100.0
                                                and float(_r.get("kelly_fraction") or 1) == 0.0)
                                 except (TypeError, ValueError):
                                     _isflat = False
-                                (_REPLICA_TRADED_MF if _isflat
-                                 else _REPLICA_TRADED).add(_tkr)
+                                if _isflat:
+                                    _REPLICA_TRADED_MF.add(_tkr)
+                                else:
+                                    _REPLICA_TRADED.add(_tkr)
+                                    _REPLICA_P_TRADES.add(_tkr)
                             else:
                                 try:
                                     if float(_r.get("raw_edge") or 0) >= 0.04:
@@ -3524,8 +3556,51 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 _blocked_edge = round(float(_repP[1]), 4)
                 _REPLICA_TRADED.add(ticker)
                 _repP = None
+            # [2026-08-25 TRIPLE PROMOTION (user call after the 79-combo
+            # sweep): THIRD ARM — mkt-fav+OUtau flat $100, de-overlapped.
+            # p' = Phi(1.8*Phi^-1(pm)) (k frozen from the 07-27 SOL fix),
+            # symmetric fee-adj edge >= 0.04, OUtau gate blocks
+            # ou_theta < 2.2243 | tau < 8.64 (frozen 08-23 deep-dive
+            # constants; NaN fails open), keep-first consumption incl.
+            # OU-blocked first looks (mirrors the tab book's dedup-then-
+            # gate order). DE-OVERLAP (declared rule, DD −30% in replay):
+            # skip contracts the P arm has traded — its own prior trades
+            # (_REPLICA_P_TRADES) or a P trade THIS scan. zdrift-extreme
+            # NO consumed without trading (arm-M convention). Rows carry
+            # dual_book='mktfav'; PAPER ONLY (excluded from the live
+            # order path pending its own go-live decision).]
+            _repT = None
+            if ticker not in _REPLICA_TRADED_MF3:
+                _pmfT = float(norm.cdf(1.8 * norm.ppf(
+                    min(max(float(p_market), 0.01), 0.99))))
+                _feeT = 0.07 * p_market * (1 - p_market)
+                _eyT = _pmfT - p_market - _feeT
+                _enT = p_market - _pmfT - _feeT
+                _sideT, _edgeT = (("yes", _eyT) if _eyT >= _enT
+                                  else ("no", _enT))
+                if _edgeT >= 0.04:
+                    try:
+                        _ouT = float(sig.get("ou_theta"))
+                        _ou_blkT = _ouT == _ouT and _ouT < 2.2243
+                    except (TypeError, ValueError):
+                        _ou_blkT = False
+                    if _ou_blkT or float(tau_min) < 8.64:
+                        _REPLICA_TRADED_MF3.add(ticker)
+                        print(f"    [replica-mktfav] OUtau BLOCK {ticker} "
+                              f"(consumed)")
+                    elif (ticker in _REPLICA_P_TRADES
+                          or (isinstance(_repP, tuple)
+                              and _repP[0] != "blocked")):
+                        _REPLICA_TRADED_MF3.add(ticker)
+                        print(f"    [replica-mktfav] de-overlap skip "
+                              f"{ticker} (P-arm trade)")
+                    elif _zdrift_extreme and _sideT == "no":
+                        _REPLICA_TRADED_MF3.add(ticker)
+                    else:
+                        _repT = (_sideT, _edgeT, 100.0)
             _wrote = False
-            for _bk, _rep in (("prod", _repP), ("shadow", _repM)):
+            for _bk, _rep in (("prod", _repP), ("shadow", _repM),
+                              ("mktfav", _repT)):
                 if _rep is None:
                     continue
                 _rside, _redge, _rstake = _rep
@@ -3542,7 +3617,8 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     p_market=p_market, p_model=p_model_yes,
                     raw_edge=round(_redge, 4), side=_rside, decision="trade",
                     sig=sig,
-                    kelly_fraction=(0.0 if _bk == "shadow" else round(
+                    kelly_fraction=(0.0 if _bk in ("shadow", "mktfav")
+                                    else round(
                         _redge / max(1 - p_market if _rside == "yes"
                                      else p_market, 0.01), 4)),
                     bet_fraction=round(_rstake / 2500.0, 4),
@@ -3550,10 +3626,18 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     liq_signal=_liq_signal, cg=_cg,
                     spread=c["ask"] - c["bid"], cvd_4h=_cvd_4h,
                     is_live=is_live, fee_est=_rfee)
+                row["dual_book"] = _bk
                 append_row(row, asset=asset)
-                (_REPLICA_TRADED_MF if _bk == "shadow"
-                 else _REPLICA_TRADED).add(ticker)
+                if _bk == "prod":
+                    _REPLICA_TRADED.add(ticker)
+                    _REPLICA_P_TRADES.add(ticker)
+                elif _bk == "shadow":
+                    _REPLICA_TRADED_MF.add(ticker)
+                else:
+                    _REPLICA_TRADED_MF3.add(ticker)
                 _wrote = True
+                if _bk == "mktfav":
+                    continue  # paper-only arm: never enters the live path
                 # [2026-08-20] LIVE ORDER PATH for the DUAL v2+KV replica
                 # (go-live infrastructure build, user-approved): the legacy
                 # Pass-3 live block is unreachable for BTC — this branch
@@ -5345,6 +5429,12 @@ _REPLICA_SEEDED: set = set()
 # first look consumes that model's claim on the contract; the other model
 # keeps its own claim — mirrors per-model keep-first books).
 _SOL_UNION_CONSUMED: dict = {"slope": set(), "old": set()}
+# [2026-08-25 BTC TRIPLE] third-arm consumption (mkt-fav+OUtau flat book:
+# trades + OUtau-blocked + zdrift-consumed first looks) and the P-arm's
+# ACTUAL trades (for the de-overlap rule — _REPLICA_TRADED conflates
+# trades with blocked-consumption, which must NOT block the mf arm).
+_REPLICA_TRADED_MF3: set = set()
+_REPLICA_P_TRADES: set = set()
 
 
 def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,

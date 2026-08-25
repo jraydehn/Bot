@@ -1884,7 +1884,8 @@ with tab_15m_shadow:
                             # the DUAL v1-OU line below (arm swap).
                             if _mfnm == "mkt-fav +OUtau":
                                 _mfav_ou_book = _qm[["contract_ticker",
-                                                    "dt", "side"]].copy()
+                                                    "dt", "side",
+                                                    "p_market"]].copy()
                                 _mfav_ou_book["pnl"] = _pm2.values
                             _fig15.add_trace(go.Scatter(
                                 x=[_cfg15["start"]] + list(_qm["dt"]),
@@ -2580,13 +2581,13 @@ with tab_15m_shadow:
                         })
                     # [2026-08-20] GO-LIVE INFRASTRUCTURE MONITORS (user
                     # build):
-                    # (a) ‹mon› DUALv2 barbell — drop mid-cost trades, keep
-                    #     cost<=0.20 | >=0.70 on both arms. The MIDDLE CUT
-                    #     is the only threshold-robust finding of the 08-20
-                    #     cost sweep (removed PnL negative in both eras at
-                    #     every boundary combo); band edges are plateau
-                    #     centers, not fitted peaks. Scored as a convexity
-                    #     book (ticket EV + carry) at 08-22/08-29.
+                    # (a) [2026-08-25 RETIRED, user call] ‹mon› DUALv2
+                    #     barbell — the 08-20 middle-cut finding did NOT
+                    #     replicate on the current layered books (applied
+                    #     to the top TRIPLE combos it collapses S 0.92→
+                    #     0.63; the MID zone is positive for all three
+                    #     arms this window). Seat given to the TRIPLE
+                    #     −opposed variant below.
                     # (b) DUAL v2+KV (fill-true) — same trades repriced at
                     #     the prices the LIVE order path actually pays
                     #     (YES: ask+1c = pm+spread/2+0.01; NO: 1-bid =
@@ -2594,7 +2595,7 @@ with tab_15m_shadow:
                     #     fill, $0). THIS is the go-live number the 08-22
                     #     read should quote.
                     try:
-                        _bb_rows, _ft_rows = [], []
+                        _ft_rows = []
                         for _armf in (_prod_gk, _sb2):
                             if not {"p_market", "win", "stake",
                                     "pnl"}.issubset(
@@ -2607,13 +2608,6 @@ with tab_15m_shadow:
                                     0.01).values if "spread" in \
                                 _armf.columns else np.full(len(_armf), 0.01)
                             _ays = (_armf["side"] == "yes").values
-                            _amc = np.where(_ays, _apm, 1 - _apm)
-                            for _dtv, _pv in zip(
-                                    _armf["dt"][(_amc <= 0.20)
-                                                | (_amc >= 0.70)],
-                                    _armf["pnl"][(_amc <= 0.20)
-                                                 | (_amc >= 0.70)]):
-                                _bb_rows.append((_dtv, _pv))
                             _cf = np.where(_ays, _apm + _asp / 2 + 0.01,
                                            1 - _apm + _asp / 2)
                             _stk = pd.to_numeric(_armf["stake"],
@@ -2628,10 +2622,8 @@ with tab_15m_shadow:
                             for _dtv, _pv in zip(_armf["dt"], _pf):
                                 _ft_rows.append((_dtv, _pv))
                         for _nm, _rw, _clr2, _dsh2 in (
-                                ("‹mon› DUALv2 barbell (≤.20|≥.70)",
-                                 _bb_rows, "#e2586e", "dash"),
                                 ("DUAL v2+KV (fill-true live px)",
-                                 _ft_rows, "#00c076", "solid")):
+                                 _ft_rows, "#00c076", "solid"),):
                             _Px = pd.DataFrame(
                                 _rw, columns=["dt", "pnl"]).sort_values("dt")
                             if not len(_Px):
@@ -2649,6 +2641,77 @@ with tab_15m_shadow:
                                 "n": len(_Px), "WR/BE": "—",
                                 "maxDD": f"${float((_cx.cummax() - _cx).max()):,.0f}",
                             })
+                    except Exception:
+                        pass
+                    # [2026-08-25 TRIPLE + OPPOSED-DODGE VARIANT (user
+                    # call — takes the retired barbell's monitor seat).
+                    # TRIPLE dd = the 08-24 sweep's discipline-compliant
+                    # architecture candidate: gk kelly + KV flat + the
+                    # mkt-fav+OUtau arm DE-OVERLAPPED (drop mf trades on
+                    # contracts gk already trades — de-overlap doctrine,
+                    # not a fitted layer). ‹mon› −opp adds the DECLARED
+                    # dodge rule: drop any leg whose contract carries an
+                    # OPPOSITE-side fire from another arm AND is mid-cost
+                    # (0.20 < cost < 0.70) — two arms disagreeing at
+                    # coin-flip prices is fee-burn (pooled evidence
+                    # n=26 legs / −$1,085, MID-opposed negative in the
+                    # zone×bucket table; tiny n → monitor only). The
+                    # OUtau arm's history is retro pre-08-23.]
+                    try:
+                        if "_mfav_ou_book" in dict(locals()):
+                            _mf3 = _mfav_ou_book[
+                                ~_mfav_ou_book["contract_ticker"].isin(
+                                    set(_prod_gk["contract_ticker"]))]
+                            _arm_maps = {
+                                _an: _adf.set_index(
+                                    "contract_ticker")["side"]
+                                for _an, _adf in
+                                [("g", _prod_gk), ("k", _sb2),
+                                 ("m", _mfav_ou_book)]}
+                            _t3_rows, _t3o_rows = [], []
+                            for _an, _adf in [("g", _prod_gk), ("k", _sb2),
+                                              ("m", _mf3)]:
+                                _apm3 = pd.to_numeric(
+                                    _adf["p_market"],
+                                    errors="coerce").values
+                                _ac3 = np.where(
+                                    _adf["side"].values == "yes",
+                                    _apm3, 1 - _apm3)
+                                for _i3, (_, _rr) in enumerate(
+                                        _adf.iterrows()):
+                                    _t3_rows.append((_rr["dt"], _rr["pnl"]))
+                                    _oppd3 = any(
+                                        _om.get(_rr["contract_ticker"])
+                                        not in (None, _rr["side"])
+                                        for _on, _om in _arm_maps.items()
+                                        if _on != _an)
+                                    if not (_oppd3 and 0.20 < _ac3[_i3]
+                                            < 0.70):
+                                        _t3o_rows.append((_rr["dt"],
+                                                          _rr["pnl"]))
+                            for _nm3, _rw3, _dsh3 in (
+                                    ("TRIPLE dd (gk+KV+mfOUtau)",
+                                     _t3_rows, "solid"),
+                                    ("‹mon› TRIPLE dd −opp",
+                                     _t3o_rows, "dash")):
+                                _Px3 = pd.DataFrame(
+                                    _rw3, columns=["dt", "pnl"]
+                                ).sort_values("dt")
+                                if not len(_Px3):
+                                    continue
+                                _fig15.add_trace(go.Scatter(
+                                    x=[_cfg15["start"]] + list(_Px3["dt"]),
+                                    y=[0.0] + list(_Px3["pnl"].cumsum()),
+                                    name=_nm3,
+                                    line=dict(color="#e2586e", width=1.5,
+                                              dash=_dsh3)))
+                                _cx3 = _Px3["pnl"].cumsum()
+                                _rows15.append({
+                                    "book": _nm3,
+                                    "net": f"${_Px3['pnl'].sum():+,.0f}",
+                                    "n": len(_Px3), "WR/BE": "—",
+                                    "maxDD": f"${float((_cx3.cummax() - _cx3).max()):,.0f}",
+                                })
                     except Exception:
                         pass
                     # [2026-08-24 DUAL v3d REPLACES v3c (user call after

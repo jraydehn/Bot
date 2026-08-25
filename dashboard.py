@@ -120,7 +120,9 @@ ASSET_CSV_15M = {
 # never needs clearing (user call: marker instead of cutoff reset).
 EQUITY_MARKERS = {
     "SOL": [(pd.Timestamp("2026-08-25 02:15", tz="UTC"),
-             "UNION→PAPER")],
+             "UNION→PAPER"),
+            (pd.Timestamp("2026-08-25 15:10", tz="UTC"),
+             "−RESC5")],
     "BTC": [(pd.Timestamp("2026-08-25 04:45", tz="UTC"),
              "TRIPLE→PAPER")],
     "ETH": [(pd.Timestamp("2026-08-25 05:30", tz="UTC"),
@@ -1717,14 +1719,18 @@ with tab_sol_shadow:
             # naive UTC wall-clock — single aware Timestamps serialize
             # differently from the (aware) data arrays; see the
             # _equity_fig marker comment.
-            _pts = pd.Timestamp("2026-08-25 02:15")
-            _figsh.add_shape(type="line", x0=_pts, x1=_pts, y0=0, y1=1,
-                             yref="paper",
-                             line=dict(color="#00c076", width=1,
-                                       dash="dash"))
-            _figsh.add_annotation(x=_pts, y=1, yref="paper", yanchor="bottom",
-                                  text="UNION→PAPER", showarrow=False,
-                                  font=dict(size=9, color="#00c076"))
+            for _mkx, _mktx in [(pd.Timestamp("2026-08-25 02:15"),
+                                 "UNION→PAPER"),
+                                (pd.Timestamp("2026-08-25 15:10"),
+                                 "−RESC5")]:
+                _figsh.add_shape(type="line", x0=_mkx, x1=_mkx, y0=0, y1=1,
+                                 yref="paper",
+                                 line=dict(color="#00c076", width=1,
+                                           dash="dash"))
+                _figsh.add_annotation(x=_mkx, y=1, yref="paper",
+                                      yanchor="bottom", text=_mktx,
+                                      showarrow=False,
+                                      font=dict(size=9, color="#00c076"))
             _figsh.update_layout(height=320, margin=dict(l=0, r=0, t=64, b=0),
                                  legend=dict(orientation="h", yanchor="bottom",
                                              y=1.02, xanchor="left", x=0))

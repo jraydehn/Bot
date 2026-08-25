@@ -1586,7 +1586,7 @@ with tab_sol_shadow:
                     if _osides.get(t)
                     == _srcS.set_index("contract_ticker")["side"].get(t)}
                 for _unm, _parts in [
-                        ("UNION dipR xH ★PAPER",
+                        ("‹mon› union retro replay",
                          [_srcS.assign(w=1.0), _uniqO.assign(w=1.0)]),
                         ("‹mon› CONV union",
                          [_srcS.assign(w=np.where(
@@ -1614,6 +1614,38 @@ with tab_sol_shadow:
                         "flat": f"${_Up.sum():+,.0f} (n={len(_U)}, DD "
                                 f"${float((_cumU.cummax() - _cumU).max()):,.0f})"})
             except (StopIteration, Exception):
+                pass
+            # [2026-08-25 user-caught: the retro union replay was mislabeled
+            # ★PAPER (+$7,202 replay vs +$747 actual same window). Fleet
+            # convention restored: ★PAPER = the ACTUAL paper book's record
+            # (CSV trades, all its real eras), ALWAYS rendered, marker at
+            # the union promotion; the retro construction races in the
+            # selector as '‹mon› union retro replay'.]
+            try:
+                _pbk = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False,
+                                   usecols=["logged_at", "decision",
+                                            "would_pnl_net"])
+                _pbk["dt"] = pd.to_datetime(_pbk["logged_at"],
+                                            errors="coerce", utc=True,
+                                            format="mixed")
+                _pbk["pnl"] = pd.to_numeric(_pbk["would_pnl_net"],
+                                            errors="coerce")
+                _pbk = _pbk[(_pbk["decision"] == "trade")
+                            & _pbk["pnl"].notna()
+                            & (_pbk["dt"] >= _SH_START)].sort_values("dt")
+                if len(_pbk):
+                    _figsh.add_trace(go.Scatter(
+                        x=_pbk["dt"], y=_pbk["pnl"].cumsum(),
+                        name="★PAPER (actual book)",
+                        line=dict(color="#00c076", width=2.5,
+                                  dash="solid")))
+                    _cpb = _pbk["pnl"].cumsum()
+                    _rows.append({
+                        "book": "★PAPER (actual book)",
+                        "flat": f"${_pbk['pnl'].sum():+,.0f} "
+                                f"(n={len(_pbk)}, DD "
+                                f"${float((_cpb.cummax() - _cpb).max()):,.0f})"})
+            except Exception:
                 pass
             # [2026-08-10] rank by the PRE-REGISTERED promotion metric:
             # pooled daily Sharpe (bucketed to 0.1 — differences inside

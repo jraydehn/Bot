@@ -2973,9 +2973,16 @@ with tab_sol_hourly_ab:
                     _hrows.append({"book": _lbl, "net": "—", "n": 0,
                                    "WR/BE": "collecting…", "maxDD": "",
                                    "pending": _pend})
-            _figab.update_layout(height=260, margin=dict(l=0, r=0, t=8, b=0),
+            # [2026-08-24 user: "graph is squished"] same failure the 15M
+            # tab hit 08-15: the retro mkv-gated lines pushed the
+            # horizontal legend to 3+ rows inside a fixed 260px figure,
+            # crushing the plot area. Same fix: legend rows grow upward
+            # into a 120px top margin; height raised so the plot area is
+            # unchanged (~260px).
+            _figab.update_layout(height=380, margin=dict(l=0, r=0, t=120, b=0),
                                  legend=dict(orientation="h", yanchor="bottom",
-                                             y=1.02, xanchor="left", x=0))
+                                             y=1.02, xanchor="left", x=0,
+                                             font=dict(size=10)))
             st.plotly_chart(_figab, use_container_width=True)
             st.dataframe(pd.DataFrame(_hrows), hide_index=True,
                          use_container_width=True,

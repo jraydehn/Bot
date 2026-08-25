@@ -915,6 +915,9 @@ CSV_COLUMNS = [
     # caused the 08-13 dedup_guard fiascos. Blank on pass rows and other
     # assets.
     "dual_book",
+    # [2026-08-25 pm] BTC daily markov regime (gk-arm mkv gate input);
+    # blank on other assets.
+    "markov_btc_daily",
 ]
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -3551,6 +3554,18 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                 if isinstance(_repM, tuple) and _repM[0] == "no":
                     _REPLICA_TRADED_MF.add(ticker)
                     _repM = None
+            # [2026-08-25 pm gk-arm mkv DAILY-SIDEWAYS GATE — see the
+            # _get_btc_daily_regime_15m docstring. gk arm ONLY (both
+            # sides, blocked-consumption); KV/mf arms ungated (their
+            # kalman/OU gates already handle chop). Fail-open on None.]
+            _btc_daily = _get_btc_daily_regime_15m()
+            sig["markov_btc_daily"] = _btc_daily or ""
+            if (_btc_daily == "Sideways"
+                    and isinstance(_repP, tuple)
+                    and _repP[0] != "blocked"):
+                print(f"    [replica-prod] mkv-Sideways BLOCK {ticker} "
+                      f"(consumed)")
+                _repP = ("blocked", _repP[1])
             _blocked_edge = 0.0
             if isinstance(_repP, tuple) and _repP[0] == "blocked":
                 _blocked_edge = round(float(_repP[1]), 4)
@@ -5436,6 +5451,57 @@ _SOL_UNION_CONSUMED: dict = {"slope": set(), "old": set()}
 _REPLICA_TRADED_MF3: set = set()
 _REPLICA_P_TRADES: set = set()
 
+# [2026-08-25 pm gk-arm mkv DAILY-SIDEWAYS GATE (user port, book #6 of the
+# frozen cross-asset rule): the gk arm ran +$16,167 in the Bull era then
+# −$2,197 in its first daily-Sideways episode (08-21+, 4/5 days negative,
+# both sides, losers scattered across ALL m1/m15 states — the intraday
+# markov gates are blind to the daily stall). KV and mf arms sail the same
+# episode (+$9 / +$490 — their kalman/OU gates ARE chop detectors) and
+# stay ungated. Rule frozen from the 08-06 validation (SOL −$1,041/48,
+# ETH −$807/42) + BTC-hourly 35/35 + model-free June −$12k. Ported from
+# paper_trade_runner._get_btc_daily_markov_regime; cached per UTC day;
+# None on any failure = gate skipped (fail-open).]
+_MKV_DAILY_CACHE: dict = {"date": None, "regime": None}
+
+
+def _get_btc_daily_regime_15m() -> "str | None":
+    global _MKV_DAILY_CACHE
+    _today = datetime.now(timezone.utc).date()
+    if _MKV_DAILY_CACHE["date"] == _today:
+        return _MKV_DAILY_CACHE["regime"]
+    try:
+        import pickle as _pkl_m
+        import yfinance as _yf_m
+        _end = pd.Timestamp.now("UTC").normalize()
+        _start = _end - pd.DateOffset(days=90)
+        _dfm = _yf_m.download("BTC-USD", start=_start.strftime("%Y-%m-%d"),
+                              end=(_end + pd.DateOffset(days=1)
+                                   ).strftime("%Y-%m-%d"),
+                              progress=False, auto_adjust=True)
+        if isinstance(_dfm.columns, pd.MultiIndex):
+            _dfm.columns = _dfm.columns.get_level_values(0)
+        _cl = _dfm["Close"].dropna()
+        if len(_cl) < 25:
+            return None
+        _lr = np.log(_cl / _cl.shift(1))
+        _rv = _lr.rolling(20, min_periods=10).std()
+        _r5 = np.log(_cl / _cl.shift(5))
+        _fe = pd.DataFrame({"log_ret": _lr, "realized_vol": _rv,
+                            "ret_5d": _r5}).dropna()
+        if len(_fe) < 10:
+            return None
+        _pay = _pkl_m.load(open(Path(__file__).parent / "results"
+                                / "hmm_3state_btc.pkl", "rb"))
+        _st = _pay["model"].predict(_fe.values)
+        _reg = _pay["state_to_name"][int(_st[-1])]
+        _MKV_DAILY_CACHE["date"] = _today
+        _MKV_DAILY_CACHE["regime"] = _reg
+        print(f"  [mkv_daily_15m] BTC daily regime = {_reg}")
+        return _reg
+    except Exception as _e_mkv:
+        print(f"  [mkv_daily_15m] fetch failed (gate skipped): {_e_mkv}")
+        return None
+
 
 def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,
                         skip_p=False, skip_m=False, p_anchor=None):
@@ -6088,6 +6154,7 @@ def _build_row(
         # composite / vol
         "composite_p_up":       _f(sig.get("composite_p_up")),
         "composite_p_up_live":  _f(sig.get("composite_p_up_live")),
+        "markov_btc_daily":     sig.get("markov_btc_daily", ""),
         "realized_vol_annual":  _f(sig.get("realized_vol_annual")),
         "vol_ratio_1h":         _f(sig.get("vol_ratio_1h"), 3),
         # 1h

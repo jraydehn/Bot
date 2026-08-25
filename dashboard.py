@@ -124,7 +124,9 @@ EQUITY_MARKERS = {
             (pd.Timestamp("2026-08-25 15:10", tz="UTC"),
              "−RESC5")],
     "BTC": [(pd.Timestamp("2026-08-25 04:45", tz="UTC"),
-             "TRIPLE→PAPER")],
+             "TRIPLE→PAPER"),
+            (pd.Timestamp("2026-08-25 21:20", tz="UTC"),
+             "gk−mkvSdwy")],
     "ETH": [(pd.Timestamp("2026-08-25 05:30", tz="UTC"),
              "COMBO+vh+oi→PAPER")],
 }
@@ -2780,7 +2782,34 @@ with tab_15m_shadow:
                                 for _an, _adf in
                                 [("g", _prod_gk), ("k", _sb2),
                                  ("m", _mfav_ou_book)]}
-                            _t3_rows, _t3o_rows = [], []
+                            # [2026-08-25 pm gk-arm mkv DAILY-SIDEWAYS
+                            # GATE ported to the runner (user call; book
+                            # #6 of the frozen rule — gk ran +$16,167
+                            # Bull-era / −$2,197 in the 08-21+ Sideways
+                            # episode while KV +$9 and mf +$490 sail it).
+                            # ★PAPER now mirrors the live book (gk legs
+                            # dropped on daily-Sideways days, regime
+                            # date-joined from the hourly book's logged
+                            # column, fail-open); '‹mon› TRIPLE no-mkv'
+                            # keeps the ungated composition racing as
+                            # the WITHOUT comparison (user call).]
+                            _mkv_dates = set()
+                            try:
+                                _hrg = pd.read_csv(
+                                    ASSET_CSV["BTC"],
+                                    usecols=["logged_at",
+                                             "markov_regime_daily"],
+                                    low_memory=False)
+                                _hrg["d"] = pd.to_datetime(
+                                    _hrg["logged_at"], errors="coerce",
+                                    utc=True, format="mixed").dt.date
+                                _sdw = _hrg[
+                                    _hrg["markov_regime_daily"].astype(str)
+                                    == "Sideways"]
+                                _mkv_dates = set(_sdw["d"].dropna())
+                            except Exception:
+                                pass
+                            _t3_rows, _t3o_rows, _t3raw_rows = [], [], []
                             for _an, _adf in [("g", _prod_gk), ("k", _sb2),
                                               ("m", _mf3)]:
                                 _apm3 = pd.to_numeric(
@@ -2791,6 +2820,11 @@ with tab_15m_shadow:
                                     _apm3, 1 - _apm3)
                                 for _i3, (_, _rr) in enumerate(
                                         _adf.iterrows()):
+                                    _t3raw_rows.append((_rr["dt"],
+                                                        _rr["pnl"]))
+                                    if (_an == "g" and _rr["dt"].date()
+                                            in _mkv_dates):
+                                        continue
                                     _t3_rows.append((_rr["dt"], _rr["pnl"]))
                                     _oppd3 = any(
                                         _om.get(_rr["contract_ticker"])
@@ -2802,10 +2836,12 @@ with tab_15m_shadow:
                                         _t3o_rows.append((_rr["dt"],
                                                           _rr["pnl"]))
                             for _nm3, _rw3, _dsh3 in (
-                                    ("TRIPLE dd ★PAPER (08-25)",
+                                    ("TRIPLE dd ★PAPER (+mkv 08-25)",
                                      _t3_rows, "solid"),
                                     ("‹mon› TRIPLE dd −opp",
-                                     _t3o_rows, "dash")):
+                                     _t3o_rows, "dash"),
+                                    ("‹mon› TRIPLE no-mkv",
+                                     _t3raw_rows, "dot")):
                                 _Px3 = pd.DataFrame(
                                     _rw3, columns=["dt", "pnl"]
                                 ).sort_values("dt")

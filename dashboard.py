@@ -3211,6 +3211,18 @@ with tab_sol_hourly_ab:
                     _hrows.append({"book": _lbl, "net": "—", "n": 0,
                                    "WR/BE": "collecting…", "maxDD": "",
                                    "pending": _pend})
+            # [2026-08-25] eth_hourly_fav 3-leg/event cap marker (naive
+            # UTC wall-clock per the marker-serialization lesson).
+            if _aname == "ETH":
+                _fcap = pd.Timestamp("2026-08-25 07:15")
+                _figab.add_shape(type="line", x0=_fcap, x1=_fcap,
+                                 y0=0, y1=1, yref="paper",
+                                 line=dict(color="#f0a500", width=1,
+                                           dash="dash"))
+                _figab.add_annotation(x=_fcap, y=1, yref="paper",
+                                      yanchor="bottom", text="fav 3-leg cap",
+                                      showarrow=False,
+                                      font=dict(size=9, color="#f0a500"))
             # [2026-08-24 user: "graph is squished"] same failure the 15M
             # tab hit 08-15: the retro mkv-gated lines pushed the
             # horizontal legend to 3+ rows inside a fixed 260px figure,

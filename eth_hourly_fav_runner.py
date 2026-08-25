@@ -152,6 +152,21 @@ def main() -> None:
                 hits = hits[~hits["contract_ticker"].isin(traded)]
                 hits = hits.sort_values("dt").drop_duplicates("contract_ticker", keep="first")
                 for _, r in hits.iterrows():
+                    # [2026-08-25 3-LEG/EVENT CAP (user call after the
+                    # fire-rate investigation): the low-vol stall regime
+                    # quadrupled band density — archive legs/event went
+                    # 1.5-4.9 (validation eras) → 7.7 → 14.4, so the
+                    # book was carrying $1,100-1,700 of CORRELATED
+                    # exposure per event (08-24: four 11-14-leg baskets
+                    # = −$926) and 48% of legs sat at pm>=0.93 netting
+                    # ~$0. Cap = first 3 qualifying legs per event
+                    # (keep-first), restoring the validated-era shape.
+                    # Skipped legs are NOT consumed (cap stays binding).]
+                    _ev = str(r["contract_ticker"]).rsplit("-", 1)[0]
+                    _ev_n = sum(1 for _t in traded
+                                if _t.startswith(_ev + "-"))
+                    if _ev_n >= 3:
+                        continue
                     # [2026-08-19] fee-aware fill cap (user directive): anchor
                     # to the SIGNAL price, not the band cap. At fill=pm+1c the
                     # 0.93+ buckets no longer clear the fee-inclusive breakeven

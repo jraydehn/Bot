@@ -1352,7 +1352,15 @@ with tab_sol_shadow:
                     & (_vw45q >= 0.07).fillna(False)
                     & (_q["dt"] >= pd.Timestamp("2026-08-18 04:27",
                                                 tz="UTC")), bool)
-                _rescY = _rescY | _resc5
+                # [2026-08-25 ~15:10 UTC RESC-5 UNWIRED from the runner
+                # (user call) — the live-timing mask bounds R5 to its
+                # actually-wired window so paper-mirroring lines match
+                # the book; the RETRO monitor keeps R5 accruing
+                # unbounded ("saved for replay later").]
+                _resc5_live = _resc5 & np.asarray(
+                    _q["dt"] < pd.Timestamp("2026-08-25 15:10", tz="UTC"),
+                    bool)
+                _rescY = _rescY | _resc5_live
                 _v2_ok = _v2_base | _rescY
                 _off_ok = _off_base | _rescY
                 _mkv_ok = _mkv_base | _rescY

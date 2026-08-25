@@ -5635,8 +5635,13 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
                 # a SOL rescue in June; not repeating it). Paper sizing
                 # conventions apply (kelly + hurst damp). Revert at 08-25
                 # if either referee stream goes negative.
-                _vw45 = _fv("d45_vwap_dist")
-                _zs = sig.get("z_spot_6h_live")
+                # [2026-08-25 RESC-5 UNWIRED (user call): referee stream
+                # negative since the 08-18 wire (~−$360/10 incl. the
+                # post-union fires) and never earned its seat. RESC-2
+                # (dip-tightened) is the only live rescue. RESC-5 keeps
+                # accruing as a REPLAY stream on the SHADOW tab's retro
+                # monitor (z_spot_6h_live logs since 08-21) for a
+                # possible later re-wire on forward evidence.]
                 # [2026-08-23 DIP TIGHTENING, user-approved] RESC-2 now
                 # requires an ACTUAL dip: stoch_k_5m <= 30 (natural
                 # oversold constant, nothing swept). The 08-22 chop run
@@ -5649,9 +5654,7 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
                 _sk5r = _fv("stoch_k_5m")
                 _r2 = (zd is not None and zd < 0.59
                        and _sk5r is not None and _sk5r <= 30)
-                _r5 = (_zs is not None and _zs < -1.0
-                       and _vw45 is not None and _vw45 >= 0.07)
-                if _r2 or _r5:
+                if _r2:
                     kel = (p - pm - fee) / (1 - pm)
                     stake = round(2500.0 * max(0.0, min(kel, 0.10)), 2)
                     _h = _fv("hurst_exponent_5m")

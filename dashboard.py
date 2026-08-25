@@ -125,7 +125,7 @@ EQUITY_MARKERS = {
              "−RESC5")],
     "BTC": [(pd.Timestamp("2026-08-25 04:45", tz="UTC"),
              "TRIPLE→PAPER"),
-            (pd.Timestamp("2026-08-25 21:20", tz="UTC"),
+            (pd.Timestamp("2026-08-25 22:10", tz="UTC"),
              "gk−mkvSdwy")],
     "ETH": [(pd.Timestamp("2026-08-25 05:30", tz="UTC"),
              "COMBO+vh+oi→PAPER")],

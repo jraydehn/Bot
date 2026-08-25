@@ -123,6 +123,8 @@ EQUITY_MARKERS = {
              "UNION→PAPER")],
     "BTC": [(pd.Timestamp("2026-08-25 04:45", tz="UTC"),
              "TRIPLE→PAPER")],
+    "ETH": [(pd.Timestamp("2026-08-25 05:30", tz="UTC"),
+             "COMBO+vh+oi→PAPER")],
 }
 
 ASSET_SPOT_SOURCES = {
@@ -729,7 +731,17 @@ def render_asset(asset: str, csv_key: str = None, spot_asset: str = None, label:
                     _is_dt = pd.api.types.is_datetime64_any_dtype(_xs)
                     for _mts, _mtxt in EQUITY_MARKERS.get(
                             (asset or "").upper(), []):
-                        _mx = _mts if _is_dt else str(_mts)
+                        # [2026-08-25 user-caught] markers are stored UTC
+                        # but this chart's axis is tz-converted (LA) —
+                        # plotly does NOT re-frame aware timestamps, so a
+                        # UTC marker rendered ~7h ahead. Convert into the
+                        # axis's own tz (or naive-UTC on naive axes).
+                        if _is_dt and getattr(_xs.dt, "tz", None) is not None:
+                            _mx = _mts.tz_convert(_xs.dt.tz)
+                        elif _is_dt:
+                            _mx = _mts.tz_convert("UTC").tz_localize(None)
+                        else:
+                            _mx = str(_mts)
                         fig.add_shape(type="line", x0=_mx, x1=_mx,
                                       y0=0, y1=1, yref="paper",
                                       line=dict(color="#bbbbbb", width=1,
@@ -2397,15 +2409,25 @@ with tab_15m_shadow:
                     # retired same day (option A+B below — its layer
                     # re-seated on the ★PAPER base). CSV history
                     # intact — lines rebuild from masks if re-added.]
+                    # [2026-08-25 ETH PAPER PROMOTION (user call after the
+                    # 65-combo reliability sweep + stance analysis):
+                    # ★PAPER = COMBO+vh+oi — the only 3/3-segment-positive
+                    # book (S 1.00/0.55/0.35 sized; flat +$15,205 at 72%
+                    # per-$ vs old paper's 40%). DIP leaves the gate chain
+                    # (trailed forward); its stance survives as the
+                    # ×DIPconv sizing dial (declared ×0.5 on objection —
+                    # full-window keep/object split is clean but W3
+                    # INVERTED, so monitor only). ALL sizer monitors
+                    # rebased to the new paper base; unified read 09-03.]
+                    _newbaseE = _combE & _vh_okE & _oi_okE
                     for _vnE, _mE, _dshE, _clrE in [
                             ("g+k (5 gates)", _okE, "dash", "#4f8bf9"),
                             ("g+k COMBO", _combE, "solid", "#b57edc"),
-                            ("COMBO+DIP ★PAPER", _combE & _dip_okE,
+                            ("COMBO+DIP (paper pre-08-25)",
+                             _combE & _dip_okE, "dot", "#00c076"),
+                            ("COMBO+vh+oi ★PAPER (08-25)", _newbaseE,
                              "solid", "#00c076"),
-                            ("‹mon› DIP +volhot",
-                             _combE & _dip_okE & _vh_okE, "dot", "#ff7eb6"),
-                            ("‹mon› DIP +oidrop",
-                             _combE & _dip_okE & _oi_okE, "dot", "#c49c48"),
+                            ("‹mon› ×DIPconv", _newbaseE, "dot", "#ff7eb6"),
                             # [2026-08-20 ‹mon› ×INVdamp — pre-declared,
                             # user build] ETH 15m conviction is INVERTED
                             # at the top: hi-edge tercile WR 21%/20% and
@@ -2420,9 +2442,9 @@ with tab_15m_shadow:
                             # sizing A/B vs ★PAPER (identical trades);
                             # score ~09-03 vs plain paper and xHdamp;
                             # wire only if it leads.
-                            ("‹mon› PAPER ×INVdamp", _combE & _dip_okE,
+                            ("‹mon› PAPER ×INVdamp", _newbaseE,
                              "dot", "#7bb662"),
-                            ("‹mon› −YESsdwy≥.35", _combE & _dip_okE
+                            ("‹mon› −YESsdwy≥.35", _newbaseE
                              & _sdwy_okE, "dot", "#e8845b"),
                             # [2026-08-23 pm OPTION A+B (user call):
                             # g+k +knife xHdamp RETIRED — dead base (its
@@ -2439,7 +2461,7 @@ with tab_15m_shadow:
                             # transfer, not a fit. The RUNNER keeps
                             # trading plain kelly — these are display
                             # seats only until a read wires a winner.
-                            ("‹mon› PAPER ×Hdamp", _combE & _dip_okE,
+                            ("‹mon› PAPER ×Hdamp", _newbaseE,
                              "longdash", "#9aa0a6"),
                             # Option B: composed ×INV×Hdamp — the two
                             # sizers are near-orthogonal (model-edge vs
@@ -2449,7 +2471,7 @@ with tab_15m_shadow:
                             # BOTH parents must individually lead flat
                             # AND the composition must lead each parent
                             # on S+DD — else it dies with them.
-                            ("‹mon› ×INV×Hdamp", _combE & _dip_okE,
+                            ("‹mon› ×INV×Hdamp", _newbaseE,
                              "dashdot", "#5b8ee8")]:
                         _gkE = _q[np.asarray(_mE, bool)].copy()
                         _gcE = np.where(_gkE["side"] == "yes",
@@ -2475,6 +2497,10 @@ with tab_15m_shadow:
                                 (pd.to_numeric(_gkE["h_sol"],
                                                errors="coerce") - 0.4) / 0.2,
                                 0.25, 1.0).fillna(1.0)
+                        if _vnE == "‹mon› ×DIPconv":
+                            _gpE = _gpE * np.where(
+                                np.asarray(_dip_okE, bool)[
+                                    np.asarray(_mE, bool)], 1.0, 0.5)
                         if _vnE in ("‹mon› PAPER ×INVdamp",
                                     "‹mon› ×INV×Hdamp"):
                             _gpE = _gpE * np.where(

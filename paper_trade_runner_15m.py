@@ -5720,21 +5720,26 @@ def _replica_decide(asset, p_model, p_market, sig, offset_pct, ticker):
         # sk5=0.00 (deeply oversold) became 50 and the >=44 gate blocked
         # a 19:1 winner (+$4,942 missed). _fv already defaults None/NaN
         # and PRESERVES legitimate zeros; the extra `or` is the bug.]
-        # [2026-08-18 DIP PACKAGE — ETH exhaustive gate search (7,227
-        # rules incl. bar-reconstructed families), user-wired same day.
-        # Mechanism: the combo book is a dip-buyer — it loses chasing
-        # non-dips and catching 1h-scale knives. knife1h (bp_1h<0.11,
-        # either side) is a different knife lens than YESknife's chg_1h
-        # (8/29 trade overlap). Both halves split-consistent pre/post
-        # 08-12; kept book day-bootstrap P=0.99 vs raw combo. Thresholds
-        # MINED on the window — 08-25 read is the first forward test;
-        # revert clause standard. Fail-open on missing values.]
-        bp1 = _fv("bp_1h")
-        if bp1 is not None and bp1 < 0.11:
+        # [2026-08-25 ETH PAPER = COMBO+vh+oi (user promotion after the
+        # 65-combo reliability sweep). DIP PACKAGE REMOVED from the gate
+        # chain (its 08-18 mined thresholds trailed forward; its stance
+        # lives on as the ‹mon› ×DIPconv sizing dial on the tab — the
+        # keep/object split partitions dead weight full-window but
+        # inverted in W3, so it races to the unified 09-03 read).
+        # ADDED (the only 3/3-segment-positive book in the field: W-nets
+        # +$2,851/+$2,960/+$853 sized, +$15,205 flat, per-$ 72.0% vs the
+        # old paper book's 40.0%):
+        #   * volhot: block BOTH sides when garch_sur_1h >= -0.0848
+        #     (post-heavy realized-vs-forecast vol; fail-open on NaN)
+        #   * oidrop: block YES when d15_oi_chg_pct < -0.036 (fail-open)
+        # Sizing stays plain kelly — the sizer family (INVdamp/Hdamp/
+        # ×IxH/DIPconv) races as monitors to the 09-03 read intact.]
+        _gs1 = _fv("garch_sur_1h")
+        if _gs1 is not None and _gs1 >= -0.0848:
             return blocked
         if side == "yes":
-            chg15 = _fv("chg_15m")
-            if chg15 is not None and chg15 >= -0.0345:
+            _oid = _fv("d15_oi_chg_pct")
+            if _oid is not None and _oid < -0.036:
                 return blocked
             if sk5 >= 44:
                 return blocked

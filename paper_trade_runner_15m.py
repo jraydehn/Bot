@@ -3333,17 +3333,28 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
                     import csv as _csvm
                     with open(_csv_path(asset)) as _fh:
                         for _r in list(_csvm.DictReader(_fh))[-300:]:
-                            _consumed = _r.get("decision") == "trade"
-                            if not _consumed:
+                            _is_trade = _r.get("decision") == "trade"
+                            _edge_pass = False
+                            if not _is_trade:
                                 # gate-blocked first-qualifying scans are
                                 # logged as pass with raw_edge >= 0.04
                                 try:
-                                    _consumed = float(
+                                    _edge_pass = float(
                                         _r.get("raw_edge") or 0) >= 0.04
                                 except (TypeError, ValueError):
                                     pass
-                            if _consumed:
-                                _REPLICA_TRADED.add(_r.get("contract_ticker"))
+                            _tkr_s = _r.get("contract_ticker")
+                            if _is_trade:
+                                _REPLICA_TRADED.add(_tkr_s)
+                            elif _edge_pass:
+                                if _akey == "SOL":
+                                    # union restart-seed: per-model block
+                                    # attribution isn't logged — consume
+                                    # for BOTH legs (conservative).
+                                    _SOL_UNION_CONSUMED["slope"].add(_tkr_s)
+                                    _SOL_UNION_CONSUMED["old"].add(_tkr_s)
+                                else:
+                                    _REPLICA_TRADED.add(_tkr_s)
                 except Exception:
                     pass
             # [2026-08-12] the A/B companion stream (p_gbdt) must keep
@@ -3352,17 +3363,65 @@ def run_scan(auth: Optional[KalshiAuth], bankroll: float, asset: str = "BTC",
             # promotion: p_gbdt went blank on SOL/ETH rows).
             sig["p_gbdt"] = _lgbm_shadows.get(ticker, "")
             _rep = None
-            if ticker not in _REPLICA_TRADED:
-                _rep = _replica_decide(asset, p_model_no, p_market, sig,
-                                       offset_pct, ticker)
             _blocked_edge = 0.0
-            if isinstance(_rep, tuple) and _rep[0] == "blocked":
-                # shadow dedup is keep="first" over edge-qualifying scans:
-                # a gate-blocked first look consumes the contract; later
-                # re-qualifying scans must not trade.
-                _blocked_edge = round(float(_rep[1]), 4)
-                _REPLICA_TRADED.add(ticker)
-                _rep = None
+            if _akey == "SOL":
+                # [2026-08-24 UNION PROMOTION (user call, same-day as the
+                # combo sweep): the paper book = UNION of both model
+                # streams, ONE position per contract, slope evaluated
+                # first each scan, old model covers contracts slope
+                # doesn't fire on (+$1,700/80 unique adds in the replay;
+                # union S 0.64 vs slope-solo 0.49). Resolves the seat
+                # flip-flop by architecture — both models trade, priority
+                # only arbitrates shared contracts ($229 total effect).
+                # Consumption: shared TRADE set (one position ever) +
+                # per-model blocked-consumption (a gate-blocked first
+                # look consumes that MODEL's claim only — mirrors the
+                # per-model keep-first books the replay validated).
+                # Gates/rescues/sizing unchanged: both legs run the full
+                # _replica_decide SOL branch (stack + RESC-2 dip +
+                # cheap-ticket + xHdamp kelly). p_model on the logged row
+                # = the FIRING model's value (the 'deciding' convention);
+                # p_sol_old/p_sol_slope streams keep their meanings.]
+                _legs = []
+                _slp_val = _lgbm_shadows.get(ticker)
+                try:
+                    _slp_val = float(_slp_val)
+                except (TypeError, ValueError):
+                    _slp_val = None
+                if _slp_val is not None:
+                    _legs.append((_slp_val, "slope"))
+                _legs.append((float(p_model_no), "old"))
+                _fired_p = None
+                if ticker not in _REPLICA_TRADED:
+                    for _up, _um in _legs:
+                        if ticker in _SOL_UNION_CONSUMED[_um]:
+                            continue
+                        _r2 = _replica_decide(asset, _up, p_market, sig,
+                                              offset_pct, ticker)
+                        if isinstance(_r2, tuple) and _r2[0] == "blocked":
+                            _SOL_UNION_CONSUMED[_um].add(ticker)
+                            _blocked_edge = round(float(_r2[1]), 4)
+                            print(f"    [union-{_um}] gate-block consumed "
+                                  f"{ticker}")
+                            continue
+                        if _r2 is not None:
+                            _rep = _r2
+                            _fired_p = _up
+                            print(f"    [union-{_um}] fires {ticker}")
+                            break
+                if _rep is not None and _fired_p is not None:
+                    p_model_no = _fired_p
+            else:
+                if ticker not in _REPLICA_TRADED:
+                    _rep = _replica_decide(asset, p_model_no, p_market, sig,
+                                           offset_pct, ticker)
+                if isinstance(_rep, tuple) and _rep[0] == "blocked":
+                    # shadow dedup is keep="first" over edge-qualifying
+                    # scans: a gate-blocked first look consumes the
+                    # contract; later re-qualifying scans must not trade.
+                    _blocked_edge = round(float(_rep[1]), 4)
+                    _REPLICA_TRADED.add(ticker)
+                    _rep = None
             if _rep is None:
                 row = _build_row(
                     asset=asset, decision_time=decision_time, ticker=ticker,
@@ -5282,6 +5341,10 @@ def _z_spot_6h_live(asset, spot, now_ts):
 _REPLICA_TRADED: set = set()
 _REPLICA_TRADED_MF: set = set()   # BTC mkt-fav book's own consumption set
 _REPLICA_SEEDED: set = set()
+# [2026-08-24 SOL UNION] per-model blocked-consumption sets (a gate-blocked
+# first look consumes that model's claim on the contract; the other model
+# keeps its own claim — mirrors per-model keep-first books).
+_SOL_UNION_CONSUMED: dict = {"slope": set(), "old": set()}
 
 
 def _replica_decide_btc(p_yes, p_market, sig, offset_pct, liq_score,

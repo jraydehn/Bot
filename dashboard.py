@@ -115,6 +115,14 @@ ASSET_CSV_15M = {
     "SOL": RESULTS_DIR / "paper_trades_sol15m.csv",
 }
 
+# [2026-08-25] equity-curve implementation markers — vertical dashed lines
+# on the per-asset equity charts marking strategy changes, so display data
+# never needs clearing (user call: marker instead of cutoff reset).
+EQUITY_MARKERS = {
+    "SOL": [(pd.Timestamp("2026-08-25 02:15", tz="UTC"),
+             "UNION→PAPER")],
+}
+
 ASSET_SPOT_SOURCES = {
     "BTC": [
         ("coinbase", "https://api.coinbase.com/v2/prices/BTC-USD/spot",      lambda r: float(r.json()["data"]["amount"])),
@@ -711,6 +719,25 @@ def render_asset(asset: str, csv_key: str = None, spot_asset: str = None, label:
                         borderpad=4,
                         showarrow=False,
                     ))
+                # [2026-08-25] implementation markers (EQUITY_MARKERS):
+                # dashed vline + tag where a strategy change went live —
+                # replaces the clear-the-display-cutoff practice.
+                try:
+                    _xs = d["logged_at"]
+                    _is_dt = pd.api.types.is_datetime64_any_dtype(_xs)
+                    for _mts, _mtxt in EQUITY_MARKERS.get(
+                            (asset or "").upper(), []):
+                        _mx = _mts if _is_dt else str(_mts)
+                        fig.add_shape(type="line", x0=_mx, x1=_mx,
+                                      y0=0, y1=1, yref="paper",
+                                      line=dict(color="#bbbbbb", width=1,
+                                                dash="dash"))
+                        annotations.append(dict(
+                            x=_mx, y=1, yref="paper", yanchor="bottom",
+                            text=_mtxt, showarrow=False,
+                            font=dict(size=9, color="#bbbbbb")))
+                except Exception:
+                    pass
                 fig.update_layout(
                     xaxis_title=None, yaxis_title="Cumul. P&L ($)", height=height,
                     margin=dict(l=0, r=0, t=10, b=0),
@@ -1126,6 +1153,7 @@ with tab_sol_shadow:
             _era_rows = []
             _traces = []
             _famdaily = {}
+            _union_src = {}   # [2026-08-25] per-model dipRESC×H books → UNION
 
             def _kbook(_qq, _col):
                 """Kelly-sized book: pnl series + maxDD ($2500 flat, cap 10%)."""
@@ -1373,7 +1401,7 @@ with tab_sol_shadow:
                         # [2026-08-18] ★PAPER: xHdamp sizing promoted into
                         # the SOL paper replica (user override of the 08-25
                         # confirm; revert clause active).
-                        ("gk +SW xHdamp ★PAPER", _v2_ok & _mkv_ok & _zd_ok65
+                        ("gk +SW xHdamp (paper pre-08-25)", _v2_ok & _mkv_ok & _zd_ok65
                          & _off_ok
                          & np.where(_q["side"] == "no",
                                     ~((_q["pm_path_drift"]
@@ -1435,7 +1463,7 @@ with tab_sol_shadow:
                     # SOL. Needs 15d of window history => multiplier is 1.0
                     # until ~08-14 on this tab: identical to vrM+zd65 till
                     # then, diverges only on live forward data.
-                    if _vn in ("gk +SW xHdamp ★PAPER", "‹mon› PAPER dipRESC (retro)") and len(_vq):
+                    if _vn in ("gk +SW xHdamp (paper pre-08-25)", "‹mon› PAPER dipRESC (retro)") and len(_vq):
                         _hmul = np.clip(
                             (pd.to_numeric(_vq["hurst_exponent_5m"],
                                            errors="coerce") - 0.4) / 0.2,
@@ -1443,6 +1471,12 @@ with tab_sol_shadow:
                         _vp = _vp * _hmul
                         _cumh = _vp.cumsum()
                         _vdd = float((_cumh.cummax() - _cumh).max())
+                        # [2026-08-25] per-model dipRESC×H book feeds the
+                        # UNION ★PAPER composition below.
+                        if _vn == "‹mon› PAPER dipRESC (retro)":
+                            _union_src[_lbl] = _vq[
+                                ["dt", "contract_ticker", "side"]
+                            ].assign(pnl=_vp.values)
                     if _vn == "gk combo+damp" and len(_vq):
                         _dser = _vp.groupby(_vq["dt"].dt.floor("D")).sum()
                         _dmul = {}
@@ -1504,6 +1538,52 @@ with tab_sol_shadow:
                     except Exception:
                         pass
                 _rows.append(_r)
+            # [2026-08-25 UNION ★PAPER (user promotion, commit follows the
+            # 08-24 combo sweep): one position per contract across BOTH
+            # model streams on the dipRESC×H stack — slope priority, old
+            # covers the 80 contracts slope skips (+$1,700 unique adds).
+            # Replay: UNION S 0.64 vs slope-solo 0.49; resolves the seat
+            # flip-flop by architecture. ‹mon› CONV union = declared
+            # sizing variant (×1.0 where both models co-fire same side,
+            # ×0.5 solo fires) — best DD/era3 shape, monitor only.
+            # History on these lines is the retro replay construction;
+            # the runner trades the union live from ~08-25 02:15 UTC
+            # (chart marker; display data NOT cleared per user call).]
+            try:
+                _srcO = next(v for k, v in _union_src.items()
+                             if k.startswith("old"))
+                _srcS = next(v for k, v in _union_src.items()
+                             if k.startswith("slope"))
+                _sset = set(_srcS["contract_ticker"])
+                _uniqO = _srcO[~_srcO["contract_ticker"].isin(_sset)]
+                _osides = _srcO.set_index("contract_ticker")["side"]
+                _agreeU = {
+                    t for t in (_sset & set(_srcO["contract_ticker"]))
+                    if _osides.get(t)
+                    == _srcS.set_index("contract_ticker")["side"].get(t)}
+                for _unm, _parts in [
+                        ("UNION dipR xH ★PAPER",
+                         [_srcS.assign(w=1.0), _uniqO.assign(w=1.0)]),
+                        ("‹mon› CONV union",
+                         [_srcS.assign(w=np.where(
+                             _srcS["contract_ticker"].isin(_agreeU),
+                             1.0, 0.5)),
+                          _uniqO.assign(w=0.5)])]:
+                    _U = pd.concat(_parts).sort_values("dt")
+                    _Up = _U["pnl"] * _U["w"]
+                    _traces.append((_unm, _U["dt"], _Up.cumsum(),
+                                    _unm, dict(color="#00c076", width=2,
+                                               dash="solid"
+                                               if "★" in _unm else "dot")))
+                    _famdaily[_unm] = [
+                        _Up.groupby(_U["dt"].dt.floor("D")).sum()]
+                    _cumU = _Up.cumsum()
+                    _rows.append({
+                        "book": _unm,
+                        "flat": f"${_Up.sum():+,.0f} (n={len(_U)}, DD "
+                                f"${float((_cumU.cummax() - _cumU).max()):,.0f})"})
+            except (StopIteration, Exception):
+                pass
             # [2026-08-10] rank by the PRE-REGISTERED promotion metric:
             # pooled daily Sharpe (bucketed to 0.1 — differences inside
             # ~1/sqrt(n_days) are noise) with maxDD as tiebreak. User call:
@@ -1543,6 +1623,16 @@ with tab_sol_shadow:
                 if _fam in _fams:
                     _figsh.add_trace(go.Scatter(x=_x, y=_y, name=_nm,
                                                 line=_ln))
+            # [2026-08-25] UNION promotion marker — display data kept
+            # (user call: marker instead of a cutoff clear).
+            _pts = pd.Timestamp("2026-08-25 02:15", tz="UTC")
+            _figsh.add_shape(type="line", x0=_pts, x1=_pts, y0=0, y1=1,
+                             yref="paper",
+                             line=dict(color="#00c076", width=1,
+                                       dash="dash"))
+            _figsh.add_annotation(x=_pts, y=1, yref="paper", yanchor="bottom",
+                                  text="UNION→PAPER", showarrow=False,
+                                  font=dict(size=9, color="#00c076"))
             _figsh.update_layout(height=320, margin=dict(l=0, r=0, t=64, b=0),
                                  legend=dict(orientation="h", yanchor="bottom",
                                              y=1.02, xanchor="left", x=0))

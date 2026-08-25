@@ -1335,10 +1335,28 @@ with tab_sol_shadow:
                 _rescY = _resc_core & np.asarray(
                     (_q["dt"] < pd.Timestamp("2026-08-23 04:20", tz="UTC"))
                     | _dipq, bool)
+                # [2026-08-25 RESC-5 added to the replay (user-caught
+                # monitor-vs-paper gap since the union promotion: 3 live
+                # RESC-5 rescues were invisible here — the replay's
+                # disclosed gap). z_spot_6h_live logs since 08-21, so the
+                # rescue is replayable from then; missing values stay
+                # rescue-false (fail-closed, matches the runner).]
+                _zsq = pd.to_numeric(_q.get("z_spot_6h_live"),
+                                     errors="coerce")
+                _vw45q = pd.to_numeric(_q.get("d45_vwap_dist"),
+                                       errors="coerce")
+                _resc5 = np.asarray(
+                    (_q["side"] == "yes")
+                    & ~(_q["sol_persist_score"] >= 3).fillna(False)
+                    & (_zsq < -1.0).fillna(False)
+                    & (_vw45q >= 0.07).fillna(False)
+                    & (_q["dt"] >= pd.Timestamp("2026-08-18 04:27",
+                                                tz="UTC")), bool)
+                _rescY = _rescY | _resc5
                 _v2_ok = _v2_base | _rescY
                 _off_ok = _off_base | _rescY
                 _mkv_ok = _mkv_base | _rescY
-                _rescY_R = _resc_core & np.asarray(_dipq, bool)
+                _rescY_R = (_resc_core & np.asarray(_dipq, bool)) | _resc5
                 _v2R = _v2_base | _rescY_R
                 _offR = _off_base | _rescY_R
                 _mkvR = _mkv_base | _rescY_R

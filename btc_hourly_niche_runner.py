@@ -120,6 +120,28 @@ def resolve_pending(arch: pd.DataFrame) -> None:
     res_map = (arch.dropna(subset=["resolved_yes"])
                .drop_duplicates("contract_ticker", keep="last")
                .set_index("contract_ticker")["resolved_yes"].to_dict())
+    # [2026-08-25 STALE-PENDING FALLBACK (user-caught: 4 filled ETH fav
+    # trades stuck >12h): a resolution landing while the runner is down or
+    # after the row scrolls out of the archive TAIL window was unreachable
+    # forever (2MB tail ~= a few hours on the fast archives). Targeted
+    # chunked full-archive lookup for ONLY the still-missing pending
+    # tickers; self-clears once the book is clean.]
+    _missing = {book.at[_i, "contract_ticker"] for _i in book[pend].index
+                if book.at[_i, "contract_ticker"] not in res_map}
+    if _missing:
+        try:
+            for _fch in pd.read_csv(ARCHIVE,
+                                    usecols=["contract_ticker",
+                                             "resolved_yes"],
+                                    chunksize=500_000, low_memory=False,
+                                    on_bad_lines="skip"):
+                _fhit = _fch[_fch["contract_ticker"].isin(_missing)
+                             & _fch["resolved_yes"].notna()]
+                for _ft, _frv in zip(_fhit["contract_ticker"],
+                                     _fhit["resolved_yes"]):
+                    res_map[_ft] = _frv
+        except Exception:
+            pass
     changed = 0
     for i in book[pend].index:
         rv = res_map.get(book.at[i, "contract_ticker"])

@@ -190,6 +190,25 @@ def main() -> None:
                 res = (d.dropna(subset=["resolved_yes"])
                        .drop_duplicates("contract_ticker", keep="last")
                        .set_index("contract_ticker")["resolved_yes"].to_dict())
+                _missing = {bk.at[_i, "contract_ticker"]
+                            for _i in bk[pend].index
+                            if bk.at[_i, "contract_ticker"] not in res}
+                if _missing:  # [2026-08-25 stale-pending fallback — see fav runners]
+                    try:
+                        for _fch in pd.read_csv(ARCHIVE,
+                                                usecols=["contract_ticker",
+                                                         "resolved_yes"],
+                                                chunksize=500_000,
+                                                low_memory=False,
+                                                on_bad_lines="skip"):
+                            _fhit = _fch[
+                                _fch["contract_ticker"].isin(_missing)
+                                & _fch["resolved_yes"].notna()]
+                            for _ft, _frv in zip(_fhit["contract_ticker"],
+                                                 _fhit["resolved_yes"]):
+                                res[_ft] = _frv
+                    except Exception:
+                        pass
                 ch = 0
                 for i in bk[pend].index:
                     rv = res.get(bk.at[i, "contract_ticker"])

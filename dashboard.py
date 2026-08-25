@@ -1220,8 +1220,8 @@ with tab_sol_shadow:
             # p_sol_old / p_sol_slope never change meaning. The ★DECIDING
             # tag marks whichever currently drives the paper book.
             for _lbl, _col, _clr in [
-                    ("old model ★DECIDING", "p_sol_old", "#4f8bf9"),
-                    ("slope model", "p_sol_slope", "#f0a500")]:
+                    ("old model (union arm)", "p_sol_old", "#4f8bf9"),
+                    ("slope model (union pri)", "p_sol_slope", "#f0a500")]:
                 _s = _sh.dropna(subset=[_col]).copy()
                 _fee = 0.07 * _s["p_market"] * (1 - _s["p_market"])
                 _ey = _s[_col] - _s["p_market"] - _fee
@@ -1595,10 +1595,17 @@ with tab_sol_shadow:
                           _uniqO.assign(w=0.5)])]:
                     _U = pd.concat(_parts).sort_values("dt")
                     _Up = _U["pnl"] * _U["w"]
-                    _traces.append((_unm, _U["dt"], _Up.cumsum(),
-                                    _unm, dict(color="#00c076", width=2,
-                                               dash="solid"
-                                               if "★" in _unm else "dot")))
+                    # [2026-08-25 user-caught] the ★PAPER book must ALWAYS
+                    # render — not hide behind the top-2 family selector.
+                    if "★" in _unm:
+                        _figsh.add_trace(go.Scatter(
+                            x=_U["dt"], y=_Up.cumsum(), name=_unm,
+                            line=dict(color="#00c076", width=2,
+                                      dash="solid")))
+                    else:
+                        _traces.append((_unm, _U["dt"], _Up.cumsum(),
+                                        _unm, dict(color="#00c076",
+                                                   width=2, dash="dot")))
                     _famdaily[_unm] = [
                         _Up.groupby(_U["dt"].dt.floor("D")).sum()]
                     _cumU = _Up.cumsum()

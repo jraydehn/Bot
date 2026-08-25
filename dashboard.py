@@ -3012,6 +3012,50 @@ with tab_sol_hourly_ab:
                             "n": len(_gq2), "WR/BE": "—",
                             "maxDD": f"${_maxdd(_gq2['pnl']):,.0f}",
                             "pending": ""})
+                    # [2026-08-25 ‹mon› hb-gates — the deep gate analysis
+                    # package (user-approved monitor): the production book
+                    # is a uniform bleeder (−$8,716/584 since 07-12, no
+                    # keep-carve exists — 1 noise-rate survivor in 5,700
+                    # tests) so the package cuts bleed:
+                    #   G1 NO & pm>=0.60 (fade-favorites; native find,
+                    #      −$4,002/110, avg −$36/tr, 3/3 eras)
+                    #   G2 body_15m<0.42 (weak-body, FROZEN from the BTC
+                    #      15m watch item; −$4,312/170, 3/3 eras; hourly
+                    #      plateau SMOOTH 0.30-0.55 unlike 15m's cliff;
+                    #      3rd book in the weak-body family w/ ETH)
+                    #   G3 YES & |offset|<0.025 (near-strike, FROZEN from
+                    #      15m gate #1; −$697/11, 3/3 eras)
+                    # Package: blocks 255/584 worth −$7,439 (pT=0.000,
+                    # 6/7 wks); kept −$8,716→−$1,277, S −0.59→−0.15, E3
+                    # positive. Bleed-cut only — the model itself stays
+                    # weak (July-inversion story; retrain/niche own the
+                    # real fix). Retro display; forward read ~09-03.
+                    try:
+                        _hbody = pd.to_numeric(_pq.get("body_15m"),
+                                               errors="coerce").fillna(1.0)
+                        _hoff = pd.to_numeric(_pq.get("offset_pct"),
+                                              errors="coerce")
+                        _hyes = _pq["side"] == "yes"
+                        _hblk = (((~_hyes) & (_pq["p_market"] >= 0.60))
+                                 | (_hbody < 0.42)
+                                 | (_hyes & (_hoff.abs() < 0.025)
+                                    ).fillna(False))
+                        _gq3 = _pq[~np.asarray(_hblk, bool)
+                                   & np.asarray(_mkvb != "Sideways", bool)]
+                        if len(_gq3):
+                            _figab.add_trace(go.Scatter(
+                                x=_gq3["dt"], y=_gq3["pnl"].cumsum(),
+                                name="‹mon› production hb-gates+mkv",
+                                line=dict(color="#4f8bf9", width=1.5,
+                                          dash="longdash")))
+                            _hrows.append({
+                                "book": "‹mon› production hb-gates+mkv",
+                                "net": f"${_gq3['pnl'].sum():+,.0f}",
+                                "n": len(_gq3), "WR/BE": "—",
+                                "maxDD": f"${_maxdd(_gq3['pnl']):,.0f}",
+                                "pending": ""})
+                    except Exception:
+                        pass
                 _hrows.insert(0, {"book": "production",
                     "net": f"${_pq['pnl'].sum():+,.0f}", "n": len(_pq),
                     "WR/BE": f"{_prw.mean():.0%}/{np.mean(_prc):.0%}",

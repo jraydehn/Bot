@@ -731,13 +731,19 @@ def render_asset(asset: str, csv_key: str = None, spot_asset: str = None, label:
                     _is_dt = pd.api.types.is_datetime64_any_dtype(_xs)
                     for _mts, _mtxt in EQUITY_MARKERS.get(
                             (asset or "").upper(), []):
-                        # [2026-08-25 user-caught] markers are stored UTC
-                        # but this chart's axis is tz-converted (LA) —
-                        # plotly does NOT re-frame aware timestamps, so a
-                        # UTC marker rendered ~7h ahead. Convert into the
-                        # axis's own tz (or naive-UTC on naive axes).
+                        # [2026-08-25 user-caught, twice] markers are
+                        # stored UTC; this chart's axis is LA. Plotly
+                        # serializes tz-aware datetime ARRAYS as naive
+                        # wall-clock, but a single aware Timestamp in
+                        # add_shape keeps its offset and plotly.js
+                        # re-interprets it — the marker landed at the
+                        # UTC wall-clock position (~7h ahead, "start of
+                        # Aug 25"). Fix: pass markers as NAIVE wall-clock
+                        # in the axis's own timezone, matching exactly
+                        # how the data serializes.
                         if _is_dt and getattr(_xs.dt, "tz", None) is not None:
-                            _mx = _mts.tz_convert(_xs.dt.tz)
+                            _mx = _mts.tz_convert(
+                                _xs.dt.tz).tz_localize(None)
                         elif _is_dt:
                             _mx = _mts.tz_convert("UTC").tz_localize(None)
                         else:
@@ -1639,7 +1645,10 @@ with tab_sol_shadow:
                                                 line=_ln))
             # [2026-08-25] UNION promotion marker — display data kept
             # (user call: marker instead of a cutoff clear).
-            _pts = pd.Timestamp("2026-08-25 02:15", tz="UTC")
+            # naive UTC wall-clock — single aware Timestamps serialize
+            # differently from the (aware) data arrays; see the
+            # _equity_fig marker comment.
+            _pts = pd.Timestamp("2026-08-25 02:15")
             _figsh.add_shape(type="line", x0=_pts, x1=_pts, y0=0, y1=1,
                              yref="paper",
                              line=dict(color="#00c076", width=1,

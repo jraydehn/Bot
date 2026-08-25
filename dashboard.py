@@ -696,7 +696,7 @@ def render_asset(asset: str, csv_key: str = None, spot_asset: str = None, label:
         if resolved.empty:
             st.markdown("<p style='color:#555;padding:20px 0;'>No resolved trades yet.</p>", unsafe_allow_html=True)
         else:
-            def _equity_fig(data: pd.DataFrame, color: str, fillcolor: str, label: str = "", height: int = 260) -> go.Figure:
+            def _equity_fig(data: pd.DataFrame, color: str, fillcolor: str, label: str = "", height: int = 260, markers: bool = False) -> go.Figure:
                 d = data.sort_values("logged_at").copy()
                 d["cum_pnl"] = d["would_pnl_num"].cumsum()
                 fig = go.Figure()
@@ -729,8 +729,12 @@ def render_asset(asset: str, csv_key: str = None, spot_asset: str = None, label:
                 try:
                     _xs = d["logged_at"]
                     _is_dt = pd.api.types.is_datetime64_any_dtype(_xs)
-                    for _mts, _mtxt in EQUITY_MARKERS.get(
-                            (asset or "").upper(), []):
+                    # [2026-08-25 user call] markers mark 15m-model
+                    # promotions — draw them ONLY on the 15m chart
+                    # (markers=True), never on the combined/hourly
+                    # charts whose models did not change.
+                    for _mts, _mtxt in (EQUITY_MARKERS.get(
+                            (asset or "").upper(), []) if markers else []):
                         # [2026-08-25 user-caught, twice] markers are
                         # stored UTC; this chart's axis is LA. Plotly
                         # serializes tz-aware datetime ARRAYS as naive
@@ -796,7 +800,7 @@ def render_asset(asset: str, csv_key: str = None, spot_asset: str = None, label:
                         f"{wr:.0%} WR  "
                         f"{'+'if pnl>=0 else ''}${pnl:,.0f}"
                     )
-                    st.plotly_chart(_equity_fig(sub, color, fillc, label=chart_label, height=220), use_container_width=True)
+                    st.plotly_chart(_equity_fig(sub, color, fillc, label=chart_label, height=220, markers=(tf == "15m")), use_container_width=True)
 
     # ── Trade log ───────────────────────────────────────────────────────────
     with t1:

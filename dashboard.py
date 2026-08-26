@@ -1685,6 +1685,77 @@ with tab_sol_shadow:
                                 f"${float((_cpb.cummax() - _cpb).max()):,.0f})"})
             except Exception:
                 pass
+            # [2026-08-25 pm SOL STALENESS MONITOR (user call — the
+            # "slope adapts" discussion): frozen models + live wrappers
+            # need a TRIGGER for deliberate retrains. Three tells,
+            # DECLARED thresholds, rolling 3 days on the ACTUAL book:
+            #   T1 agreement-loss: co-fired-trade PnL < −$500 (both
+            #      models agreeing on losers = family staleness — the
+            #      08-24/25 signature, 15/20 losers co-fired)
+            #   T2 fire-rate drift: trades/day <50% or >200% of the
+            #      7.8/day window baseline (silent-death AND 4x-fav
+            #      failure modes both covered)
+            #   T3 edge realization: 3d WR minus breakeven WR < −10pp
+            # ≥2 tells → STALENESS TRIGGER banner (convene retrain).
+            # Plus the DD TRIPWIRE: cumulative PnL from the 08-25 02:15
+            # promotion marker below −$1,469 (one historical maxDD).]
+            try:
+                _smb = pd.read_csv(ASSET_CSV_15M["SOL"], low_memory=False,
+                                   usecols=["logged_at", "decision",
+                                            "contract_ticker", "side",
+                                            "p_market", "would_win",
+                                            "would_pnl_net", "p_sol_old",
+                                            "p_sol_slope"])
+                _smb["dt"] = pd.to_datetime(_smb["logged_at"],
+                                            errors="coerce", utc=True,
+                                            format="mixed")
+                _smt = _smb[(_smb["decision"] == "trade")
+                            & _smb["dt"].notna()].copy()
+                for _c in ["would_pnl_net", "p_market", "p_sol_old",
+                           "p_sol_slope"]:
+                    _smt[_c] = pd.to_numeric(_smt[_c], errors="coerce")
+                _smt = _smt[_smt["would_pnl_net"].notna()]
+                _now = _smt["dt"].max()
+                _r3 = _smt[_smt["dt"] >= _now - pd.Timedelta("3D")]
+                _tells = []
+                _ag = _r3[((_r3["p_sol_old"] - _r3["p_market"])
+                           * (_r3["p_sol_slope"] - _r3["p_market"])) > 0]
+                _t1v = float(_ag["would_pnl_net"].sum())
+                if _t1v < -500:
+                    _tells.append(f"T1 agree-loss ${_t1v:+,.0f}")
+                _fr = len(_r3) / 3.0
+                if _fr < 0.5 * 7.8 or _fr > 2.0 * 7.8:
+                    _tells.append(f"T2 fire-rate {_fr:.1f}/d vs 7.8")
+                _w3 = _r3["would_win"].astype(str).str.lower(
+                    ).isin(["true", "1", "1.0"])
+                _c3 = np.where(_r3["side"] == "yes", _r3["p_market"],
+                               1 - _r3["p_market"])
+                if len(_r3) >= 10 and float(_w3.mean() - np.mean(_c3))                         < -0.10:
+                    _tells.append(
+                        f"T3 WR-BE {100*(float(_w3.mean())-float(np.mean(_c3))):+.0f}pp")
+                _pp = _smt[_smt["dt"] >= pd.Timestamp("2026-08-25 02:15",
+                                                      tz="UTC")]
+                _ppc = float(_pp["would_pnl_net"].sum())
+                _trip = _ppc < -1469
+                if len(_tells) >= 2 or _trip:
+                    st.markdown(
+                        f"<div style='background:#5c1a1a;color:#ffb3b3;"
+                        f"padding:8px 12px;border-radius:6px;font-size:"
+                        f"0.85rem;'>&#9888; SOL STALENESS TRIGGER — "
+                        f"{'; '.join(_tells) or 'DD tripwire'}"
+                        f"{' | DD trip: $%+.0f from marker' % _ppc if _trip else ''}"
+                        f" &rarr; convene the retrain/replacement "
+                        f"decision (tracker 08-25).</div>",
+                        unsafe_allow_html=True)
+                else:
+                    st.markdown(
+                        f"<div style='color:#6a6;font-size:0.75rem;'>"
+                        f"staleness monitor: {len(_tells)}/3 tells "
+                        f"(T1 ${_t1v:+,.0f} | T2 {_fr:.1f}/d | post-promo "
+                        f"${_ppc:+,.0f} vs −$1,469 tripwire)</div>",
+                        unsafe_allow_html=True)
+            except Exception:
+                pass
             # [2026-08-10] rank by the PRE-REGISTERED promotion metric:
             # pooled daily Sharpe (bucketed to 0.1 — differences inside
             # ~1/sqrt(n_days) are noise) with maxDD as tiebreak. User call:

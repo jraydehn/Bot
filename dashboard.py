@@ -1615,15 +1615,23 @@ with tab_sol_shadow:
                     t for t in (_sset & set(_srcO["contract_ticker"]))
                     if _osides.get(t)
                     == _srcS.set_index("contract_ticker")["side"].get(t)}
+                # [2026-08-25 pm user-caught AGAIN: the full-window retro
+                # offset kept reading as "paper much worse" even after
+                # post-unwire parity became PERFECT (8/8 trades to the
+                # dollar). Replay monitors now RE-ANCHOR to $0 at the
+                # promotion marker — only the honestly-comparable
+                # post-promotion segment is drawn.]
+                _panchor = pd.Timestamp("2026-08-25 02:15", tz="UTC")
                 for _unm, _parts in [
-                        ("‹mon› union retro replay",
+                        ("‹mon› union replay (post-promo)",
                          [_srcS.assign(w=1.0), _uniqO.assign(w=1.0)]),
-                        ("‹mon› CONV union",
+                        ("‹mon› CONV union (post-promo)",
                          [_srcS.assign(w=np.where(
                              _srcS["contract_ticker"].isin(_agreeU),
                              1.0, 0.5)),
                           _uniqO.assign(w=0.5)])]:
                     _U = pd.concat(_parts).sort_values("dt")
+                    _U = _U[_U["dt"] >= _panchor]
                     _Up = _U["pnl"] * _U["w"]
                     # [2026-08-25 user-caught] the ★PAPER book must ALWAYS
                     # render — not hide behind the top-2 family selector.

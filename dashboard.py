@@ -1705,7 +1705,8 @@ with tab_sol_shadow:
                                             "contract_ticker", "side",
                                             "p_market", "would_win",
                                             "would_pnl_net", "p_sol_old",
-                                            "p_sol_slope"])
+                                            "p_sol_slope", "spot",
+                                            "realized_vol_annual"])
                 _smb["dt"] = pd.to_datetime(_smb["logged_at"],
                                             errors="coerce", utc=True,
                                             format="mixed")
@@ -1718,6 +1719,43 @@ with tab_sol_shadow:
                 _now = _smt["dt"].max()
                 _r3 = _smt[_smt["dt"] >= _now - pd.Timedelta("3D")]
                 _tells = []
+                # [2026-08-25 pm T0 INPUT-DRIFT (user insight: level/vol
+                # shifts are detectable BEFORE losses — the BTC-niche
+                # death mode; T1-T3 need damage to accrue). Training
+                # envelope = ALL SCAN rows <= 07-29 (both models'
+                # cutoff): 3d-median realized_vol outside the training
+                # [q05, q95] band OR 3d-median spot outside training
+                # [min x0.97, max x1.03]. T0 alone -> amber watch; it
+                # also counts toward the >=2 red threshold.]
+                try:
+                    _sma = _smb[_smb["dt"].notna()].copy()
+                    for _c0 in ["spot", "realized_vol_annual"]:
+                        _sma[_c0] = pd.to_numeric(_sma[_c0],
+                                                  errors="coerce")
+                    _trn = _sma[_sma["dt"]
+                                <= pd.Timestamp("2026-07-29", tz="UTC")]
+                    _rv_lo, _rv_hi = _trn["realized_vol_annual"].quantile(
+                        [0.05, 0.95])
+                    _sp_lo = float(_trn["spot"].min()) * 0.97
+                    _sp_hi = float(_trn["spot"].max()) * 1.03
+                    _l3 = _sma[_sma["dt"] >= _now - pd.Timedelta("3D")]
+                    _rv_m = float(_l3["realized_vol_annual"].median())
+                    _sp_m = float(_l3["spot"].median())
+                    _t0_bits = []
+                    if not (_rv_lo <= _rv_m <= _rv_hi):
+                        _t0_bits.append(
+                            f"rv {_rv_m:.2f} vs [{_rv_lo:.2f},{_rv_hi:.2f}]")
+                    if not (_sp_lo <= _sp_m <= _sp_hi):
+                        _t0_bits.append(
+                            f"spot {_sp_m:.0f} vs [{_sp_lo:.0f},{_sp_hi:.0f}]")
+                    if _t0_bits:
+                        _tells.append("T0 input-drift " + "; ".join(_t0_bits))
+                    _t0_status = ("OUTSIDE: " + "; ".join(_t0_bits)
+                                  if _t0_bits else
+                                  f"in-envelope (rv {_rv_m:.2f}, "
+                                  f"spot {_sp_m:.0f})")
+                except Exception:
+                    _t0_status = "n/a"
                 _ag = _r3[((_r3["p_sol_old"] - _r3["p_market"])
                            * (_r3["p_sol_slope"] - _r3["p_market"])) > 0]
                 _t1v = float(_ag["would_pnl_net"].sum())
@@ -1737,6 +1775,16 @@ with tab_sol_shadow:
                                                       tz="UTC")]
                 _ppc = float(_pp["would_pnl_net"].sum())
                 _trip = _ppc < -1469
+                _t0_only = (len(_tells) == 1
+                            and _tells[0].startswith("T0"))
+                if _t0_only and not _trip:
+                    st.markdown(
+                        f"<div style='background:#4a3c10;color:#ffd77a;"
+                        f"padding:6px 12px;border-radius:6px;font-size:"
+                        f"0.8rem;'>&#9888; T0 input-drift: tape outside "
+                        f"the models' training envelope ({_t0_status}) — "
+                        f"no outcome damage yet; watch T1-T3.</div>",
+                        unsafe_allow_html=True)
                 if len(_tells) >= 2 or _trip:
                     st.markdown(
                         f"<div style='background:#5c1a1a;color:#ffb3b3;"
@@ -1751,7 +1799,8 @@ with tab_sol_shadow:
                     st.markdown(
                         f"<div style='color:#6a6;font-size:0.75rem;'>"
                         f"staleness monitor: {len(_tells)}/3 tells "
-                        f"(T1 ${_t1v:+,.0f} | T2 {_fr:.1f}/d | post-promo "
+                        f"(T0 {_t0_status} | T1 ${_t1v:+,.0f} | "
+                        f"T2 {_fr:.1f}/d | post-promo "
                         f"${_ppc:+,.0f} vs −$1,469 tripwire)</div>",
                         unsafe_allow_html=True)
             except Exception:
